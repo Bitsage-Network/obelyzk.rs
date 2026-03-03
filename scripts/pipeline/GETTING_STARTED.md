@@ -35,7 +35,7 @@ cd stwo-ml/scripts/pipeline
 ./run_e2e.sh --preset phi3-mini --gpu --dry-run
 ```
 
-This does everything: installs drivers, downloads the model, tests it, captures inference logs, generates a proof, verifies it locally, and runs an audit.
+This does everything: installs drivers, downloads the model, tokenizes a mathematical prompt, captures real inference logs through the proved forward pass, generates a ZK proof, verifies it locally, and runs an audit.
 
 During setup, you'll be prompted for your email. This links your device to your [marketplace dashboard](https://marketplace.bitsage.network) where you can view all your proofs and audit reports. If you don't have an account yet, sign up at `marketplace.bitsage.network/signup` with the same email after the pipeline completes.
 
@@ -183,8 +183,11 @@ Use `INFERENCE_TIMEOUT_SEC` (default `900`) to control prompt/benchmark timeout.
 **What it does:** Runs the model through the prover's forward pass (`execute_forward_pass()`) and records each inference in a chain-linked log. This is the same code path the audit verifier checks, ensuring the log is genuine. The capture step is mandatory before proving/auditing.
 
 ```bash
-# Default: 10 forward passes through the prover
+# Default: 3 forward passes with diverse random input
 ./02b_capture_inference.sh
+
+# Real text prompt — tokenizes, extracts embedding, proves real inference
+./02b_capture_inference.sh --prompt "Derive the eigenvalues of the 3x3 rotation matrix"
 
 # Fewer captures (faster, for testing)
 ./02b_capture_inference.sh --count 5
@@ -192,6 +195,16 @@ Use `INFERENCE_TIMEOUT_SEC` (default `900`) to control prompt/benchmark timeout.
 # Specify layers (for partial model capture)
 ./02b_capture_inference.sh --layers 1
 ```
+
+**Using `--prompt`:** When you pass `--prompt "text"`, the binary:
+1. Loads `tokenizer.json` from the model directory
+2. Tokenizes the prompt and takes the last token ID
+3. Extracts that token's embedding row directly from the SafeTensors weight file (~40 KB, not the full ~3 GB table)
+4. Uses that real embedding as input for all forward passes
+
+The proof then covers a real transformer computation on real data — not random numbers. The M31 output is modular arithmetic and cannot be decoded to text (text decoding is a future release).
+
+When using `run_e2e.sh --submit`, a default mathematical prompt is set automatically. Use `--no-prompt` to disable this and use random input instead.
 
 The log is saved to `~/.obelysk/logs/<model_name>/` and contains:
 - `meta.json` — session metadata (model ID, weight commitment)
@@ -376,7 +389,15 @@ The script will:
 ./run_e2e.sh --preset phi3-mini --gpu --dry-run
 
 # Full pipeline with zero-config on-chain verification (Sepolia)
+# Automatically uses a complex mathematical prompt for real tokenized inference
 ./run_e2e.sh --preset qwen3-14b --gpu --submit
+
+# Custom prompt — prove real inference on your own text
+./run_e2e.sh --preset qwen3-14b --gpu --submit \
+  --prompt "Prove that for any prime p > 2, the Legendre symbol (a/p) satisfies Euler's criterion: a^((p-1)/2) ≡ (a/p) mod p"
+
+# Random input (disable default prompt)
+./run_e2e.sh --preset qwen3-14b --gpu --submit --no-prompt
 
 # Legacy v1 sequential openings path
 ./run_e2e.sh --preset qwen3-14b --gpu --submit --legacy-gkr-v1

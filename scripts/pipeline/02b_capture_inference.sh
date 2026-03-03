@@ -30,6 +30,7 @@ NUM_LAYERS=""
 CAPTURE_COUNT=3
 MODEL_ID="0x1"
 INPUT_FILE=""
+PROMPT=""
 SKIP_COMMITMENT=true   # Legacy packed commitment not used by GKR pipeline; use --no-skip-commitment to force
 SKIP_BUILD=false
 LOG_DIR_OVERRIDE=""
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
         --count)            CAPTURE_COUNT="$2"; shift 2 ;;
         --model-id)         MODEL_ID="$2"; shift 2 ;;
         --input)            INPUT_FILE="$2"; shift 2 ;;
+        --prompt)           PROMPT="$2"; shift 2 ;;
         --skip-commitment)  SKIP_COMMITMENT=true; shift ;;
         --no-skip-commitment) SKIP_COMMITMENT=false; shift ;;
         --skip-build)       SKIP_BUILD=true; shift ;;
@@ -63,6 +65,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --count N            Number of forward passes to capture (default: 3)"
             echo "  --model-id ID        Model ID for log metadata (default: 0x1)"
             echo "  --input FILE         JSON input file (default: diverse generated inputs)"
+            echo "  --prompt TEXT        Tokenize text and use real embedding as input"
             echo "  --skip-commitment    Skip weight commitment (faster, weaker audit)"
             echo "  --skip-build         Skip rebuilding prove-model"
             echo "  --log-dir DIR        Override log directory"
@@ -150,6 +153,7 @@ log "Model:          ${MODEL_NAME:-$(basename "$MODEL_DIR")}"
 log "Model dir:      ${MODEL_DIR}"
 log "Layers:         ${MODEL_LAYERS:-all}"
 log "Count:          ${CAPTURE_COUNT}"
+log "Input:          $(if [[ -n "$PROMPT" ]]; then echo "prompt: \"${PROMPT:0:60}$([ ${#PROMPT} -gt 60 ] && echo '...')\""; elif [[ -n "$INPUT_FILE" ]]; then echo "file: $INPUT_FILE"; else echo "random (diverse)"; fi)"
 log "Log dir:        ${LOG_DIR}"
 log "prove-model:    ${PROVE_BIN}"
 echo ""
@@ -171,6 +175,8 @@ fi
 
 if [[ -n "$INPUT_FILE" ]]; then
     CAPTURE_CMD+=("--input" "$INPUT_FILE")
+elif [[ -n "$PROMPT" ]]; then
+    CAPTURE_CMD+=("--prompt" "$PROMPT")
 fi
 
 if [[ "$SKIP_COMMITMENT" == "true" ]]; then
@@ -271,13 +277,18 @@ echo ""
 
 ELAPSED=$(timer_elapsed "capture")
 
-save_state "capture_state.env" \
-    "CAPTURE_COMPLETED=true" \
-    "AUDIT_LOG_DIR=${LOG_DIR}" \
-    "CAPTURE_COUNT=${CAPTURED_COUNT:-${LOG_LINES}}" \
-    "CAPTURE_MODEL=${CAPTURED_MODEL:-${MODEL_NAME:-$(basename "$MODEL_DIR")}}" \
-    "CAPTURE_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+_CAPTURE_STATE_ARGS=(
+    "CAPTURE_COMPLETED=true"
+    "AUDIT_LOG_DIR=${LOG_DIR}"
+    "CAPTURE_COUNT=${CAPTURED_COUNT:-${LOG_LINES}}"
+    "CAPTURE_MODEL=${CAPTURED_MODEL:-${MODEL_NAME:-$(basename "$MODEL_DIR")}}"
+    "CAPTURE_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     "CAPTURE_DURATION_SEC=${ELAPSED}"
+)
+if [[ -n "$PROMPT" ]]; then
+    _CAPTURE_STATE_ARGS+=("CAPTURE_PROMPT=${PROMPT}")
+fi
+save_state "capture_state.env" "${_CAPTURE_STATE_ARGS[@]}"
 
 # ─── Summary ─────────────────────────────────────────────────────────
 

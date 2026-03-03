@@ -37,6 +37,7 @@ RESUME_FROM=""
 HF_TOKEN_ARG=""
 MAX_FEE="0.05"
 MODEL_ID="0x1"
+PROMPT=""
 FORCE_PAYMASTER=false
 FORCE_NO_PAYMASTER=false
 GKR_V2=false
@@ -44,6 +45,10 @@ GKR_V3=false
 GKR_V4=false
 GKR_V2_MODE="auto"  # auto|sequential|batched|mode2|mode3
 LEGACY_GKR_V1=false
+
+# Default prompt for --submit: a complex mathematical question that exercises
+# real transformer reasoning through the proved forward pass.
+DEFAULT_PROMPT="Derive the closed-form solution to the Fibonacci recurrence F(n) = F(n-1) + F(n-2) using eigendecomposition of the companion matrix [[1,1],[1,0]], then prove that lim(F(n+1)/F(n)) converges to the golden ratio phi = (1+sqrt(5))/2 and express F(n) exactly via Binet's formula."
 
 # Passthrough arrays for sub-scripts
 SETUP_ARGS=()
@@ -76,6 +81,8 @@ while [[ $# -gt 0 ]]; do
         --hf-token)        HF_TOKEN_ARG="$2"; shift 2 ;;
         --max-fee)         MAX_FEE="$2"; shift 2 ;;
         --model-id)        MODEL_ID="$2"; shift 2 ;;
+        --prompt)          PROMPT="$2"; shift 2 ;;
+        --no-prompt)       PROMPT="__none__"; shift ;;
         --gkr-v2)          GKR_V2=true; shift ;;
         --gkr-v3)          GKR_V3=true; shift ;;
         --gkr-v4)          GKR_V4=true; shift ;;
@@ -102,6 +109,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-inference     Skip inference testing"
             echo "  --validate-test-proof  Run optional 1-layer validation proof (debug only)"
             echo "  --no-audit           Skip inference audit (audit is on by default)"
+            echo "  --prompt TEXT        Text prompt for real tokenized inference (auto-set with --submit)"
+            echo "  --no-prompt          Disable default prompt (use random input even with --submit)"
             echo "  --resume-from STEP   Resume from: model, validate, inference, capture, prove, verify, audit"
             echo "  --paymaster          Force AVNU paymaster (gasless, sponsored)"
             echo "  --no-paymaster       Force legacy sncast submission (you pay gas)"
@@ -232,6 +241,16 @@ if [[ "$DO_SUBMIT" == "true" ]] && [[ "$MODE" == "gkr" ]]; then
 fi
 
 # Legacy v2/v3/v4 flag compatibility
+# --submit auto-sets a real mathematical prompt for tokenized inference
+# unless the user explicitly passed --no-prompt or --prompt.
+if [[ "$DO_SUBMIT" == "true" ]] && [[ -z "$PROMPT" ]]; then
+    PROMPT="$DEFAULT_PROMPT"
+    log "--submit: using default mathematical prompt for real tokenized inference"
+fi
+if [[ "$PROMPT" == "__none__" ]]; then
+    PROMPT=""
+fi
+
 if [[ "$USE_AGGREGATED_SUBMIT" != "true" ]]; then
     if [[ "$DO_SUBMIT" == "true" ]] && [[ "$GKR_V3" == "true" ]] && [[ "$(to_lower "$GKR_V2_MODE")" == "auto" ]] && [[ "$LEGACY_GKR_V1" != "true" ]]; then
         warn "--submit + --gkr-v3 with auto mode: defaulting to mode2 trustless binding."
@@ -260,6 +279,7 @@ mkdir -p "$RUN_DIR"
 log "Run ID:      ${RUN_ID}"
 log "Model:       ${PRESET:-${HF_MODEL}}"
 log "Mode:        ${MODE}"
+log "Prompt:      $(if [[ -n "$PROMPT" ]]; then echo "\"${PROMPT:0:70}$([ ${#PROMPT} -gt 70 ] && echo '...')\""; else echo "(random input)"; fi)"
 log "GPU:         ${DO_GPU} (multi: ${DO_MULTI_GPU})"
 log "GPU only:    ${DO_GPU_ONLY}"
 log "Aggregated:  ${USE_AGGREGATED_SUBMIT:-false}"
@@ -420,6 +440,7 @@ if (( START_IDX <= 4 )); then
     _CAPTURE_ARGS=()
     [[ -n "$LAYERS" ]] && _CAPTURE_ARGS+=("--layers" "$LAYERS")
     [[ -n "$MODEL_ID" ]] && _CAPTURE_ARGS+=("--model-id" "$MODEL_ID")
+    [[ -n "$PROMPT" ]] && _CAPTURE_ARGS+=("--prompt" "$PROMPT")
 
     run_step "Inference Capture" "$CURRENT" "$TOTAL_STEPS" \
         bash "${SCRIPT_DIR}/02b_capture_inference.sh" ${_CAPTURE_ARGS[@]+"${_CAPTURE_ARGS[@]}"} || exit 1
@@ -547,12 +568,20 @@ with open('${_PROOF_DIR}/verify_receipt.json') as f:
 fi
 
 # Save run state
+_PROMPT_JSON="null"
+if [[ -n "$PROMPT" ]]; then
+    # Escape double quotes and backslashes for JSON
+    _PROMPT_ESCAPED=$(printf '%s' "$PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    _PROMPT_JSON="\"${_PROMPT_ESCAPED}\""
+fi
+
 cat > "${RUN_DIR}/run_summary.json" << RUNEOF
 {
     "run_id": "${RUN_ID}",
     "preset": "${PRESET:-}",
     "hf_model": "${HF_MODEL:-}",
     "mode": "${MODE}",
+    "prompt": ${_PROMPT_JSON},
     "layers": "${LAYERS:-all}",
     "gpu": ${DO_GPU},
     "submitted": ${DO_SUBMIT},
