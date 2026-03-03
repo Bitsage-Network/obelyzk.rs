@@ -567,10 +567,23 @@ async function executeViaPaymaster(account, calls) {
   const feeDetails = { feeMode: { mode: "sponsored" } };
 
   info("Estimating paymaster fee...");
-  const estimation = await account.estimatePaymasterTransactionFee(
-    callsArray,
-    feeDetails
-  );
+  let estimation;
+  try {
+    estimation = await account.estimatePaymasterTransactionFee(
+      callsArray,
+      feeDetails
+    );
+  } catch (estErr) {
+    const errMsg = estErr.message || String(estErr);
+    // Decode hex felt252 short strings for readability
+    const decoded = decodeStarknetFelts(errMsg);
+    info(`  Paymaster fee estimation failed: ${decoded.slice(0, 500)}`);
+    // Surface the entrypoint and calldata size for debugging
+    for (const c of callsArray) {
+      info(`  entrypoint: ${c.entrypoint}, calldata_len: ${c.calldata?.length ?? '?'}`);
+    }
+    throw new Error(`Paymaster fee estimation failed: ${decoded.slice(0, 300)}`);
+  }
   if (!estimation || !estimation.suggested_max_fee_in_gas_token) {
     throw new Error("Paymaster fee estimation returned empty/invalid result");
   }
@@ -1836,8 +1849,8 @@ async function cmdVerify(args) {
         info(`  Resuming session ${sessionId} from chunk ${resumeFromChunk}`);
       }
     } else {
-      // Open new session
-      const { txHash: openTxHash, receipt: openReceipt } = await execCall(
+      // Open new session (with retry — transient RPC/paymaster errors are common)
+      const { txHash: openTxHash, receipt: openReceipt } = await execCallWithRetry(
         "open_gkr_session",
         [
           modelId,
