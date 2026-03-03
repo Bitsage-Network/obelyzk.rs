@@ -686,6 +686,38 @@ struct CaptureCmd {
     /// Requires tokenizer.json and embed_tokens in the model directory.
     #[arg(long, conflicts_with = "input")]
     prompt: Option<String>,
+
+    /// Path to a conversation.json file for multi-turn conversation capture.
+    /// Each turn is proved independently through the M31 forward pass.
+    #[arg(long, conflicts_with_all = ["input", "prompt"])]
+    conversation: Option<PathBuf>,
+}
+
+/// Multi-turn conversation file produced by generate_conversation.py.
+#[derive(serde::Deserialize)]
+struct ConversationFile {
+    conversation_id: String,
+    topic: String,
+    turns: Vec<ConversationTurn>,
+}
+
+/// A single turn in the conversation.
+#[derive(serde::Deserialize)]
+struct ConversationTurn {
+    turn_index: usize,
+    content: String,
+    full_context_tokens: Vec<u32>,
+    last_token_id: u32,
+    response: TurnResponse,
+}
+
+/// Model-generated response for a conversation turn.
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct TurnResponse {
+    content: String,
+    tokens: Vec<u32>,
+    generation_time_ms: u64,
 }
 
 fn parse_model_id(s: &str) -> FieldElement {
@@ -3604,6 +3636,118 @@ fn run_capture_command(cmd: &CaptureCmd) {
         eprintln!("Error creating capture hook: {e}");
         process::exit(1);
     });
+
+    // ── Conversation mode ────────────────────────────────────────────────
+    //
+    // When --conversation is provided, iterate over turns from conversation.json,
+    // extract embedding for each turn's last_token_id, run forward pass, and
+    // record each turn with its real text response.
+
+    if let Some(ref conv_path) = cmd.conversation {
+        let conv_json = std::fs::read_to_string(conv_path).unwrap_or_else(|e| {
+            eprintln!("Error: cannot read conversation file '{}': {e}", conv_path.display());
+            process::exit(1);
+        });
+        let conv: ConversationFile = serde_json::from_str(&conv_json).unwrap_or_else(|e| {
+            eprintln!("Error: invalid conversation JSON: {e}");
+            process::exit(1);
+        });
+
+        let model_dir = cmd.model_dir.as_ref().unwrap_or_else(|| {
+            eprintln!("Error: --conversation requires --model-dir (HuggingFace directory)");
+            process::exit(1);
+        });
+
+        let num_turns = conv.turns.len();
+        eprintln!();
+        eprintln!("  conversation: {} ({} turns)", conv.conversation_id, num_turns);
+        eprintln!("  topic: {:?}", conv.topic);
+        eprintln!();
+
+        let t_conv_start = Instant::now();
+
+        for turn in &conv.turns {
+            let t_turn = Instant::now();
+
+            // Extract embedding for this turn's last token
+            let (embedding, _vocab_size) = stwo_ml::compiler::hf_loader::load_embedding_row(
+                model_dir, input_cols, turn.last_token_id,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Error: cannot load embedding for turn {}: {e}", turn.turn_index);
+                process::exit(1);
+            });
+
+            // Run M31 forward pass
+            let output = execute_forward_pass(graph, &embedding, weights).unwrap_or_else(|e| {
+                eprintln!("Error: forward pass failed on turn {}: {e}", turn.turn_index);
+                process::exit(1);
+            });
+            let latency_ms = t_turn.elapsed().as_millis() as u64;
+
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            // Truncate user query for preview
+            let query_truncated: String = turn.content.chars().take(60).collect();
+            let q_ellipsis = if turn.content.chars().count() > 60 { "..." } else { "" };
+            let input_preview = format!(
+                "[conv:{}|turn:{}] {}{}",
+                conv.conversation_id, turn.turn_index, query_truncated, q_ellipsis,
+            );
+
+            // Use the real model response as output preview
+            let resp_truncated: String = turn.response.content.chars().take(200).collect();
+            let r_ellipsis = if turn.response.content.chars().count() > 200 { "..." } else { "" };
+            let output_preview = format!("{}{}", resp_truncated, r_ellipsis);
+
+            hook.record(CaptureJob {
+                input_tokens: turn.full_context_tokens.clone(),
+                output_tokens: turn.response.tokens.clone(),
+                input_m31: embedding,
+                output_m31: output,
+                timestamp_ns: now_ns,
+                latency_ms,
+                gpu_device: "cpu".to_string(),
+                tee_report_hash: "0x0".to_string(),
+                task_category: Some("conversation".to_string()),
+                input_preview: Some(input_preview),
+                output_preview: Some(output_preview),
+            });
+
+            eprintln!(
+                "  [{}/{}] turn {} (last_token={}, ctx_len={}, resp_tokens={}): {}ms",
+                turn.turn_index + 1,
+                num_turns,
+                turn.turn_index,
+                turn.last_token_id,
+                turn.full_context_tokens.len(),
+                turn.response.tokens.len(),
+                latency_ms,
+            );
+        }
+
+        // Flush and report
+        hook.flush();
+        let total_ms = t_conv_start.elapsed().as_millis();
+        let entry_count = hook.entry_count();
+
+        eprintln!();
+        eprintln!("  Conversation capture complete:");
+        eprintln!("    conversation_id: {}", conv.conversation_id);
+        eprintln!("    turns: {}", num_turns);
+        eprintln!("    entries: {} (chain-linked)", entry_count);
+        eprintln!("    total_time: {}ms", total_ms);
+        eprintln!("    log_dir: {}", cmd.log_dir.display());
+        eprintln!();
+
+        println!("CAPTURE_LOG_DIR={}", cmd.log_dir.display());
+        println!("CAPTURE_COUNT={}", entry_count);
+        println!("CAPTURE_MODEL={}", model_name);
+        return;
+    }
 
     // ── Resolve input source ─────────────────────────────────────────────
     //

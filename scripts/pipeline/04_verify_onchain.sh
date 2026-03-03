@@ -431,21 +431,28 @@ if [[ "$USE_PAYMASTER" == "true" ]] && [[ "$PROOF_MODE" != "recursive" ]]; then
     log "Submitting ${PROOF_MODE} proof via AVNU paymaster (gasless)..."
     log "Model ID: ${MODEL_ID_FROM_META}"
 
+    # Capture stdout (JSON) and stderr (logs) separately so log lines don't
+    # pollute the JSON extraction.
+    PAYMASTER_STDERR_LOG="/tmp/obelysk_paymaster_stderr_$(date +%s).log"
     PAYMASTER_OUTPUT=$(run_cmd node "$PAYMASTER_SCRIPT" verify \
         --proof "$PROOF_FILE" \
         --contract "$CONTRACT" \
         --model-id "$MODEL_ID_FROM_META" \
-        --network "$NETWORK" 2>&1) || {
+        --network "$NETWORK" 2>"$PAYMASTER_STDERR_LOG") || {
         err "Paymaster submission failed"
+        cat "$PAYMASTER_STDERR_LOG" >&2 || true
         echo "$PAYMASTER_OUTPUT" >&2
+        rm -f "$PAYMASTER_STDERR_LOG" 2>/dev/null || true
         exit 1
     }
+    # Show the progress logs from stderr
+    cat "$PAYMASTER_STDERR_LOG" >&2 || true
+    rm -f "$PAYMASTER_STDERR_LOG" 2>/dev/null || true
 
-    # Parse JSON output (last line of stderr is info, stdout is JSON)
-    # The script outputs JSON to stdout and logs to stderr
+    # Parse JSON output from stdout
     PAYMASTER_JSON=$(echo "$PAYMASTER_OUTPUT" | grep '^{' | head -1)
     if [[ -z "$PAYMASTER_JSON" ]]; then
-        # Try getting JSON from the full output
+        # Try getting JSON from the full output (may have prefix text)
         PAYMASTER_JSON=$(echo "$PAYMASTER_OUTPUT" | python3 -c "
 import sys, json
 for line in sys.stdin:
@@ -460,14 +467,36 @@ for line in sys.stdin:
     fi
 
     if [[ -n "$PAYMASTER_JSON" ]]; then
-        TX_HASH=$(echo "$PAYMASTER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['txHash'])" 2>/dev/null || echo "")
+        TX_HASH=$(echo "$PAYMASTER_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('txHash',''))" 2>/dev/null || echo "")
         IS_ACCEPTED_PM=$(echo "$PAYMASTER_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('acceptedOnchain', d.get('isVerified','false'))).lower())" 2>/dev/null || echo "false")
         FULL_GKR_PM=$(echo "$PAYMASTER_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('fullGkrVerified', d.get('isVerified','false'))).lower())" 2>/dev/null || echo "false")
         ASSURANCE_PM=$(echo "$PAYMASTER_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('onchainAssurance','unknown')))" 2>/dev/null || echo "unknown")
         HAS_ANY_PM=$(echo "$PAYMASTER_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('hasAnyVerification','false')).lower())" 2>/dev/null || echo "false")
         EXPLORER_URL=$(echo "$PAYMASTER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('explorerUrl',''))" 2>/dev/null || echo "")
 
-        if [[ -n "$TX_HASH" ]]; then
+        # Also extract allTxHashes array (streaming sends multiple TXs)
+        ALL_HASHES_FROM_PM=$(echo "$PAYMASTER_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+hashes = d.get('allTxHashes', [])
+if not hashes and d.get('txHash'):
+    hashes = [d['txHash']]
+for h in hashes:
+    if h:
+        print(h)
+" 2>/dev/null || echo "")
+
+        if [[ -n "$ALL_HASHES_FROM_PM" ]]; then
+            while IFS= read -r h; do
+                [[ -n "$h" ]] && ALL_TX_HASHES+=("$h")
+            done <<< "$ALL_HASHES_FROM_PM"
+            ok "TX submitted via paymaster: ${#ALL_TX_HASHES[@]} transaction(s)"
+            log "Explorer: ${EXPLORER_URL}"
+            log "Gas sponsored: true"
+            log "Accepted on-chain: ${IS_ACCEPTED_PM}"
+            log "Full GKR verified: ${FULL_GKR_PM}"
+            log "Assurance level: ${ASSURANCE_PM}"
+        elif [[ -n "$TX_HASH" ]]; then
             ALL_TX_HASHES+=("$TX_HASH")
             ok "TX submitted via paymaster: ${TX_HASH:0:20}..."
             log "Explorer: ${EXPLORER_URL}"
@@ -475,10 +504,15 @@ for line in sys.stdin:
             log "Accepted on-chain: ${IS_ACCEPTED_PM}"
             log "Full GKR verified: ${FULL_GKR_PM}"
             log "Assurance level: ${ASSURANCE_PM}"
+        else
+            warn "Paymaster returned JSON but no transaction hashes"
+            warn "JSON: ${PAYMASTER_JSON:0:200}"
         fi
     else
-        warn "Could not parse paymaster output"
-        echo "$PAYMASTER_OUTPUT" >&2
+        warn "Could not parse paymaster output as JSON"
+        warn "Stdout: ${PAYMASTER_OUTPUT:0:500}"
+        err "Paymaster submission did not return a valid result"
+        exit 1
     fi
 
 else
@@ -730,7 +764,11 @@ if [[ "$DO_SUBMIT" == "true" ]]; then
     echo ""
 
     # Save receipt
-    LAST_TX="${ALL_TX_HASHES[${#ALL_TX_HASHES[@]}-1]:-}"
+    if (( ${#ALL_TX_HASHES[@]} > 0 )); then
+        LAST_TX="${ALL_TX_HASHES[${#ALL_TX_HASHES[@]}-1]}"
+    else
+        LAST_TX=""
+    fi
     RECEIPT_FILE="${OUTPUT_DIR:-/tmp}/verify_receipt.json"
     SUBMIT_VIA="sncast"
     [[ "$USE_PAYMASTER" == "true" ]] && SUBMIT_VIA="avnu_paymaster"
@@ -745,7 +783,7 @@ receipt = {
     'proof_file': '${PROOF_FILE}',
     'submitted_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
     'elapsed_seconds': ${ELAPSED},
-    'tx_hashes': $(python3 -c "import json; print(json.dumps([$(printf "'%s'," "${ALL_TX_HASHES[@]}" | sed 's/,$//')])" 2>/dev/null || echo '[]'),
+    'tx_hashes': $(if (( ${#ALL_TX_HASHES[@]} > 0 )); then python3 -c "import json; print(json.dumps([$(printf "'%s'," "${ALL_TX_HASHES[@]}" | sed 's/,$//')])" 2>/dev/null || echo '[]'; else echo '[]'; fi),
     'is_verified': '${FULL_GKR_VERIFIED}',
     'accepted_onchain': '${IS_ACCEPTED}',
     'full_gkr_verified': '${FULL_GKR_VERIFIED}',
@@ -805,7 +843,7 @@ printf "  ║  Submit via:   %-36s ║\n" "AVNU Paymaster (gasless)"
 fi
 if [[ "$DO_SUBMIT" == "true" ]] && (( ${#ALL_TX_HASHES[@]} > 0 )); then
 printf "  ║  TXs:          %-36s ║\n" "${#ALL_TX_HASHES[@]} submitted"
-printf "  ║  Last TX:      %-36s ║\n" "${ALL_TX_HASHES[${#ALL_TX_HASHES[@]}-1]:0:36}"
+printf "  ║  Last TX:      %-36s ║\n" "${ALL_TX_HASHES[-1]:0:36}"
 printf "  ║  Accepted:     %-36s ║\n" "${IS_ACCEPTED:-unknown}"
 printf "  ║  Assurance:    %-36s ║\n" "${ASSURANCE_LEVEL:-unknown}"
 printf "  ║  Full GKR:     %-36s ║\n" "${FULL_GKR_VERIFIED:-unknown}"

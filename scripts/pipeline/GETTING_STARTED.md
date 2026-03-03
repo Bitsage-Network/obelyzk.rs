@@ -216,6 +216,45 @@ Use `CAPTURE_TIMEOUT_SEC` (default `3600`) to bound capture runtime.
 
 ---
 
+### Step 2c — Multi-Turn Conversation Capture (Optional)
+
+**What it does:** Generates a multi-turn conversation about a topic using the real model (float16 via HuggingFace), then proves each turn through the M31 forward pass. This produces an inference log where each entry has real text responses — not just M31 output.
+
+Two-phase approach:
+1. **Float path** (Python): Loads the model in float16, generates real text responses autoregressively
+2. **Proof path** (Rust): For each turn, extracts the last token's embedding and runs the M31 forward pass
+
+```bash
+# 3-turn conversation about quantum computing
+./02c_conversation.sh --topic "quantum computing and its implications for cryptography" --turns 3
+
+# Quick 2-turn test
+./02c_conversation.sh --topic "prime numbers" --turns 2
+
+# Use a pre-generated conversation.json (skip Python inference)
+./02c_conversation.sh --conversation-file /tmp/my_conversation.json
+
+# With specific layers
+./02c_conversation.sh --topic "neural networks" --turns 2 --layers 1
+```
+
+**GPU memory note:** The float model (~28GB for Qwen3-14B) and M31 prove-model both need GPU memory. They run sequentially — Python generates all turns first, then Rust proves them all.
+
+**Via run_e2e.sh:**
+```bash
+# E2E with multi-turn conversation
+./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
+
+# More turns
+./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "cryptography" --conversation-turns 5
+```
+
+The conversation log entries are chain-linked just like regular captures. Each entry includes the real model response text in `output_preview` and the generated token IDs in `output_tokens`. The normal prove → verify → on-chain flow handles all entries.
+
+**conversation.json format:** The intermediate file contains the topic, model info, and per-turn data (user query, full context tokens, last token ID, response text, response tokens, timing).
+
+---
+
 ### Step 3 — Generate the Proof
 
 **What it does:** Runs the model through the prover, which generates a cryptographic proof that the inference was computed correctly. Then verifies the proof locally before saving it.
@@ -395,6 +434,9 @@ The script will:
 # Custom prompt — prove real inference on your own text
 ./run_e2e.sh --preset qwen3-14b --gpu --submit \
   --prompt "Prove that for any prime p > 2, the Legendre symbol (a/p) satisfies Euler's criterion: a^((p-1)/2) ≡ (a/p) mod p"
+
+# Multi-turn conversation — real text responses with ZK proofs
+./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
 
 # Random input (disable default prompt)
 ./run_e2e.sh --preset qwen3-14b --gpu --submit --no-prompt

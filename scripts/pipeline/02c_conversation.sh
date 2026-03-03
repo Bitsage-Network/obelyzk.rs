@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════
-# Obelysk Pipeline — Step 2b: Capture Inference Log
+# Obelysk Pipeline — Step 2c: Multi-Turn Conversation Capture
 # ═══════════════════════════════════════════════════════════════════════
 #
-# Runs N forward passes through the prover's execute_forward_pass()
-# and records each via the CaptureHook. This produces a chain-linked
-# inference log (meta.json + log.jsonl + matrices.bin) that the audit
-# pipeline can verify.
+# Generates a multi-turn conversation via HuggingFace float inference,
+# then proves each turn through the M31 forward pass.
 #
-# This is the MANDATORY bridge between model download and audit:
-# it ensures real inference through the prover code path exists before
-# anyone attempts to prove or audit.
+# Two-phase approach:
+#   Phase 1: Python (float16) generates real text responses
+#   Phase 2: Rust (M31) proves each turn's forward pass
 #
 # Usage:
-#   bash scripts/pipeline/02b_capture_inference.sh
-#   bash scripts/pipeline/02b_capture_inference.sh --model-dir ~/models/phi3-mini --count 5
-#   bash scripts/pipeline/02b_capture_inference.sh --model-name qwen3-14b --layers 1
+#   bash scripts/pipeline/02c_conversation.sh --topic "quantum computing" --turns 3
 #
 set -euo pipefail
 
@@ -27,14 +23,15 @@ source "${SCRIPT_DIR}/lib/common.sh"
 MODEL_NAME=""
 MODEL_DIR=""
 NUM_LAYERS=""
-CAPTURE_COUNT=3
+TOPIC=""
+TURNS=3
+TEMPERATURE=0.7
+MAX_TOKENS=512
 MODEL_ID="0x1"
-INPUT_FILE=""
-PROMPT=""
-CONVERSATION_FILE=""
-SKIP_COMMITMENT=true   # Legacy packed commitment not used by GKR pipeline; use --no-skip-commitment to force
+SKIP_COMMITMENT=true
 SKIP_BUILD=false
 LOG_DIR_OVERRIDE=""
+CONVERSATION_FILE=""
 CAPTURE_TIMEOUT_SEC="${CAPTURE_TIMEOUT_SEC:-3600}"
 
 # ─── Parse Arguments ─────────────────────────────────────────────────
@@ -44,32 +41,36 @@ while [[ $# -gt 0 ]]; do
         --model-name)       MODEL_NAME="$2"; shift 2 ;;
         --model-dir)        MODEL_DIR="$2"; shift 2 ;;
         --layers)           NUM_LAYERS="$2"; shift 2 ;;
-        --count)            CAPTURE_COUNT="$2"; shift 2 ;;
+        --topic)            TOPIC="$2"; shift 2 ;;
+        --turns)            TURNS="$2"; shift 2 ;;
+        --temperature)      TEMPERATURE="$2"; shift 2 ;;
+        --max-tokens)       MAX_TOKENS="$2"; shift 2 ;;
         --model-id)         MODEL_ID="$2"; shift 2 ;;
-        --input)            INPUT_FILE="$2"; shift 2 ;;
-        --prompt)           PROMPT="$2"; shift 2 ;;
-        --conversation)     CONVERSATION_FILE="$2"; shift 2 ;;
         --skip-commitment)  SKIP_COMMITMENT=true; shift ;;
         --no-skip-commitment) SKIP_COMMITMENT=false; shift ;;
         --skip-build)       SKIP_BUILD=true; shift ;;
         --log-dir)          LOG_DIR_OVERRIDE="$2"; shift 2 ;;
+        --conversation-file) CONVERSATION_FILE="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
-            echo "Capture inference log via prover forward pass."
+            echo "Generate a multi-turn conversation and prove each turn."
             echo ""
             echo "Model source (pick one):"
             echo "  --model-name NAME   Load from ~/.obelysk/models/NAME/"
             echo "  --model-dir DIR     Path to model directory"
             echo ""
+            echo "Conversation:"
+            echo "  --topic TEXT         Conversation topic (required unless --conversation-file)"
+            echo "  --turns N            Number of Q&A turns (default: 3)"
+            echo "  --temperature F      Sampling temperature (default: 0.7)"
+            echo "  --max-tokens N       Max new tokens per response (default: 512)"
+            echo "  --conversation-file  Skip generation, use existing conversation.json"
+            echo ""
             echo "Options:"
-            echo "  --layers N           Number of transformer layers (default: from config)"
-            echo "  --count N            Number of forward passes to capture (default: 3)"
+            echo "  --layers N           Number of transformer layers"
             echo "  --model-id ID        Model ID for log metadata (default: 0x1)"
-            echo "  --input FILE         JSON input file (default: diverse generated inputs)"
-            echo "  --prompt TEXT        Tokenize text and use real embedding as input"
-            echo "  --conversation FILE  Multi-turn conversation JSON (from generate_conversation.py)"
-            echo "  --skip-commitment    Skip weight commitment (faster, weaker audit)"
+            echo "  --skip-commitment    Skip weight commitment (faster)"
             echo "  --skip-build         Skip rebuilding prove-model"
             echo "  --log-dir DIR        Override log directory"
             echo "  -h, --help           Show this help"
@@ -78,6 +79,13 @@ while [[ $# -gt 0 ]]; do
         *) err "Unknown argument: $1"; exit 1 ;;
     esac
 done
+
+# ─── Validation ──────────────────────────────────────────────────────
+
+if [[ -z "$CONVERSATION_FILE" ]] && [[ -z "$TOPIC" ]]; then
+    err "Specify --topic or --conversation-file"
+    exit 1
+fi
 
 # ─── Resolve Model ───────────────────────────────────────────────────
 
@@ -114,6 +122,99 @@ else
 fi
 mkdir -p "$LOG_DIR"
 
+# ─── Display Config ──────────────────────────────────────────────────
+
+banner
+echo -e "${BOLD}  Multi-Turn Conversation Capture${NC}"
+echo ""
+log "Model:          ${MODEL_NAME:-$(basename "$MODEL_DIR")}"
+log "Model dir:      ${MODEL_DIR}"
+log "Layers:         ${MODEL_LAYERS:-all}"
+if [[ -n "$CONVERSATION_FILE" ]]; then
+    log "Conversation:   ${CONVERSATION_FILE} (pre-generated)"
+else
+    log "Topic:          ${TOPIC}"
+    log "Turns:          ${TURNS}"
+    log "Temperature:    ${TEMPERATURE}"
+    log "Max tokens:     ${MAX_TOKENS}"
+fi
+log "Log dir:        ${LOG_DIR}"
+echo ""
+
+timer_start "conversation"
+
+# ═════════════════════════════════════════════════════════════════════
+# Phase 1: Generate conversation (Python float inference)
+# ═════════════════════════════════════════════════════════════════════
+
+if [[ -z "$CONVERSATION_FILE" ]]; then
+    step "2c.1" "Generating conversation (float inference)..."
+
+    # Check Python + torch
+    if ! command -v python3 &>/dev/null; then
+        err "python3 not found"
+        exit 1
+    fi
+
+    CONV_OUTPUT="/tmp/obelysk_conversation_$(date +%s).json"
+    GEN_SCRIPT="${SCRIPT_DIR}/lib/generate_conversation.py"
+
+    if [[ ! -f "$GEN_SCRIPT" ]]; then
+        err "generate_conversation.py not found at ${GEN_SCRIPT}"
+        exit 1
+    fi
+
+    GEN_CMD=(python3 "$GEN_SCRIPT"
+        --model-dir "$MODEL_DIR"
+        --topic "$TOPIC"
+        --turns "$TURNS"
+        --temperature "$TEMPERATURE"
+        --max-tokens "$MAX_TOKENS"
+        --output "$CONV_OUTPUT"
+    )
+
+    log "Command: ${GEN_CMD[*]}"
+    echo ""
+
+    GEN_LOG="/tmp/obelysk_gen_conv_$(date +%s).log"
+    if "${GEN_CMD[@]}" >"$GEN_LOG" 2>&1; then
+        # Show stderr output (progress)
+        grep '^\[' "$GEN_LOG" >&2 || true
+        CONVERSATION_FILE=$(grep '^CONVERSATION_FILE=' "$GEN_LOG" | head -1 | cut -d= -f2-)
+        CONV_ID=$(grep '^CONVERSATION_ID=' "$GEN_LOG" | head -1 | cut -d= -f2-)
+        CONV_TURNS=$(grep '^CONVERSATION_TURNS=' "$GEN_LOG" | head -1 | cut -d= -f2-)
+        rm -f "$GEN_LOG" 2>/dev/null || true
+        ok "Conversation generated: ${CONV_TURNS} turns (id: ${CONV_ID})"
+    else
+        err "Conversation generation failed"
+        cat "$GEN_LOG" >&2 || true
+        rm -f "$GEN_LOG" 2>/dev/null || true
+        exit 1
+    fi
+
+    if [[ -z "$CONVERSATION_FILE" ]]; then
+        CONVERSATION_FILE="$CONV_OUTPUT"
+    fi
+else
+    log "Using pre-generated conversation: ${CONVERSATION_FILE}"
+    CONV_ID=$(python3 -c "import json; print(json.load(open('${CONVERSATION_FILE}'))['conversation_id'])" 2>/dev/null || echo "unknown")
+    CONV_TURNS=$(python3 -c "import json; print(len(json.load(open('${CONVERSATION_FILE}'))['turns']))" 2>/dev/null || echo "?")
+fi
+
+if [[ ! -f "$CONVERSATION_FILE" ]]; then
+    err "Conversation file not found: ${CONVERSATION_FILE}"
+    exit 1
+fi
+
+echo ""
+ok "Conversation: ${CONVERSATION_FILE} (${CONV_TURNS} turns)"
+
+# ═════════════════════════════════════════════════════════════════════
+# Phase 2: Prove conversation (Rust M31 forward pass)
+# ═════════════════════════════════════════════════════════════════════
+
+step "2c.2" "Proving conversation (M31 forward pass)..."
+
 # ─── Find / Build Binary ────────────────────────────────────────────
 
 INSTALL_DIR=$(get_state "setup_state.env" "INSTALL_DIR" 2>/dev/null || echo "$HOME/obelysk")
@@ -127,7 +228,6 @@ if [[ -z "$PROVE_BIN" ]] || [[ ! -f "$PROVE_BIN" ]]; then
     PROVE_BIN=$(command -v prove-model 2>/dev/null || echo "")
 fi
 
-# Optional rebuild with audit feature
 if [[ "$SKIP_BUILD" == "false" ]] && [[ -d "${LIBS_DIR}/stwo-ml" ]]; then
     FEATURES="cli,audit,model-loading,safetensors"
     if command -v nvcc &>/dev/null || [[ -f /usr/local/cuda/bin/nvcc ]]; then
@@ -147,41 +247,17 @@ if [[ -z "$PROVE_BIN" ]]; then
     exit 1
 fi
 
-# ─── Display Config ──────────────────────────────────────────────────
-
-banner
-echo -e "${BOLD}  Inference Capture${NC}"
-echo ""
-log "Model:          ${MODEL_NAME:-$(basename "$MODEL_DIR")}"
-log "Model dir:      ${MODEL_DIR}"
-log "Layers:         ${MODEL_LAYERS:-all}"
-log "Count:          ${CAPTURE_COUNT}"
-log "Input:          $(if [[ -n "$CONVERSATION_FILE" ]]; then echo "conversation: $CONVERSATION_FILE"; elif [[ -n "$PROMPT" ]]; then echo "prompt: \"${PROMPT:0:60}$([ ${#PROMPT} -gt 60 ] && echo '...')\""; elif [[ -n "$INPUT_FILE" ]]; then echo "file: $INPUT_FILE"; else echo "random (diverse)"; fi)"
-log "Log dir:        ${LOG_DIR}"
-log "prove-model:    ${PROVE_BIN}"
-echo ""
-
-timer_start "capture"
-
-# ─── Build Capture Command ───────────────────────────────────────────
+# ─── Build Capture Command ──────────────────────────────────────────
 
 CAPTURE_CMD=("${PROVE_BIN}" "capture")
 CAPTURE_CMD+=("--model-dir" "$MODEL_DIR")
 CAPTURE_CMD+=("--log-dir" "$LOG_DIR")
-CAPTURE_CMD+=("--count" "$CAPTURE_COUNT")
+CAPTURE_CMD+=("--conversation" "$CONVERSATION_FILE")
 CAPTURE_CMD+=("--model-id" "$MODEL_ID")
 CAPTURE_CMD+=("--model-name" "${MODEL_NAME:-$(basename "$MODEL_DIR")}")
 
 if [[ -n "${MODEL_LAYERS:-}" ]]; then
     CAPTURE_CMD+=("--layers" "$MODEL_LAYERS")
-fi
-
-if [[ -n "$CONVERSATION_FILE" ]]; then
-    CAPTURE_CMD+=("--conversation" "$CONVERSATION_FILE")
-elif [[ -n "$INPUT_FILE" ]]; then
-    CAPTURE_CMD+=("--input" "$INPUT_FILE")
-elif [[ -n "$PROMPT" ]]; then
-    CAPTURE_CMD+=("--prompt" "$PROMPT")
 fi
 
 if [[ "$SKIP_COMMITMENT" == "true" ]]; then
@@ -194,8 +270,7 @@ echo ""
 
 # ─── Run Capture ─────────────────────────────────────────────────────
 
-step "2b.1" "Running inference capture..."
-CAPTURE_RUN_LOG="/tmp/obelysk_capture_$(date +%s).log"
+CAPTURE_RUN_LOG="/tmp/obelysk_conv_capture_$(date +%s).log"
 : > "$CAPTURE_RUN_LOG"
 
 "${CAPTURE_CMD[@]}" >"$CAPTURE_RUN_LOG" 2>&1 &
@@ -237,7 +312,7 @@ wait "$TAIL_PID" 2>/dev/null || true
 trap - INT TERM
 
 if (( CAPTURE_RC != 0 )); then
-    err "Inference capture failed"
+    err "Conversation capture failed"
     tail -n 200 "$CAPTURE_RUN_LOG" 2>/dev/null || true
     exit 1
 fi
@@ -250,7 +325,7 @@ rm -f "$CAPTURE_RUN_LOG" 2>/dev/null || true
 
 # ─── Verify Output ───────────────────────────────────────────────────
 
-step "2b.2" "Verifying capture output..."
+step "2c.3" "Verifying capture output..."
 
 if [[ ! -f "${LOG_DIR}/meta.json" ]]; then
     err "meta.json not found in ${LOG_DIR}"
@@ -280,29 +355,41 @@ echo ""
 
 # ─── Save State ──────────────────────────────────────────────────────
 
-ELAPSED=$(timer_elapsed "capture")
+ELAPSED=$(timer_elapsed "conversation")
 
-_CAPTURE_STATE_ARGS=(
-    "CAPTURE_COMPLETED=true"
-    "AUDIT_LOG_DIR=${LOG_DIR}"
-    "CAPTURE_COUNT=${CAPTURED_COUNT:-${LOG_LINES}}"
-    "CAPTURE_MODEL=${CAPTURED_MODEL:-${MODEL_NAME:-$(basename "$MODEL_DIR")}}"
-    "CAPTURE_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    "CAPTURE_DURATION_SEC=${ELAPSED}"
-)
-if [[ -n "$PROMPT" ]]; then
-    _CAPTURE_STATE_ARGS+=("CAPTURE_PROMPT=${PROMPT}")
-fi
-save_state "capture_state.env" "${_CAPTURE_STATE_ARGS[@]}"
+save_state "capture_state.env" \
+    "CAPTURE_COMPLETED=true" \
+    "AUDIT_LOG_DIR=${LOG_DIR}" \
+    "CAPTURE_COUNT=${CAPTURED_COUNT:-${LOG_LINES}}" \
+    "CAPTURE_MODEL=${CAPTURED_MODEL:-${MODEL_NAME:-$(basename "$MODEL_DIR")}}" \
+    "CAPTURE_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "CAPTURE_DURATION_SEC=${ELAPSED}" \
+    "CAPTURE_MODE=conversation" \
+    "CONVERSATION_ID=${CONV_ID:-}" \
+    "CONVERSATION_TOPIC=${TOPIC:-}" \
+    "CONVERSATION_TURNS=${CONV_TURNS:-}"
+
+save_state "conversation_state.env" \
+    "CONVERSATION_COMPLETED=true" \
+    "CONVERSATION_FILE=${CONVERSATION_FILE}" \
+    "CONVERSATION_ID=${CONV_ID:-}" \
+    "CONVERSATION_TURNS=${CONV_TURNS:-}" \
+    "CONVERSATION_TOPIC=${TOPIC:-}" \
+    "CONVERSATION_LOG_DIR=${LOG_DIR}" \
+    "CONVERSATION_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "CONVERSATION_DURATION_SEC=${ELAPSED}"
 
 # ─── Summary ─────────────────────────────────────────────────────────
 
 echo -e "${GREEN}${BOLD}"
 echo "  ╔══════════════════════════════════════════════════════╗"
-echo "  ║  INFERENCE CAPTURE COMPLETE                           ║"
+echo "  ║  CONVERSATION CAPTURE COMPLETE                       ║"
 echo "  ╠══════════════════════════════════════════════════════╣"
 printf "  ║  Model:       %-36s ║\n" "${MODEL_NAME:-$(basename "$MODEL_DIR")}"
-printf "  ║  Entries:     %-36s ║\n" "${CAPTURED_COUNT:-${LOG_LINES}}"
+printf "  ║  Topic:       %-36s ║\n" "${TOPIC:0:36}"
+printf "  ║  Conv ID:     %-36s ║\n" "${CONV_ID:-unknown}"
+printf "  ║  Turns:       %-36s ║\n" "${CONV_TURNS:-?}"
+printf "  ║  Log entries: %-36s ║\n" "${CAPTURED_COUNT:-${LOG_LINES}}"
 printf "  ║  Log dir:     %-36s ║\n" "${LOG_DIR}"
 printf "  ║  Duration:    %-36s ║\n" "$(format_duration $ELAPSED)"
 echo "  ╠══════════════════════════════════════════════════════╣"

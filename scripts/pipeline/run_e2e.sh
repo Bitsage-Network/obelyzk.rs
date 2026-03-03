@@ -45,6 +45,8 @@ GKR_V3=false
 GKR_V4=false
 GKR_V2_MODE="auto"  # auto|sequential|batched|mode2|mode3
 LEGACY_GKR_V1=false
+CONVERSATION_TOPIC=""
+CONVERSATION_TURNS=3
 
 # Default prompt for --submit: a complex mathematical question that exercises
 # real transformer reasoning through the proved forward pass.
@@ -88,6 +90,8 @@ while [[ $# -gt 0 ]]; do
         --gkr-v4)          GKR_V4=true; shift ;;
         --gkr-v2-mode)     GKR_V2_MODE="$2"; shift 2 ;;
         --legacy-gkr-v1)   LEGACY_GKR_V1=true; shift ;;
+        --conversation-topic) CONVERSATION_TOPIC="$2"; shift 2 ;;
+        --conversation-turns) CONVERSATION_TURNS="$2"; shift 2 ;;
         --install-drivers) SETUP_ARGS+=("--install-drivers"); shift ;;
         --skip-drivers)    SETUP_ARGS+=("--skip-drivers"); shift ;;
         --branch)          SETUP_ARGS+=("--branch" "$2"); shift 2 ;;
@@ -111,6 +115,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-audit           Skip inference audit (audit is on by default)"
             echo "  --prompt TEXT        Text prompt for real tokenized inference (auto-set with --submit)"
             echo "  --no-prompt          Disable default prompt (use random input even with --submit)"
+            echo "  --conversation-topic TEXT  Run multi-turn conversation instead of single capture"
+            echo "  --conversation-turns N     Number of conversation turns (default: 3)"
             echo "  --resume-from STEP   Resume from: model, validate, inference, capture, prove, verify, audit"
             echo "  --paymaster          Force AVNU paymaster (gasless, sponsored)"
             echo "  --no-paymaster       Force legacy sncast submission (you pay gas)"
@@ -146,6 +152,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --preset phi3-mini --gpu --dry-run"
             echo "  $0 --preset qwen3-14b --gpu --submit          # zero-config on Sepolia"
             echo "  $0 --preset qwen3-14b --gpu --submit --no-paymaster  # legacy sncast"
+            echo "  $0 --preset qwen3-14b --gpu --submit --conversation-topic 'quantum computing'"
             echo "  HF_TOKEN=hf_xxx $0 --preset llama3-8b --chat --submit"
             exit 0
             ;;
@@ -279,7 +286,8 @@ mkdir -p "$RUN_DIR"
 log "Run ID:      ${RUN_ID}"
 log "Model:       ${PRESET:-${HF_MODEL}}"
 log "Mode:        ${MODE}"
-log "Prompt:      $(if [[ -n "$PROMPT" ]]; then echo "\"${PROMPT:0:70}$([ ${#PROMPT} -gt 70 ] && echo '...')\""; else echo "(random input)"; fi)"
+log "Prompt:      $(if [[ -n "$CONVERSATION_TOPIC" ]]; then echo "(conversation mode)"; elif [[ -n "$PROMPT" ]]; then echo "\"${PROMPT:0:70}$([ ${#PROMPT} -gt 70 ] && echo '...')\""; else echo "(random input)"; fi)"
+log "Conversation:$(if [[ -n "$CONVERSATION_TOPIC" ]]; then echo " \"${CONVERSATION_TOPIC:0:50}\" (${CONVERSATION_TURNS} turns)"; else echo " off"; fi)"
 log "GPU:         ${DO_GPU} (multi: ${DO_MULTI_GPU})"
 log "GPU only:    ${DO_GPU_ONLY}"
 log "Aggregated:  ${USE_AGGREGATED_SUBMIT:-false}"
@@ -437,13 +445,24 @@ fi
 # ─── Step 5: Inference Capture (mandatory for audit) ─────────────────
 
 if (( START_IDX <= 4 )); then
-    _CAPTURE_ARGS=()
-    [[ -n "$LAYERS" ]] && _CAPTURE_ARGS+=("--layers" "$LAYERS")
-    [[ -n "$MODEL_ID" ]] && _CAPTURE_ARGS+=("--model-id" "$MODEL_ID")
-    [[ -n "$PROMPT" ]] && _CAPTURE_ARGS+=("--prompt" "$PROMPT")
+    if [[ -n "$CONVERSATION_TOPIC" ]]; then
+        # Multi-turn conversation mode
+        _CAPTURE_ARGS=("--topic" "$CONVERSATION_TOPIC" "--turns" "$CONVERSATION_TURNS")
+        [[ -n "$LAYERS" ]] && _CAPTURE_ARGS+=("--layers" "$LAYERS")
+        [[ -n "$MODEL_ID" ]] && _CAPTURE_ARGS+=("--model-id" "$MODEL_ID")
 
-    run_step "Inference Capture" "$CURRENT" "$TOTAL_STEPS" \
-        bash "${SCRIPT_DIR}/02b_capture_inference.sh" ${_CAPTURE_ARGS[@]+"${_CAPTURE_ARGS[@]}"} || exit 1
+        run_step "Conversation Capture" "$CURRENT" "$TOTAL_STEPS" \
+            bash "${SCRIPT_DIR}/02c_conversation.sh" ${_CAPTURE_ARGS[@]+"${_CAPTURE_ARGS[@]}"} || exit 1
+    else
+        # Standard single-prompt capture
+        _CAPTURE_ARGS=()
+        [[ -n "$LAYERS" ]] && _CAPTURE_ARGS+=("--layers" "$LAYERS")
+        [[ -n "$MODEL_ID" ]] && _CAPTURE_ARGS+=("--model-id" "$MODEL_ID")
+        [[ -n "$PROMPT" ]] && _CAPTURE_ARGS+=("--prompt" "$PROMPT")
+
+        run_step "Inference Capture" "$CURRENT" "$TOTAL_STEPS" \
+            bash "${SCRIPT_DIR}/02b_capture_inference.sh" ${_CAPTURE_ARGS[@]+"${_CAPTURE_ARGS[@]}"} || exit 1
+    fi
     (( CURRENT++ ))
 fi
 
@@ -582,6 +601,8 @@ cat > "${RUN_DIR}/run_summary.json" << RUNEOF
     "hf_model": "${HF_MODEL:-}",
     "mode": "${MODE}",
     "prompt": ${_PROMPT_JSON},
+    "conversation_topic": $(if [[ -n "$CONVERSATION_TOPIC" ]]; then printf '"%s"' "$CONVERSATION_TOPIC"; else echo "null"; fi),
+    "conversation_turns": $(if [[ -n "$CONVERSATION_TOPIC" ]]; then echo "$CONVERSATION_TURNS"; else echo "null"; fi),
     "layers": "${LAYERS:-all}",
     "gpu": ${DO_GPU},
     "submitted": ${DO_SUBMIT},
