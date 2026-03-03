@@ -1019,6 +1019,118 @@ fn load_weights_from_shards(
     Ok(weights)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Embedding Row Extraction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Bytes per element for each SafeTensors dtype.
+fn dtype_byte_width(dtype: safetensors::Dtype) -> usize {
+    match dtype {
+        safetensors::Dtype::F32 => 4,
+        safetensors::Dtype::F16 | safetensors::Dtype::BF16 => 2,
+        safetensors::Dtype::I8 | safetensors::Dtype::U8 => 1,
+        safetensors::Dtype::F64 | safetensors::Dtype::I64 | safetensors::Dtype::U64 => 8,
+        safetensors::Dtype::I32 | safetensors::Dtype::U32 => 4,
+        safetensors::Dtype::I16 | safetensors::Dtype::U16 => 2,
+        _ => 4, // fallback
+    }
+}
+
+/// Common embedding tensor names across architectures.
+const EMBED_CANDIDATES: &[&str] = &[
+    "model.embed_tokens.weight",
+    "transformer.wte.weight",
+    "transformer.word_embeddings.weight",
+];
+
+/// Extract a single embedding row for a token ID from a HuggingFace model.
+///
+/// Only reads and quantizes the single row needed — avoids loading the full
+/// embedding table (~3 GB for 152K vocab × 5120 hidden_size).
+///
+/// Returns a `(1, hidden_size)` M31Matrix containing the quantized embedding.
+///
+/// # Arguments
+/// * `model_dir` - Path to the HuggingFace model directory
+/// * `hidden_size` - Expected hidden dimension (from config.json)
+/// * `token_id` - Token ID whose embedding row to extract
+pub fn load_embedding_row(
+    model_dir: &Path,
+    hidden_size: usize,
+    token_id: u32,
+) -> Result<(M31Matrix, usize), OnnxError> {
+    let shard_paths = discover_shards(model_dir, "model")
+        .map_err(|e| OnnxError::WeightError(format!("Cannot discover shards: {e}")))?;
+
+    if shard_paths.is_empty() {
+        return Err(OnnxError::WeightError(format!(
+            "No SafeTensors weight files found in {}",
+            model_dir.display(),
+        )));
+    }
+
+    for path in &shard_paths {
+        let file = std::fs::File::open(path)
+            .map_err(|e| OnnxError::IoError(format!("Cannot open {}: {e}", path.display())))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| OnnxError::IoError(format!("Cannot mmap {}: {e}", path.display())))?;
+        let tensors = safetensors::SafeTensors::deserialize(&mmap)
+            .map_err(|e| OnnxError::WeightError(format!("Cannot parse {}: {e}", path.display())))?;
+
+        for &name in EMBED_CANDIDATES {
+            if let Ok(tensor) = tensors.tensor(name) {
+                let shape = tensor.shape();
+                if shape.len() != 2 {
+                    return Err(OnnxError::WeightError(format!(
+                        "Embedding tensor '{}' has {} dims, expected 2",
+                        name,
+                        shape.len(),
+                    )));
+                }
+                let vocab_size = shape[0];
+                let embed_dim = shape[1];
+                if embed_dim != hidden_size {
+                    return Err(OnnxError::WeightError(format!(
+                        "Embedding dim mismatch: tensor has {}, config has {}",
+                        embed_dim, hidden_size,
+                    )));
+                }
+
+                let tid = token_id as usize;
+                if tid >= vocab_size {
+                    return Err(OnnxError::WeightError(format!(
+                        "token_id {} exceeds vocab_size {}",
+                        token_id, vocab_size,
+                    )));
+                }
+
+                // Extract only the bytes for this single row from the mmap'd tensor.
+                let bw = dtype_byte_width(tensor.dtype());
+                let row_bytes = embed_dim * bw;
+                let offset = tid * row_bytes;
+                let raw = tensor.data();
+                let row_slice = &raw[offset..offset + row_bytes];
+
+                // Convert just this row to f32 and quantize.
+                let row_f32 = tensor_to_f32(row_slice, tensor.dtype());
+                let (matrix, _params) =
+                    quantize_weight_matrix(&row_f32, 1, embed_dim, QuantStrategy::Symmetric8);
+
+                eprintln!(
+                    "  Embedding row {}: extracted from '{}' ({}x{} table, {} dtype)",
+                    token_id, name, vocab_size, embed_dim, bw * 8,
+                );
+                return Ok((matrix, vocab_size));
+            }
+        }
+    }
+
+    Err(OnnxError::WeightError(format!(
+        "Embedding tensor not found. Searched for: {}",
+        EMBED_CANDIDATES.join(", "),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,6 +1199,79 @@ mod tests {
 
         let report = validate_model_directory(&tmp, Some(1));
         assert!(!report.passed());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_embedding_row() {
+        // Create a small fake model dir with embed_tokens in a safetensors file.
+        let tmp = std::env::temp_dir().join("stwo_ml_embed_row_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let vocab_size = 8;
+        let hidden_size = 4;
+        // Row-major: row i = [i*4, i*4+1, i*4+2, i*4+3] as f32
+        let data: Vec<f32> = (0..(vocab_size * hidden_size))
+            .map(|i| i as f32)
+            .collect();
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            "model.embed_tokens.weight".to_string(),
+            safetensors::tensor::TensorView::new(
+                safetensors::Dtype::F32,
+                vec![vocab_size, hidden_size],
+                &bytes,
+            )
+            .unwrap(),
+        );
+        let serialized = safetensors::serialize(&tensors, &None).unwrap();
+        std::fs::write(tmp.join("model.safetensors"), &serialized).unwrap();
+
+        // Extract row 3 (values 12.0, 13.0, 14.0, 15.0)
+        let (row, vs) = load_embedding_row(&tmp, hidden_size, 3).unwrap();
+        assert_eq!(vs, vocab_size);
+        assert_eq!(row.rows, 1);
+        assert_eq!(row.cols, hidden_size);
+        // Values should be non-zero (quantized from 12..15)
+        assert!(row.data.iter().any(|v| v.0 != 0));
+
+        // Out-of-range token should fail
+        assert!(load_embedding_row(&tmp, hidden_size, 99).is_err());
+
+        // Wrong hidden_size should fail
+        assert!(load_embedding_row(&tmp, hidden_size + 1, 0).is_err());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_embedding_row_missing_tensor() {
+        let tmp = std::env::temp_dir().join("stwo_ml_embed_no_tensor");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // SafeTensors file with a tensor that has a different name
+        let data: Vec<f32> = vec![1.0; 16];
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            "some.other.weight".to_string(),
+            safetensors::tensor::TensorView::new(
+                safetensors::Dtype::F32,
+                vec![4, 4],
+                &bytes,
+            )
+            .unwrap(),
+        );
+        let serialized = safetensors::serialize(&tensors, &None).unwrap();
+        std::fs::write(tmp.join("model.safetensors"), &serialized).unwrap();
+
+        let result = load_embedding_row(&tmp, 4, 0);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"), "expected 'not found' in: {err}");
 
         std::fs::remove_dir_all(&tmp).ok();
     }

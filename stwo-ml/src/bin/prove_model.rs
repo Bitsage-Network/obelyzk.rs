@@ -681,6 +681,11 @@ struct CaptureCmd {
     /// Human-readable model name for the log metadata.
     #[arg(long)]
     model_name: Option<String>,
+
+    /// Text prompt to tokenize and embed as real model input.
+    /// Requires tokenizer.json and embed_tokens in the model directory.
+    #[arg(long, conflicts_with = "input")]
+    prompt: Option<String>,
 }
 
 fn parse_model_id(s: &str) -> FieldElement {
@@ -3499,12 +3504,22 @@ fn parse_time_spec(spec: &str) -> u64 {
     })
 }
 
-/// Generate a deterministic but diverse M31 input matrix for capture iteration `i`.
+/// Generate a unique M31 input matrix for capture iteration `i`.
 ///
-/// Uses xorshift64-based PRNG seeded per iteration so each captured inference
-/// exercises meaningfully different values through the forward pass.
+/// Mixes a per-process nonce (timestamp + PID) into the seed so each pipeline
+/// run produces a different input — and therefore a different IO commitment and
+/// proof hash on-chain.  Within a single run, each iteration still gets a
+/// distinct seed.
 fn generate_diverse_input(rows: usize, cols: usize, iteration: usize) -> M31Matrix {
-    let mut state: u64 = 0xDEAD_BEEF_CAFE_0000 ^ (iteration as u64 * 0x9E37_79B9_7F4A_7C15);
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Per-process nonce: timestamp XOR PID.  Different every run.
+    let nonce: u64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+        ^ (std::process::id() as u64).wrapping_mul(0x6C62_272E_07BB_0142);
+    let mut state: u64 =
+        0xDEAD_BEEF_CAFE_0000 ^ (iteration as u64 * 0x9E37_79B9_7F4A_7C15) ^ nonce;
     let mut matrix = M31Matrix::new(rows, cols);
     let p = (1u32 << 31) - 1; // M31 modulus
     for i in 0..(rows * cols) {
@@ -3590,11 +3605,90 @@ fn run_capture_command(cmd: &CaptureCmd) {
         process::exit(1);
     });
 
-    // ── Load fixed input if provided ────────────────────────────────────
+    // ── Resolve input source ─────────────────────────────────────────────
+    //
+    // Priority: --input (explicit JSON) > --prompt (tokenize+embed) > random
+    //
+    // For --prompt we tokenize, take the last token, look up its embedding
+    // row from the model's embed_tokens weight, and use that (1, hidden_size)
+    // M31 vector as the forward-pass input.
+
     let fixed_input = cmd.input.as_ref().map(|path| {
         let values = load_input_json(path);
         quantize_input(&values, input_rows, input_cols)
     });
+
+    // Prompt-derived input + metadata (clap enforces --prompt / --input mutual exclusion)
+    let (prompt_input, prompt_tokens, prompt_preview) = if let Some(ref prompt_text) = cmd.prompt {
+        if prompt_text.is_empty() {
+            eprintln!("Error: --prompt cannot be empty");
+            process::exit(1);
+        }
+        let model_dir = cmd.model_dir.as_ref().unwrap_or_else(|| {
+            eprintln!("Error: --prompt requires --model-dir (HuggingFace directory)");
+            process::exit(1);
+        });
+
+        // 1. Load tokenizer
+        let tokenizer_path = model_dir.join("tokenizer.json");
+        if !tokenizer_path.is_file() {
+            eprintln!(
+                "  Warning: tokenizer.json not found in {}, falling back to random input",
+                model_dir.display()
+            );
+            (None, vec![], None)
+        } else {
+            let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: cannot load tokenizer: {e}");
+                    process::exit(1);
+                });
+
+            // 2. Encode prompt
+            let encoding = tokenizer.encode(prompt_text.as_str(), false).unwrap_or_else(|e| {
+                eprintln!("Error: tokenization failed: {e}");
+                process::exit(1);
+            });
+            let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+            if token_ids.is_empty() {
+                eprintln!("Error: prompt produced zero tokens");
+                process::exit(1);
+            }
+            let last_token_id = *token_ids.last().unwrap();
+
+            eprintln!("  prompt: {:?}", prompt_text);
+            eprintln!(
+                "  tokens: {} total, last_token_id: {}",
+                token_ids.len(),
+                last_token_id
+            );
+
+            // 3. Extract single embedding row (zero-copy from mmap, ~40 KB not ~3 GB)
+            let (row, vocab_size) = stwo_ml::compiler::hf_loader::load_embedding_row(
+                model_dir, input_cols, last_token_id,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Error: cannot load embedding row: {e}");
+                process::exit(1);
+            });
+            eprintln!(
+                "  Embedding row extracted (vocab_size={}, hidden_size={})",
+                vocab_size, input_cols,
+            );
+
+            // UTF-8 safe truncation for preview
+            let truncated: String = prompt_text.chars().take(60).collect();
+            let ellipsis = if prompt_text.chars().count() > 60 { "..." } else { "" };
+            let preview = format!(
+                "real embedding from prompt {:?}",
+                format!("{truncated}{ellipsis}"),
+            );
+
+            (Some(row), token_ids, Some(preview))
+        }
+    } else {
+        (None, vec![], None)
+    };
 
     // ── Run forward passes ──────────────────────────────────────────────
     let t_start = Instant::now();
@@ -3603,6 +3697,8 @@ fn run_capture_command(cmd: &CaptureCmd) {
     for i in 0..cmd.count {
         let input = if let Some(ref fixed) = fixed_input {
             fixed.clone()
+        } else if let Some(ref prompt_in) = prompt_input {
+            prompt_in.clone()
         } else {
             generate_diverse_input(input_rows, input_cols, i)
         };
@@ -3633,8 +3729,12 @@ fn run_capture_command(cmd: &CaptureCmd) {
             ))
         };
 
+        let input_preview_str = prompt_preview
+            .clone()
+            .unwrap_or_else(|| format!("capture_iter_{}", i));
+
         hook.record(CaptureJob {
-            input_tokens: vec![], // No tokenization in capture mode.
+            input_tokens: prompt_tokens.clone(),
             output_tokens: vec![],
             input_m31: input,
             output_m31: output,
@@ -3643,7 +3743,7 @@ fn run_capture_command(cmd: &CaptureCmd) {
             gpu_device: "cpu".to_string(),
             tee_report_hash: "0x0".to_string(),
             task_category: Some("capture".to_string()),
-            input_preview: Some(format!("capture_iter_{}", i)),
+            input_preview: Some(input_preview_str),
             output_preview,
         });
 
@@ -3658,6 +3758,10 @@ fn run_capture_command(cmd: &CaptureCmd) {
     eprintln!();
     eprintln!("  Capture complete:");
     eprintln!("    entries: {}", entry_count);
+    if let Some(ref preview) = prompt_preview {
+        eprintln!("    input: {}", preview);
+        eprintln!("    note: M31 output is modular arithmetic (text decoding in future release)");
+    }
     eprintln!("    total_time: {}ms", total_ms);
     eprintln!("    log_dir: {}", cmd.log_dir.display());
     eprintln!();

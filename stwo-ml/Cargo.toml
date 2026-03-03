@@ -16,10 +16,11 @@ tee = ["cuda-runtime"]
 onnx = ["dep:tract-onnx"]
 safetensors = ["dep:safetensors"]
 model-loading = ["onnx", "safetensors"]
+tokenizer = ["dep:tokenizers"]
 audit = ["serde", "dep:serde_json", "dep:crossbeam", "dep:getrandom"]
 audit-http = ["audit", "dep:ureq", "dep:sha3"]
 aes-fallback = ["audit", "dep:aes-gcm"]
-cli = ["model-loading", "audit", "audit-http", "dep:clap", "dep:serde_json", "serde", "dep:getrandom"]
+cli = ["model-loading", "tokenizer", "audit", "audit-http", "dep:clap", "dep:serde_json", "serde", "dep:getrandom"]
 server = ["model-loading", "dep:axum", "dep:tower-http", "dep:uuid", "dep:tokio", "dep:serde_json", "serde", "dep:getrandom"]
 server-audit = ["server", "audit"]
 proof-stream = ["dep:proof-stream"]
@@ -54,6 +55,7 @@ ureq = { version = "3", optional = true }
 sha3 = { version = "0.10", optional = true }
 getrandom = { version = "0.2", optional = true }
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
 proof-stream = { path = "../proof-stream", optional = true }
 
 [target.'cfg(unix)'.dependencies]
