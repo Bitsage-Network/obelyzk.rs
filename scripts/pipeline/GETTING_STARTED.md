@@ -22,7 +22,18 @@ Prove that an ML model ran correctly, and verify the proof on-chain. Works on an
 SSH into your GPU machine and run:
 
 ```bash
+# Single-prompt inference + ZK proof + on-chain verification
 curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit
+```
+
+**Multi-turn conversation** — have the model discuss a topic across multiple turns, with each turn ZK-proved:
+
+```bash
+# 3-turn conversation about quantum computing, each turn proved + verified on-chain
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
+
+# 5-turn deep dive
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "cryptography and post-quantum security" --conversation-turns 5
 ```
 
 Or clone and run manually:
@@ -33,17 +44,17 @@ cd stwo-ml/scripts/pipeline
 
 # Dry run (no on-chain submission) — good for first try
 ./run_e2e.sh --preset phi3-mini --gpu --dry-run
+
+# Single prompt + on-chain
+./run_e2e.sh --preset qwen3-14b --gpu --submit
+
+# Multi-turn conversation + on-chain
+./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "neural networks"
 ```
 
-This does everything: installs drivers, downloads the model, tokenizes a mathematical prompt, captures real inference logs through the proved forward pass, generates a ZK proof, verifies it locally, and runs an audit.
+This does everything: installs drivers, downloads the model, runs inference (single prompt or multi-turn conversation), captures real inference logs through the proved forward pass, generates a ZK proof for each entry, verifies on-chain, and runs an audit.
 
 During setup, you'll be prompted for your email. This links your device to your [marketplace dashboard](https://marketplace.bitsage.network) where you can view all your proofs and audit reports. If you don't have an account yet, sign up at `marketplace.bitsage.network/signup` with the same email after the pipeline completes.
-
-To also submit the proof on-chain (zero-config on Sepolia — no wallet needed):
-
-```bash
-./run_e2e.sh --preset qwen3-14b --gpu --submit
-```
 
 Gas is paid by Obelysk via AVNU paymaster. To use your own account instead:
 
@@ -220,10 +231,16 @@ Use `CAPTURE_TIMEOUT_SEC` (default `3600`) to bound capture runtime.
 
 **What it does:** Generates a multi-turn conversation about a topic using the real model (float16 via HuggingFace), then proves each turn through the M31 forward pass. This produces an inference log where each entry has real text responses — not just M31 output.
 
+**Fastest way (bootstrap one-liner):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
+```
+
 Two-phase approach:
 1. **Float path** (Python): Loads the model in float16, generates real text responses autoregressively
 2. **Proof path** (Rust): For each turn, extracts the last token's embedding and runs the M31 forward pass
 
+**Standalone:**
 ```bash
 # 3-turn conversation about quantum computing
 ./02c_conversation.sh --topic "quantum computing and its implications for cryptography" --turns 3
@@ -238,16 +255,16 @@ Two-phase approach:
 ./02c_conversation.sh --topic "neural networks" --turns 2 --layers 1
 ```
 
-**GPU memory note:** The float model (~28GB for Qwen3-14B) and M31 prove-model both need GPU memory. They run sequentially — Python generates all turns first, then Rust proves them all.
-
-**Via run_e2e.sh:**
+**Full pipeline (E2E):**
 ```bash
-# E2E with multi-turn conversation
+# E2E with multi-turn conversation + on-chain proof
 ./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
 
 # More turns
 ./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "cryptography" --conversation-turns 5
 ```
+
+**GPU memory note:** The float model (~28GB for Qwen3-14B) and M31 prove-model both need GPU memory. They run sequentially — Python generates all turns first, then Rust proves them all.
 
 The conversation log entries are chain-linked just like regular captures. Each entry includes the real model response text in `output_preview` and the generated token IDs in `output_tokens`. The normal prove → verify → on-chain flow handles all entries.
 
@@ -421,7 +438,23 @@ The script will:
 
 ## Quick Reference
 
-### One-Command Examples
+### One-Command Bootstrap (fresh machine)
+
+```bash
+# Single prompt + on-chain (zero-config)
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit
+
+# Multi-turn conversation + on-chain
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
+
+# 5-turn conversation
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "machine learning" --conversation-turns 5
+
+# Dry run (no on-chain)
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset phi3-mini --gpu --dry-run
+```
+
+### run_e2e.sh Examples (already cloned)
 
 ```bash
 # Test everything locally (no on-chain, smallest model)
@@ -431,12 +464,13 @@ The script will:
 # Automatically uses a complex mathematical prompt for real tokenized inference
 ./run_e2e.sh --preset qwen3-14b --gpu --submit
 
+# Multi-turn conversation — real text responses with ZK proofs
+./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
+./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "cryptography" --conversation-turns 5
+
 # Custom prompt — prove real inference on your own text
 ./run_e2e.sh --preset qwen3-14b --gpu --submit \
   --prompt "Prove that for any prime p > 2, the Legendre symbol (a/p) satisfies Euler's criterion: a^((p-1)/2) ≡ (a/p) mod p"
-
-# Multi-turn conversation — real text responses with ZK proofs
-./run_e2e.sh --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
 
 # Random input (disable default prompt)
 ./run_e2e.sh --preset qwen3-14b --gpu --submit --no-prompt
