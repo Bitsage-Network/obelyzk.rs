@@ -204,6 +204,14 @@ struct SessionMeta {
     /// Hash version: "2" = M31 Poseidon2 (current). Absent or "1" = legacy felt252.
     #[serde(default = "default_hash_version")]
     hash_version: String,
+    /// Cryptographic anchor: hex hash of the most recent entry.
+    /// Used to detect tail truncation on reload.
+    #[serde(default)]
+    last_entry_hash: Option<String>,
+    /// Cryptographic anchor: hex Merkle root over all entries.
+    /// Used to detect any log modification on reload.
+    #[serde(default)]
+    merkle_root: Option<String>,
 }
 
 fn default_hash_version() -> String {
@@ -236,6 +244,8 @@ pub struct InferenceLog {
     next_sequence: u64,
     /// Hash of the most recent entry (M31 digest hex, "0x0" if empty).
     last_entry_hash: String,
+    /// Timestamp (ns) of the most recent entry, for monotonicity checking.
+    last_timestamp_ns: u64,
 
     // ── File handles ──
     /// JSONL writer (one entry per line).
@@ -270,6 +280,8 @@ impl InferenceLog {
             created_at: now_iso8601(),
             entry_count: 0,
             hash_version: "2".to_string(),
+            last_entry_hash: None,
+            merkle_root: None,
         };
         let meta_path = log_dir.join("meta.json");
         let meta_file = File::create(&meta_path)?;
@@ -301,6 +313,7 @@ impl InferenceLog {
             merkle: AuditMerkleTree::new(),
             next_sequence: 0,
             last_entry_hash: "0x0".to_string(),
+            last_timestamp_ns: 0,
             log_writer,
             matrix_writer,
             matrix_offset: 0,
@@ -325,6 +338,7 @@ impl InferenceLog {
         let mut entries = Vec::new();
         let mut merkle = AuditMerkleTree::new();
         let mut last_entry_hash = "0x0".to_string();
+        let mut last_timestamp_ns = 0u64;
 
         if log_path.exists() {
             let file = File::open(&log_path)?;
@@ -340,11 +354,33 @@ impl InferenceLog {
                 let hash = parse_digest_or_zero(&entry.entry_hash);
                 merkle.push(hash);
                 last_entry_hash = entry.entry_hash.clone();
+                if entry.timestamp_ns > last_timestamp_ns {
+                    last_timestamp_ns = entry.timestamp_ns;
+                }
                 entries.push(entry);
             }
         }
 
         let next_sequence = entries.len() as u64;
+
+        // Verify cryptographic anchors from meta.json (if present).
+        if let Some(ref meta_hash) = meta.last_entry_hash {
+            if meta_hash != &last_entry_hash {
+                return Err(AuditError::LogError(format!(
+                    "meta.json last_entry_hash ({}) doesn't match log tail ({})",
+                    meta_hash, last_entry_hash
+                )));
+            }
+        }
+        if let Some(ref meta_root) = meta.merkle_root {
+            let rebuilt_root = digest_to_hex(&merkle.root());
+            if meta_root != &rebuilt_root {
+                return Err(AuditError::LogError(format!(
+                    "meta.json merkle_root ({}) doesn't match rebuilt tree ({})",
+                    meta_root, rebuilt_root
+                )));
+            }
+        }
 
         // Current matrix sidecar offset.
         let matrix_path = log_dir.join("matrices.bin");
@@ -376,6 +412,7 @@ impl InferenceLog {
             merkle,
             next_sequence,
             last_entry_hash,
+            last_timestamp_ns,
             log_writer,
             matrix_writer,
             matrix_offset,
@@ -391,6 +428,15 @@ impl InferenceLog {
     ///
     /// Returns the assigned sequence number.
     pub fn append(&mut self, mut entry: InferenceLogEntry) -> Result<u64, AuditError> {
+        // Timestamp monotonicity check.
+        if entry.timestamp_ns < self.last_timestamp_ns {
+            return Err(AuditError::LogError(format!(
+                "timestamp regression: {} < previous {}",
+                entry.timestamp_ns, self.last_timestamp_ns
+            )));
+        }
+        self.last_timestamp_ns = entry.timestamp_ns;
+
         // Assign sequence number.
         entry.sequence_number = self.next_sequence;
 
@@ -601,7 +647,7 @@ impl InferenceLog {
         &self.last_entry_hash
     }
 
-    /// Update meta.json with current entry count.
+    /// Update meta.json with current entry count and cryptographic anchors.
     fn update_meta(&self) -> Result<(), AuditError> {
         let meta = SessionMeta {
             model_id: self.model_id.clone(),
@@ -610,6 +656,8 @@ impl InferenceLog {
             created_at: now_iso8601(),
             entry_count: self.entries.len() as u64,
             hash_version: "2".to_string(),
+            last_entry_hash: Some(self.last_entry_hash.clone()),
+            merkle_root: Some(digest_to_hex(&self.merkle.root())),
         };
         let meta_path = self.log_dir.join("meta.json");
         let meta_file = File::create(&meta_path)?;
@@ -974,6 +1022,129 @@ mod tests {
         // Should be parseable as M31 digest
         let parsed = hex_to_digest(hash);
         assert!(parsed.is_ok(), "entry hash should parse as M31 digest");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Timestamp monotonicity tests ───────────────────────────
+
+    #[test]
+    fn test_timestamp_regression_rejected() {
+        let dir = temp_dir();
+        let mut log = InferenceLog::new(&dir, "0x2", "0xabc", "test-model").expect("create log");
+
+        let base_ts = 1_000_000_000_000u64;
+        log.append(make_entry(0, base_ts)).expect("first append");
+        log.append(make_entry(1, base_ts + 1_000_000))
+            .expect("second append");
+
+        // This entry has a timestamp BEFORE the previous entry
+        let result = log.append(make_entry(2, base_ts - 1));
+        assert!(result.is_err(), "timestamp regression must be rejected");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_timestamp_equal_allowed() {
+        let dir = temp_dir();
+        let mut log = InferenceLog::new(&dir, "0x2", "0xabc", "test-model").expect("create log");
+
+        let ts = 1_000_000_000_000u64;
+        log.append(make_entry(0, ts)).expect("first append");
+        // Equal timestamps are allowed (not strictly increasing, just monotonic)
+        log.append(make_entry(1, ts)).expect("equal timestamp ok");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Cryptographic anchor tests ─────────────────────────────
+
+    #[test]
+    fn test_meta_anchors_written() {
+        let dir = temp_dir();
+        {
+            let mut log =
+                InferenceLog::new(&dir, "0x2", "0xabc", "test-model").expect("create log");
+            let base_ts = 1_000_000_000_000u64;
+            for i in 0..5 {
+                log.append(make_entry(i, base_ts + i * 1_000_000))
+                    .expect("append");
+            }
+        }
+
+        // Read meta.json and verify anchors are present
+        let meta_path = dir.join("meta.json");
+        let meta_file = File::open(&meta_path).expect("open meta");
+        let meta: serde_json::Value =
+            serde_json::from_reader(meta_file).expect("parse meta");
+
+        assert!(
+            meta.get("last_entry_hash").is_some(),
+            "meta should have last_entry_hash"
+        );
+        assert!(
+            meta.get("merkle_root").is_some(),
+            "meta should have merkle_root"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_truncated_log_detected_on_reload() {
+        let dir = temp_dir();
+        {
+            let mut log =
+                InferenceLog::new(&dir, "0x2", "0xabc", "test-model").expect("create log");
+            let base_ts = 1_000_000_000_000u64;
+            for i in 0..10 {
+                log.append(make_entry(i, base_ts + i * 1_000_000))
+                    .expect("append");
+            }
+        }
+
+        // Truncate log.jsonl: remove the last line
+        let log_path = dir.join("log.jsonl");
+        let content = fs::read_to_string(&log_path).expect("read log");
+        let lines: Vec<&str> = content.trim_end().split('\n').collect();
+        let truncated = lines[..lines.len() - 1].join("\n") + "\n";
+        fs::write(&log_path, truncated).expect("write truncated log");
+
+        // Reload should fail: meta.json anchors don't match truncated log
+        let result = InferenceLog::load(&dir);
+        assert!(result.is_err(), "truncated log must be detected on reload");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_corrupted_merkle_root_detected() {
+        let dir = temp_dir();
+        {
+            let mut log =
+                InferenceLog::new(&dir, "0x2", "0xabc", "test-model").expect("create log");
+            let base_ts = 1_000_000_000_000u64;
+            for i in 0..5 {
+                log.append(make_entry(i, base_ts + i * 1_000_000))
+                    .expect("append");
+            }
+        }
+
+        // Corrupt merkle_root in meta.json
+        let meta_path = dir.join("meta.json");
+        let content = fs::read_to_string(&meta_path).expect("read meta");
+        let corrupted = content.replace(
+            &content[content.find("\"merkle_root\"").unwrap()..content.find("\"merkle_root\"").unwrap() + 80],
+            "\"merkle_root\": \"0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"",
+        );
+        fs::write(&meta_path, corrupted).expect("write corrupted meta");
+
+        let result = InferenceLog::load(&dir);
+        assert!(
+            result.is_err(),
+            "corrupted merkle_root must be detected on reload"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

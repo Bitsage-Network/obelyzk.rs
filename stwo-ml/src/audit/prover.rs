@@ -218,19 +218,15 @@ impl<'a> AuditProver<'a> {
         let proving_time_ms = start.elapsed().as_millis() as u64;
 
         // Cross-check: proof's io_commitment vs the log entry's.
-        // The GKR prover runs its own forward pass (potentially GPU) which may
-        // produce different intermediate values than the CPU replay that captured
-        // the log. The proof's io_commitment is authoritative — it's what gets
-        // submitted on-chain. Log divergence but don't fail.
+        // After fixing the replay forward pass to use unreduced activations
+        // (matching the prover), divergence indicates real data corruption.
         let proof_io_hex = format!("{:#066x}", gkr_proof.io_commitment);
         if let Ok(logged_io) = FieldElement::from_hex_be(&entry.io_commitment) {
             if gkr_proof.io_commitment != logged_io {
-                tracing::warn!(
-                    seq = entry.sequence_number,
-                    logged = %entry.io_commitment,
-                    proof = %proof_io_hex,
-                    "io_commitment divergence (GPU/CPU forward-pass difference) — using prover's commitment",
-                );
+                return Err(AuditError::ProvingFailed(format!(
+                    "io_commitment mismatch for seq {}: logged={}, proof={}",
+                    entry.sequence_number, entry.io_commitment, proof_io_hex,
+                )));
             }
         }
 
@@ -294,20 +290,15 @@ impl<'a> AuditProver<'a> {
         let proving_time_ms = start.elapsed().as_millis() as u64;
 
         // Cross-check: proof's io_commitment vs the log entry's.
-        // The proof's commitment is authoritative (derived from the prover's own
-        // forward pass). When the prover uses GPU and the capture used CPU replay,
-        // intermediate value handling differs (unreduced activations for GKR
-        // chaining), so io_commitments may legitimately diverge. The proof's
-        // commitment is always correct for its own execution trace.
+        // After fixing the replay forward pass to use unreduced activations
+        // (matching the prover), divergence indicates real data corruption.
         let proof_io_hex = format!("{:#066x}", proof.io_commitment);
         if let Ok(logged_io) = FieldElement::from_hex_be(&entry.io_commitment) {
             if proof.io_commitment != logged_io {
-                tracing::warn!(
-                    seq = entry.sequence_number,
-                    logged = %entry.io_commitment,
-                    proof = %proof_io_hex,
-                    "io_commitment divergence (GPU/CPU forward-pass difference) — using prover's commitment",
-                );
+                return Err(AuditError::ProvingFailed(format!(
+                    "io_commitment mismatch for seq {}: logged={}, proof={}",
+                    entry.sequence_number, entry.io_commitment, proof_io_hex,
+                )));
             }
         }
 
