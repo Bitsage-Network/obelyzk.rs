@@ -327,6 +327,7 @@ fn u64_limbs_to_felt252(limbs: &[u64; 4]) -> Option<FieldElement> {
 
 /// MLE opening proof matching Cairo's `MleOpeningProof`.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MleOpeningProof {
     /// Merkle roots of intermediate folded layers.
     pub intermediate_roots: Vec<FieldElement>,
@@ -338,6 +339,7 @@ pub struct MleOpeningProof {
 
 /// Proof for a single query through all folding layers.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MleQueryProof {
     /// Initial pair index in the bottom layer.
     pub initial_pair_index: u32,
@@ -347,6 +349,7 @@ pub struct MleQueryProof {
 
 /// Data for one round of a query proof.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MleQueryRoundData {
     pub left_value: SecureField,
     pub right_value: SecureField,
