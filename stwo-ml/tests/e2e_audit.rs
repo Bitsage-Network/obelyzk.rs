@@ -637,3 +637,238 @@ fn test_e2e_large_batch() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ============================================================================
+// Test 11: Anchor tamper detection — corrupted last_entry_hash
+// ============================================================================
+
+#[test]
+fn test_e2e_audit_anchor_tamper_detection() {
+    let dir = temp_dir("anchor_tamper");
+    let (graph, weights, _) = build_audit_model();
+    let _log = populate_log(&dir, 5, &graph, &weights);
+
+    // Corrupt last_entry_hash in meta.json
+    let meta_path = dir.join("meta.json");
+    let meta_str = std::fs::read_to_string(&meta_path).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+
+    let mut corrupted = meta.clone();
+    corrupted["last_entry_hash"] =
+        serde_json::Value::String("0x00000000deadbeef00000000deadbeef00000000deadbeef00000000deadbeef".to_string());
+    std::fs::write(&meta_path, serde_json::to_string_pretty(&corrupted).unwrap()).unwrap();
+
+    // Reload should fail with anchor mismatch
+    let result = InferenceLog::load(&dir);
+    assert!(result.is_err(), "loading tampered log should fail");
+    let err_msg = match result {
+        Err(e) => format!("{}", e),
+        Ok(_) => panic!("expected error"),
+    };
+    assert!(
+        err_msg.contains("last_entry_hash") || err_msg.contains("don't match") || err_msg.contains("doesn't match"),
+        "error should mention last_entry_hash mismatch, got: {}",
+        err_msg,
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ============================================================================
+// Test 12: Log truncation detection — remove entries, hash mismatch
+// ============================================================================
+
+#[test]
+fn test_e2e_audit_log_truncation_detection() {
+    let dir = temp_dir("truncation");
+    let (graph, weights, _) = build_audit_model();
+    let _log = populate_log(&dir, 5, &graph, &weights);
+
+    // Read log.jsonl and remove last 2 entries
+    let log_path = dir.join("log.jsonl");
+    let contents = std::fs::read_to_string(&log_path).unwrap();
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 5, "should have 5 entries");
+
+    // Keep only first 3 entries
+    let truncated = lines[..3].join("\n") + "\n";
+    std::fs::write(&log_path, truncated).unwrap();
+
+    // meta.json still has last_entry_hash from entry 5, but log only has 3
+    // → last_entry_hash mismatch on reload
+    let result = InferenceLog::load(&dir);
+    assert!(result.is_err(), "loading truncated log should fail");
+    let err_msg = match result {
+        Err(e) => format!("{}", e),
+        Ok(_) => panic!("expected error"),
+    };
+    assert!(
+        err_msg.contains("last_entry_hash") || err_msg.contains("doesn't match"),
+        "error should mention hash mismatch, got: {}",
+        err_msg,
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ============================================================================
+// Test 13: Timestamp regression detection
+// ============================================================================
+
+#[test]
+fn test_e2e_audit_timestamp_regression() {
+    let dir = temp_dir("ts_regress");
+    let (graph, weights, _) = build_audit_model();
+    let mut log = populate_log(&dir, 3, &graph, &weights);
+
+    // Try appending an entry with a timestamp earlier than the last one
+    let input = make_input(10);
+    let output = stwo_ml::audit::replay::execute_forward_pass(&graph, &input, &weights).unwrap();
+    let io_commitment = compute_io_commitment(&input, &output);
+
+    let input_data: Vec<u32> = input.data.iter().map(|m| m.0).collect();
+    let (mat_off, mat_sz) = log.write_matrix(1, 4, &input_data).unwrap();
+
+    let entry = InferenceLogEntry {
+        inference_id: 100,
+        sequence_number: 0,
+        model_id: "0x2".to_string(),
+        weight_commitment: "0xabc".to_string(),
+        model_name: "test-mlp".to_string(),
+        num_layers: 3,
+        input_tokens: vec![1, 2, 3, 4],
+        output_tokens: vec![5, 6],
+        matrix_offset: mat_off,
+        matrix_size: mat_sz,
+        input_rows: 1,
+        input_cols: 4,
+        output_rows: output.rows as u32,
+        output_cols: output.cols as u32,
+        io_commitment: format!("{:#066x}", io_commitment),
+        layer_chain_commitment: "0x0".to_string(),
+        prev_entry_hash: String::new(),
+        entry_hash: String::new(),
+        // Timestamp BEFORE the last entry (regression)
+        timestamp_ns: 1,
+        latency_ms: 50,
+        gpu_device: "test-gpu".to_string(),
+        tee_report_hash: "0x0".to_string(),
+        task_category: Some("test".to_string()),
+        input_preview: None,
+        output_preview: None,
+    };
+
+    let result = log.append(entry);
+    assert!(result.is_err(), "timestamp regression should be rejected");
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("timestamp regression"),
+        "error should mention timestamp regression, got: {}",
+        err_msg,
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ============================================================================
+// Test 14: Multi-session aggregation
+// ============================================================================
+
+#[test]
+fn test_e2e_multi_session_aggregation() {
+    use stwo_ml::audit::aggregator::MultiSessionAuditAggregator;
+    use stwo_ml::audit::digest::{digest_to_hex, ZERO_DIGEST};
+
+    let base = temp_dir("multi_session");
+    let (graph, weights, _) = build_audit_model();
+
+    // Create 3 separate sessions
+    let s1 = base.join("session_001");
+    let s2 = base.join("session_002");
+    let s3 = base.join("session_003");
+
+    populate_log(&s1, 3, &graph, &weights);
+    populate_log(&s2, 5, &graph, &weights);
+    populate_log(&s3, 2, &graph, &weights);
+
+    let mut agg = MultiSessionAuditAggregator::new();
+    agg.add_session(&s1).unwrap();
+    agg.add_session(&s2).unwrap();
+    agg.add_session(&s3).unwrap();
+
+    let report = agg.generate_report().unwrap();
+
+    // Verify chain hash links all 3
+    assert_ne!(report.chain_hash, ZERO_DIGEST);
+    assert!(agg.verify_chain().unwrap());
+
+    // Verify total entries = sum of individual
+    assert_eq!(report.total_entries, 3 + 5 + 2);
+
+    // Verify sessions
+    assert_eq!(report.sessions.len(), 3);
+    assert_eq!(report.sessions[0].entry_count, 3);
+    assert_eq!(report.sessions[1].entry_count, 5);
+    assert_eq!(report.sessions[2].entry_count, 2);
+
+    // Verify time span covers all sessions
+    assert!(report.time_span.1 >= report.time_span.0);
+
+    eprintln!("=== Multi-Session Aggregation Test Passed ===");
+    eprintln!("  Total entries: {}", report.total_entries);
+    eprintln!("  Chain hash: {}", digest_to_hex(&report.chain_hash));
+    eprintln!("  Sessions: {}", report.sessions.len());
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// ============================================================================
+// Test 15: Multi-session tamper detection
+// ============================================================================
+
+#[test]
+fn test_e2e_multi_session_tamper_detection() {
+    use stwo_ml::audit::aggregator::MultiSessionAuditAggregator;
+
+    let base = temp_dir("multi_tamper");
+    let (graph, weights, _) = build_audit_model();
+
+    // Create 2 sessions
+    let s1 = base.join("session_001");
+    let s2 = base.join("session_002");
+
+    populate_log(&s1, 3, &graph, &weights);
+    populate_log(&s2, 4, &graph, &weights);
+
+    // First aggregation should succeed
+    {
+        let mut agg = MultiSessionAuditAggregator::new();
+        agg.add_session(&s1).unwrap();
+        agg.add_session(&s2).unwrap();
+        assert!(agg.verify_chain().unwrap());
+    }
+
+    // Corrupt session 1's merkle_root in meta.json
+    let meta_path = s1.join("meta.json");
+    let meta_str = std::fs::read_to_string(&meta_path).unwrap();
+    let mut meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+    meta["merkle_root"] =
+        serde_json::Value::String("0x00000000deadbeef00000000deadbeef00000000deadbeef00000000deadbeef".to_string());
+    std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+
+    // Re-aggregate should fail on session 1
+    let mut agg2 = MultiSessionAuditAggregator::new();
+    let result = agg2.add_session(&s1);
+    assert!(
+        result.is_err(),
+        "aggregating tampered session should fail"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("anchor") || err_msg.contains("mismatch") || err_msg.contains("merkle_root"),
+        "error should mention anchor/mismatch, got: {}",
+        err_msg,
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}

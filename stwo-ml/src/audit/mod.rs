@@ -36,6 +36,7 @@
 //! - [`encryption`] — Encryption integration with VM31 (Dev B)
 //! - [`orchestrator`] — E2E audit orchestration (Dev B)
 
+pub mod aggregator;
 pub mod digest;
 pub mod types;
 

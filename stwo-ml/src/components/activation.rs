@@ -21,6 +21,7 @@ use crate::gadgets::lookup_table::PrecomputedTable;
 /// These are element-wise nonlinearities. LayerNorm is NOT an activation —
 /// it operates on vectors and is handled by `GraphOp::LayerNorm`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ActivationType {
     ReLU,
     GELU,

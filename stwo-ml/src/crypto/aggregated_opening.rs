@@ -49,6 +49,7 @@ pub fn aggregated_mle_queries() -> usize {
 
 /// Configuration for the aggregated binding protocol.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AggregatedBindingConfig {
     /// Number of selector bits (log2 of padded matrix count).
     pub selector_bits: usize,
@@ -108,6 +109,7 @@ pub struct AggregatedWeightClaim {
 
 /// Super-root: virtual Merkle root built from per-matrix subtree roots.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SuperRoot {
     /// The top-level super-root hash.
     pub root: FieldElement,
@@ -121,6 +123,7 @@ pub struct SuperRoot {
 
 /// Complete aggregated weight binding proof.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AggregatedWeightBindingProof {
     /// Protocol configuration.
     pub config: AggregatedBindingConfig,

@@ -10,7 +10,9 @@ use stwo::core::fields::m31::BaseField as M31;
 use crate::crypto::commitment::{
     derive_pubkey, derive_viewing_key, validate_spending_key, PublicKey, SpendingKey,
 };
-use crate::crypto::encryption::{derive_key, poseidon2_decrypt, poseidon2_encrypt};
+use crate::crypto::encryption::{derive_key, poseidon2_decrypt, poseidon2_encrypt_siv};
+#[cfg(test)]
+use crate::crypto::encryption::poseidon2_encrypt;
 use crate::crypto::poseidon2_m31::{poseidon2_hash, RATE};
 
 /// Legacy Poseidon2 iteration count (v2 wallets only — backward compat).
@@ -42,6 +44,8 @@ pub enum WalletError {
     DecryptionFailed,
     #[error("hex parse error: {0}")]
     HexParse(String),
+    #[error("encryption error: {0}")]
+    Encryption(String),
 }
 
 /// VM31 wallet containing a spending key and derived keys.
@@ -149,14 +153,15 @@ impl Wallet {
         let json = if let Some(pw) = password {
             let salt = generate_salt()?;
             let pw_key = password_to_key_argon2id(pw, &salt)?;
-            let nonce = generate_nonce()?;
             let sk_elems: Vec<M31> = self.spending_key.to_vec();
-            let encrypted = poseidon2_encrypt(&pw_key, &nonce, &sk_elems);
+            // SIV: nonce derived from content, no nonce management needed.
+            let siv = poseidon2_encrypt_siv(&pw_key, &sk_elems)
+                .map_err(|e| WalletError::Encryption(e.to_string()))?;
 
-            let enc_hex = m31_vec_to_hex(&encrypted);
+            let enc_hex = m31_vec_to_hex(&siv.ciphertext);
             let nonce_hex = format!(
                 "0x{:08x}{:08x}{:08x}{:08x}",
-                nonce[0].0, nonce[1].0, nonce[2].0, nonce[3].0,
+                siv.nonce[0].0, siv.nonce[1].0, siv.nonce[2].0, siv.nonce[3].0,
             );
             let salt_hex = format!(
                 "0x{:08x}{:08x}{:08x}{:08x}",

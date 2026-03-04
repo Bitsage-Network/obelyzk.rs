@@ -996,6 +996,7 @@ pub fn verify_matmul_sumcheck(
 
 /// Degree-2 round polynomial: `p(x) = c0 + c1*x + c2*x^2`.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RoundPoly {
     pub c0: SecureField,
     pub c1: SecureField,
