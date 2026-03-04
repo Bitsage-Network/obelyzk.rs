@@ -303,7 +303,7 @@ fn test_e2e_gkr_pipeline() {
     {
         let circuit = stwo_ml::gkr::LayeredCircuit::from_graph(&graph).unwrap();
         let mut verify_channel = stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
-        stwo_ml::gkr::verify_gkr(
+        stwo_ml::gkr::verifier::verify_gkr(
             &circuit,
             gkr_proof.gkr_proof.as_ref().unwrap(),
             &gkr_proof.execution.output,
@@ -430,4 +430,152 @@ fn test_e2e_direct_pipeline() {
         direct_proof.total_calldata_size
     );
     eprintln!("  IO commitment: {:#066x}", direct_io_commitment);
+}
+
+/// E2E test: prove → health check → dry-run → corruption detection.
+///
+/// Validates the fast proof validity check and dry-run simulation:
+/// 1. Build a small MLP and prove with GKR
+/// 2. Serialize to v4 packed IO calldata
+/// 3. Run verify_proof_fast() → assert all checks pass
+/// 4. Run dry_run_onchain() without RPC → assert healthy
+/// 5. Corrupt a single felt → assert health check catches it
+/// 6. Truncate calldata → assert tail sentinel failure
+#[test]
+fn test_e2e_prove_health_check_dry_run() {
+    use stwo_ml::aggregation::prove_model_pure_gkr;
+    use stwo_ml::gkr::types::WeightOpeningTranscriptMode;
+    use stwo_ml::starknet::{
+        build_verify_model_gkr_v4_packed_io_calldata, dry_run_onchain, verify_proof_fast,
+    };
+
+    // 1. Build a 2-layer MLP: MatMul(4→4) + ReLU + MatMul(4→2)
+    let mut builder = GraphBuilder::new((1, 4));
+    builder
+        .linear(4)
+        .activation(ActivationType::ReLU)
+        .linear(2);
+    let graph = builder.build();
+
+    let mut input = M31Matrix::new(1, 4);
+    for j in 0..4 {
+        input.set(0, j, M31::from((j + 1) as u32));
+    }
+
+    let mut weights = GraphWeights::new();
+    let mut w0 = M31Matrix::new(4, 4);
+    for i in 0..4 {
+        for j in 0..4 {
+            w0.set(i, j, M31::from(((i * 3 + j * 5) % 11 + 1) as u32));
+        }
+    }
+    weights.add_weight(0, w0);
+    let mut w2 = M31Matrix::new(4, 2);
+    for i in 0..4 {
+        for j in 0..2 {
+            w2.set(i, j, M31::from((i * 2 + j + 1) as u32));
+        }
+    }
+    weights.add_weight(2, w2);
+
+    // 2. Prove with GKR
+    let mut agg_proof =
+        prove_model_pure_gkr(&graph, &input, &weights).expect("GKR proving should succeed");
+    let gkr = agg_proof
+        .gkr_proof
+        .as_mut()
+        .expect("GKR proof must be present");
+    gkr.weight_opening_transcript_mode = WeightOpeningTranscriptMode::AggregatedOracleSumcheck;
+    gkr.aggregated_binding = None;
+
+    // 3. Serialize to v4 packed IO calldata
+    let circuit =
+        stwo_ml::gkr::LayeredCircuit::from_graph(&graph).expect("circuit should compile");
+    let raw_io = stwo_ml::cairo_serde::serialize_raw_io(&input, &agg_proof.execution.output);
+    let model_id = FieldElement::from(0x42u64);
+
+    let v4_calldata =
+        build_verify_model_gkr_v4_packed_io_calldata(gkr, &circuit, model_id, &raw_io)
+            .expect("packed IO calldata should build");
+
+    // Parse calldata from strings to FieldElements
+    let calldata_felts: Vec<FieldElement> = v4_calldata
+        .calldata_parts
+        .iter()
+        .filter_map(|s| {
+            if s.starts_with("0x") || s.starts_with("0X") {
+                FieldElement::from_hex_be(s).ok()
+            } else {
+                s.parse::<u64>().ok().map(FieldElement::from)
+            }
+        })
+        .collect();
+
+    assert!(
+        !calldata_felts.is_empty(),
+        "calldata should have been parsed"
+    );
+
+    // 4. Run verify_proof_fast() — should pass
+    let report = verify_proof_fast(&calldata_felts);
+    eprintln!("=== Health Check Report ===");
+    for check in &report.checks {
+        let status = if check.passed { "PASS" } else { "FAIL" };
+        eprintln!("  [{}] {}: {}", status, check.name, check.detail);
+    }
+    assert!(report.passed, "health check should pass on valid proof");
+    assert!(report.total_felts > 0);
+    assert!(report.estimated_steps > 0);
+
+    // 5. Run dry_run_onchain() without RPC — should pass
+    let dry_run = dry_run_onchain(&calldata_felts, None, None);
+    assert!(dry_run.health.passed, "dry-run health should pass");
+    assert!(
+        dry_run.within_step_limit,
+        "small MLP should be within step limit"
+    );
+    assert!(dry_run.estimated_steps < 10_000_000);
+    assert!(dry_run.calldata_size > 0);
+    assert!(dry_run.rpc_simulation.is_none(), "no RPC provided");
+
+    // 6. Corrupt a single felt → health check should still detect something
+    {
+        let mut corrupted = calldata_felts.clone();
+        // Zero out the model_id
+        corrupted[0] = FieldElement::ZERO;
+        let corrupt_report = verify_proof_fast(&corrupted);
+        // model_id check should fail
+        let model_check = corrupt_report
+            .checks
+            .iter()
+            .find(|c| c.name == "model_id");
+        assert!(
+            model_check.is_some() && !model_check.unwrap().passed,
+            "zeroed model_id should fail model_id check"
+        );
+        assert!(
+            !corrupt_report.passed,
+            "corrupted proof should fail overall"
+        );
+    }
+
+    // 7. Truncate calldata → tail sentinel or length check should fail
+    {
+        let truncated: Vec<FieldElement> = calldata_felts
+            .iter()
+            .take(3)
+            .cloned()
+            .collect();
+        let trunc_report = verify_proof_fast(&truncated);
+        // With only 3 felts, io_header check should fail (not enough room)
+        assert!(
+            !trunc_report.passed,
+            "truncated proof should fail health check"
+        );
+    }
+
+    eprintln!("=== E2E Health Check + Dry-Run Test Passed ===");
+    eprintln!("  Calldata size: {} felts", calldata_felts.len());
+    eprintln!("  Estimated steps: {}", report.estimated_steps);
+    eprintln!("  Dry-run fee: {:.4} STRK", dry_run.estimated_fee_strk);
 }
