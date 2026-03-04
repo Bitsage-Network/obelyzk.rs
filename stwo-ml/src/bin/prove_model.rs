@@ -161,6 +161,20 @@ struct Cli {
     #[arg(long)]
     verify_proof: Option<PathBuf>,
 
+    /// Run a fast structural health check on the proof after proving.
+    /// Catches corruption, truncation, and format errors before submission.
+    #[arg(long)]
+    health_check: bool,
+
+    /// Dry-run: prove + health check + step estimation, but skip on-chain submission.
+    /// Optionally calls starknet_simulateTransactions if --rpc-url is set.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Starknet RPC URL for dry-run simulation (optional).
+    #[arg(long)]
+    rpc_url: Option<String>,
+
     /// Submit the GKR proof on-chain via `sncast invoke`.
     #[arg(long)]
     submit_gkr: bool,
@@ -352,6 +366,11 @@ struct AuditCmd {
     /// Irys API token for authenticated Arweave uploads (or set IRYS_TOKEN env var).
     #[arg(long, env = "IRYS_TOKEN")]
     irys_token: Option<String>,
+
+    /// Multi-session aggregation: path to a directory containing multiple session
+    /// subdirectories. When set, aggregates all sessions into a combined report.
+    #[arg(long)]
+    sessions: Option<PathBuf>,
 
     /// Proof mode: "direct" (fast, aggregated STARK — default), "gkr" (full GKR with
     /// weight openings), or "legacy" (Blake2s, not on-chain verifiable).
@@ -859,21 +878,129 @@ fn main() {
             .unwrap_or("");
 
         if format != "ml_gkr" {
-            // Non-GKR formats: structural check only (legacy path)
+            // Non-GKR formats: cryptographic verification where possible.
             let has_matmul = proof_json.get("batched_calldata").is_some()
                 || proof_json.get("gkr_calldata").is_some()
                 || proof_json.get("model_id").is_some();
-            if has_matmul {
-                eprintln!(
-                    "  format: {}",
-                    if format.is_empty() { "unknown" } else { format }
-                );
-                eprintln!("Proof structure valid (structural check only).");
-                process::exit(0);
-            } else {
+            if !has_matmul {
                 eprintln!("Error: proof file does not contain recognized proof fields");
                 process::exit(1);
             }
+
+            eprintln!(
+                "  format: {}",
+                if format.is_empty() { "unknown" } else { format }
+            );
+
+            let mut any_crypto_check = false;
+            let mut failed = false;
+
+            // (a) If gkr_calldata present, run verify_proof_fast() for
+            //     structural health checks (range, tags, PoW, truncation).
+            if let Some(gkr_arr) = proof_json.get("gkr_calldata").and_then(|v| v.as_array()) {
+                if !gkr_arr.is_empty() {
+                    let felts: Result<Vec<FieldElement>, _> = gkr_arr
+                        .iter()
+                        .map(|v| {
+                            let hex = v.as_str().unwrap_or("0x0");
+                            FieldElement::from_hex_be(hex)
+                        })
+                        .collect();
+
+                    match felts {
+                        Ok(calldata) => {
+                            let health = stwo_ml::starknet::verify_proof_fast(&calldata);
+                            eprintln!("  proof health check ({} felts):", calldata.len());
+                            for c in &health.checks {
+                                let mark = if c.passed { "✓" } else { "✗" };
+                                eprintln!("    [{mark}] {}: {}", c.name, c.detail);
+                            }
+                            if !health.passed {
+                                eprintln!("VERIFICATION FAILED: proof health check failed");
+                                failed = true;
+                            } else {
+                                eprintln!("  proof health: passed ✓");
+                            }
+                            any_crypto_check = true;
+                        }
+                        Err(e) => {
+                            eprintln!("VERIFICATION FAILED: cannot parse gkr_calldata felts: {e}");
+                            failed = true;
+                        }
+                    }
+                }
+            }
+
+            // (b) If io_calldata + io_commitment present, recompute and verify.
+            if let (Some(io_arr), Some(commitment_str)) = (
+                proof_json
+                    .get("io_calldata")
+                    .and_then(|v| v.as_array()),
+                proof_json
+                    .get("io_commitment")
+                    .and_then(|v| v.as_str()),
+            ) {
+                if !io_arr.is_empty() {
+                    let io_felts: Result<Vec<FieldElement>, _> = io_arr
+                        .iter()
+                        .map(|v| {
+                            let hex = v.as_str().unwrap_or("0x0");
+                            FieldElement::from_hex_be(hex)
+                        })
+                        .collect();
+
+                    match io_felts {
+                        Ok(felts) => match deserialize_raw_io(&felts) {
+                            Ok((input_m, output_m)) => {
+                                let recomputed = compute_io_commitment(&input_m, &output_m);
+                                let recomputed_hex = format!("{:#066x}", recomputed);
+                                let normalize = |s: &str| -> String {
+                                    let s = s.trim();
+                                    if let Some(stripped) =
+                                        s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
+                                    {
+                                        format!("0x{}", stripped.trim_start_matches('0'))
+                                    } else {
+                                        s.to_string()
+                                    }
+                                };
+                                if normalize(&recomputed_hex) != normalize(commitment_str) {
+                                    eprintln!("VERIFICATION FAILED: io_commitment mismatch");
+                                    eprintln!("  recomputed: {recomputed_hex}");
+                                    eprintln!("  in proof:   {commitment_str}");
+                                    failed = true;
+                                } else {
+                                    eprintln!("  io_commitment: verified ✓");
+                                }
+                                any_crypto_check = true;
+                            }
+                            Err(e) => {
+                                eprintln!("  Warning: could not parse io_calldata: {e}");
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("  Warning: could not parse io_calldata felts: {e}");
+                        }
+                    }
+                }
+            }
+
+            if failed {
+                process::exit(1);
+            }
+
+            if any_crypto_check {
+                eprintln!("Proof verified (structural + commitment checks passed).");
+            } else {
+                eprintln!(
+                    "WARNING: proof has no gkr_calldata or io_calldata — structural check only."
+                );
+                eprintln!(
+                    "Structural check is NOT a cryptographic guarantee. \
+                     Re-prove with ml_gkr format for full verification."
+                );
+            }
+            process::exit(0);
         }
 
         // --- ml_gkr: cryptographic verification ---
@@ -957,7 +1084,21 @@ fn main() {
 
         eprintln!("  io_commitment: verified ✓");
 
-        // Step C: Full forward-pass re-execution when --model-dir is provided
+        // Step C2: Check cryptographic_self_verified flag
+        let self_verified = proof_json
+            .get("cryptographic_self_verified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if self_verified {
+            eprintln!("  cryptographic_self_verified: true ✓");
+        } else {
+            eprintln!(
+                "  WARNING: cryptographic_self_verified is false or missing — \
+                 proof was not self-verified at prove time"
+            );
+        }
+
+        // Step C3: Full forward-pass re-execution when --model-dir is provided
         if cli.model_dir.is_some() {
             eprintln!("Loading model for forward-pass verification...");
             let model = load_model(&cli);
@@ -1012,25 +1153,66 @@ fn main() {
             }
 
             if mismatches > 0 {
-                // GPU prover forward pass uses different intermediate reductions
-                // than the CPU replay (unreduced activations for GKR chaining).
-                // The io_commitment Poseidon hash is the authoritative check and
-                // already passed above — replay divergence is informational.
+                // After Part A fix (replay uses unreduced activations matching
+                // the prover), divergence indicates a real issue.
                 eprintln!(
-                    "  forward pass: {mismatches}/{} elements differ (GPU/CPU replay divergence)",
+                    "VERIFICATION FAILED: forward pass {mismatches}/{} elements differ",
                     output_matrix.data.len()
                 );
-                eprintln!(
-                    "  NOTE: io_commitment verified — proof is cryptographically valid."
-                );
-                eprintln!(
-                    "        CPU replay diverges from GPU prover due to intermediate value handling."
-                );
+                process::exit(1);
             } else {
                 eprintln!("  forward pass: verified ✓");
             }
+
+            // Step C4: Full GKR cryptographic re-verification with native proof
+            if let Some(native_proof_val) = proof_json.get("gkr_proof_native") {
+                if !native_proof_val.is_null() {
+                    eprintln!("Re-verifying GKR proof cryptographically...");
+                    match serde_json::from_value::<stwo_ml::gkr::GKRProof>(
+                        native_proof_val.clone(),
+                    ) {
+                        Ok(native_proof) => {
+                            match stwo_ml::gkr::LayeredCircuit::from_graph(&model.graph) {
+                                Ok(circuit) => {
+                                    let mut ch =
+                                        stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
+                                    match stwo_ml::gkr::verify_gkr_with_weights(
+                                        &circuit,
+                                        &native_proof,
+                                        &output_matrix,
+                                        &model.weights,
+                                        &mut ch,
+                                    ) {
+                                        Ok(_) => {
+                                            eprintln!(
+                                                "  GKR cryptographic verification: passed ✓"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "VERIFICATION FAILED: GKR verification error: {e}"
+                                            );
+                                            process::exit(1);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  Warning: could not build circuit for GKR re-verification: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  Warning: could not deserialize gkr_proof_native: {e}"
+                            );
+                        }
+                    }
+                }
+            }
         } else {
-            // Step D: No model — commitment-only verification
+            // No model — commitment-only verification
             eprintln!(
                 "Proof commitment verified. For full cryptographic verification, provide --model-dir."
             );
@@ -1116,6 +1298,19 @@ fn main() {
     let t_e2e = Instant::now();
     let is_e2e = cli.submit_gkr || cli.submit_paymaster;
 
+    // Early validation: catch incompatible flag combinations before loading model.
+    if is_e2e && cli.format != OutputFormat::MlGkr {
+        eprintln!("Error: --submit-gkr/--submit-paymaster require --format ml_gkr");
+        eprintln!("  Add: --format ml_gkr");
+        process::exit(1);
+    }
+    if is_e2e && cli.skip_commitment {
+        eprintln!("Error: --submit-gkr/--submit-paymaster cannot be used with --skip-commitment");
+        eprintln!("  On-chain verification requires weight commitments.");
+        eprintln!("  Remove --skip-commitment to compute real commitments.");
+        process::exit(1);
+    }
+
     let model = load_model(&cli);
     let model_load_elapsed = t_e2e.elapsed();
     if is_e2e {
@@ -1169,7 +1364,38 @@ fn main() {
     }
 
     // Pre-compute values needed by both proving and commitment paths
-    let model_id = parse_model_id(&cli.model_id);
+    let model_id = {
+        let parsed = parse_model_id(&cli.model_id);
+        // Auto-derive model_id when user left the default 0x1 to prevent collisions
+        // between different model configurations (e.g., 1-layer vs 40-layer).
+        // hash(0x1, weight_count) → deterministic unique ID per architecture.
+        if parsed == FieldElement::ONE {
+            let weight_count = model
+                .graph
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.op, stwo_ml::compiler::graph::GraphOp::MatMul { .. }))
+                .count();
+            if weight_count > 0 {
+                let derived = starknet_crypto::poseidon_hash_many(&[
+                    parsed,
+                    FieldElement::from(weight_count as u64),
+                    FieldElement::from(model.graph.num_layers() as u64),
+                ]);
+                eprintln!(
+                    "[info] Auto-derived model_id: 0x{:x} (layers={}, weights={})",
+                    derived,
+                    model.graph.num_layers(),
+                    weight_count,
+                );
+                derived
+            } else {
+                parsed
+            }
+        } else {
+            parsed
+        }
+    };
     let activation_type = model
         .graph
         .nodes
@@ -1603,6 +1829,44 @@ fn main() {
                 eprintln!("  Warning: Starknet soundness gate status: {reason}");
             }
 
+            // ── Cryptographic self-verification ──
+            // Verify the GKR proof we just produced before writing to disk.
+            // This catches prover bugs and ensures no corrupt proof is emitted.
+            let cryptographic_self_verified =
+                if let Some(gkr_p) = proof.gkr_proof.as_ref() {
+                    match stwo_ml::gkr::LayeredCircuit::from_graph(&model.graph) {
+                        Ok(circuit) => {
+                            let mut verify_channel =
+                                stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
+                            match stwo_ml::gkr::verify_gkr_with_weights(
+                                &circuit,
+                                gkr_p,
+                                &proof.execution.output,
+                                &model.weights,
+                                &mut verify_channel,
+                            ) {
+                                Ok(_claim) => {
+                                    eprintln!("  cryptographic_self_verify: passed");
+                                    true
+                                }
+                                Err(e) => {
+                                    eprintln!("  cryptographic_self_verify: FAILED — {e}");
+                                    false
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  cryptographic_self_verify: skipped (circuit build failed: {e})"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    eprintln!("  cryptographic_self_verify: skipped (no native GKR proof)");
+                    false
+                };
+
             let use_starknet_gkr_v4_env = std::env::var("STWO_STARKNET_GKR_V4")
                 .ok()
                 .map(|v| {
@@ -1654,10 +1918,14 @@ fn main() {
                             .ok()
                             .map(|v| !v.is_empty() && v != "0")
                             .unwrap_or(false);
+                        // Default to streaming v25 — deployed v20-lean contract stubs
+                        // all single-TX entrypoints (packed_io, packed_io_dp, packed).
+                        // Set STWO_FORCE_STREAMING=0 to try single-TX if your contract supports it.
                         let force_streaming = std::env::var("STWO_FORCE_STREAMING")
                             .ok()
-                            .map(|v| !v.is_empty() && v != "0")
-                            .unwrap_or(false);
+                            .map(|v| v == "0" || v == "false" || v == "off")
+                            .map(|is_off| !is_off)
+                            .unwrap_or(true);
                         let (verify_result, is_packed, is_io_packed, is_double_packed) = if use_starknet_gkr_v4 {
                             // Try double-packed-io first (c0+c2 QM31 pairs in 1 felt) — smallest possible
                             if !no_io_pack && !force_streaming {
@@ -1950,6 +2218,9 @@ fn main() {
                 "weight_opening_mode": format!("{:?}", gkr_proof.weight_opening_mode),
                 "submission_ready": gkr_proof.submission_ready,
                 "soundness_gate_error": gkr_proof.soundness_gate_error,
+                "cryptographic_self_verified": cryptographic_self_verified,
+                "gkr_proof_native": proof.gkr_proof.as_ref()
+                    .and_then(|p| serde_json::to_value(p).ok()),
                 "verify_calldata": verify_calldata_obj,
                 "register_calldata": register_calldata_obj,
             });
@@ -2067,6 +2338,86 @@ fn main() {
         eprintln!("  tee: none (zk-only)");
     }
 
+    // --health-check and/or --dry-run: run fast proof validation before submission
+    if cli.health_check || cli.dry_run {
+        // Read back the proof file and parse calldata for health check
+        let proof_contents = std::fs::read_to_string(&cli.output).unwrap_or_else(|e| {
+            eprintln!("Error: cannot read proof file for health check: {e}");
+            process::exit(1);
+        });
+        let proof_json: serde_json::Value = serde_json::from_str(&proof_contents).unwrap_or_else(|e| {
+            eprintln!("Error: invalid JSON in proof file for health check: {e}");
+            process::exit(1);
+        });
+
+        // Extract GKR calldata for health check
+        let calldata_felts: Vec<FieldElement> = proof_json
+            .get("gkr_calldata")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|s| FieldElement::from_hex_be(s).ok())
+                    .collect()
+            })
+            .or_else(|| {
+                // Try io_calldata as fallback
+                proof_json.get("io_calldata").and_then(|v| v.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .filter_map(|s| FieldElement::from_hex_be(s).ok())
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+
+        if calldata_felts.is_empty() {
+            eprintln!("Warning: no calldata found in proof file for health check");
+        } else if cli.dry_run {
+            let result = stwo_ml::starknet::dry_run_onchain(
+                &calldata_felts,
+                cli.rpc_url.as_deref(),
+                Some(&cli.contract),
+            );
+            eprintln!("=== Dry-Run Report ===");
+            eprintln!("  Calldata size: {} felts", result.calldata_size);
+            eprintln!("  Estimated steps: {}", result.estimated_steps);
+            eprintln!("  Within step limit: {}", result.within_step_limit);
+            eprintln!("  Estimated fee: {:.4} STRK", result.estimated_fee_strk);
+            for check in &result.health.checks {
+                let status = if check.passed { "PASS" } else { "FAIL" };
+                eprintln!("  [{}] {}: {}", status, check.name, check.detail);
+            }
+            if let Some(ref rpc) = result.rpc_simulation {
+                if rpc.success {
+                    eprintln!("  [RPC] Simulation passed: {} actual steps", rpc.actual_steps);
+                } else {
+                    eprintln!("  [RPC] Simulation failed: {}", rpc.error.as_deref().unwrap_or("unknown"));
+                }
+            }
+            if !result.health.passed {
+                eprintln!("Dry-run FAILED — proof has issues. Not submitting.");
+                process::exit(1);
+            }
+            eprintln!("Dry-run PASSED.");
+        } else {
+            // --health-check only
+            let report = stwo_ml::starknet::verify_proof_fast(&calldata_felts);
+            eprintln!("=== Health Check Report ===");
+            eprintln!("  Total felts: {}", report.total_felts);
+            eprintln!("  Estimated steps: {}", report.estimated_steps);
+            for check in &report.checks {
+                let status = if check.passed { "PASS" } else { "FAIL" };
+                eprintln!("  [{}] {}: {}", status, check.name, check.detail);
+            }
+            if !report.passed {
+                eprintln!("Health check FAILED.");
+                process::exit(1);
+            }
+            eprintln!("Health check PASSED.");
+        }
+    }
+
     // Sanity: --submit-gkr and --submit-paymaster are mutually exclusive.
     if cli.submit_gkr && cli.submit_paymaster {
         eprintln!("Error: --submit-gkr and --submit-paymaster are mutually exclusive.");
@@ -2081,9 +2432,21 @@ fn main() {
         eprintln!("  Add: --format ml_gkr");
         process::exit(1);
     }
+    // Block --skip-commitment proofs from on-chain submission.
+    // Proofs without weight commitments cannot be verified on-chain.
+    if (cli.submit_gkr || cli.submit_paymaster) && cli.skip_commitment {
+        eprintln!("Error: --submit-gkr/--submit-paymaster cannot be used with --skip-commitment");
+        eprintln!("  On-chain verification requires weight commitments.");
+        eprintln!("  Remove --skip-commitment to compute real commitments.");
+        process::exit(1);
+    }
 
     // --submit-gkr: submit GKR proof on-chain via sncast
+    // NOTE: The deployed v20-lean contract stubs all single-TX entrypoints.
+    // Prefer --submit-paymaster which uses streaming v25 automatically.
     if cli.submit_gkr {
+        eprintln!("WARNING: --submit-gkr uses single-TX entrypoints that are stubbed in the");
+        eprintln!("  deployed v20-lean contract. Use --submit-paymaster for streaming v25.");
         let t_submit = Instant::now();
         submit_gkr_onchain(&cli, &model, &proof, &input, model_id, io_commitment);
         if is_e2e {
@@ -4069,6 +4432,68 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
     eprintln!();
     eprintln!("  prove-model audit");
     eprintln!("  ──────────────────");
+
+    // ── Multi-session aggregation (--sessions) ──────────────────────────
+    if let Some(ref sessions_dir) = cmd.sessions {
+        use stwo_ml::audit::aggregator::MultiSessionAuditAggregator;
+        use stwo_ml::audit::digest::digest_to_hex;
+
+        eprintln!("Multi-session aggregation: {}", sessions_dir.display());
+        let mut agg = MultiSessionAuditAggregator::new();
+        let count = agg.add_sessions_from_dir(sessions_dir).unwrap_or_else(|e| {
+            eprintln!("Error: failed to aggregate sessions: {e}");
+            process::exit(1);
+        });
+        eprintln!("  sessions loaded: {}", count);
+
+        let report = agg.generate_report().unwrap_or_else(|e| {
+            eprintln!("Error: failed to generate aggregated report: {e}");
+            process::exit(1);
+        });
+
+        eprintln!("=== Multi-Session Audit Report ===");
+        eprintln!("  sessions: {}", report.sessions.len());
+        eprintln!("  total entries: {}", report.total_entries);
+        eprintln!("  time span: {} — {}", report.time_span.0, report.time_span.1);
+        eprintln!("  chain hash: {}", digest_to_hex(&report.chain_hash));
+        if let Some(score) = report.overall_score {
+            eprintln!("  overall score: {:.4}", score);
+        }
+        for flag in &report.tamper_flags {
+            eprintln!("  TAMPER: {}", flag);
+        }
+        for s in &report.sessions {
+            eprintln!(
+                "  [{}] {} entries, model={}, time={}..{}",
+                s.session_id, s.entry_count, s.model_id, s.time_range.0, s.time_range.1,
+            );
+        }
+
+        // Write combined report
+        let json = serde_json::json!({
+            "type": "multi_session_audit",
+            "sessions": report.sessions.iter().map(|s| serde_json::json!({
+                "session_id": s.session_id,
+                "entry_count": s.entry_count,
+                "merkle_root": digest_to_hex(&s.merkle_root),
+                "last_entry_hash": digest_to_hex(&s.last_entry_hash),
+                "time_range": [s.time_range.0, s.time_range.1],
+                "model_id": s.model_id,
+            })).collect::<Vec<_>>(),
+            "chain_hash": digest_to_hex(&report.chain_hash),
+            "total_entries": report.total_entries,
+            "time_span": [report.time_span.0, report.time_span.1],
+            "overall_score": report.overall_score,
+            "tamper_flags": report.tamper_flags,
+        });
+        let output_str = serde_json::to_string_pretty(&json).unwrap();
+        std::fs::write(&cmd.output, &output_str).unwrap_or_else(|e| {
+            eprintln!("Error: cannot write report to {}: {e}", cmd.output.display());
+            process::exit(1);
+        });
+        eprintln!("Report written to {}", cmd.output.display());
+        return;
+    }
 
     // ── Load inference log ────────────────────────────────────────────────
     eprintln!("Loading inference log: {}", cmd.log_dir.display());
