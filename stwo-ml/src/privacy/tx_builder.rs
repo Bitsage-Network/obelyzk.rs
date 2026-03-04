@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use crate::crypto::commitment::{
     validate_blinding, Note, NoteCommitment, PublicKey, SpendingKey, ViewingKey,
 };
-use crate::crypto::encryption::{derive_key, encrypt_note_memo};
+use crate::crypto::encryption::{derive_key, poseidon2_encrypt_siv};
 use crate::crypto::merkle_m31::{verify_merkle_proof, Digest, MerklePath};
 use crate::crypto::poseidon2_m31::RATE;
 
@@ -503,29 +503,36 @@ fn build_encrypted_memo(
     note: &Note,
     recipient_pubkey: &PublicKey,
     viewing_key: &ViewingKey,
-    used_nonces: &mut HashSet<[u32; 4]>,
+    _used_nonces: &mut HashSet<[u32; 4]>,
 ) -> Result<EncryptedMemoJson, TxBuilderError> {
-    // Encrypt using the recipient's viewing key. Only holders of the viewing
-    // key (the recipient and authorized viewers) can decrypt. The public key
-    // alone is NOT sufficient — this prevents anyone from reading memos just
-    // by observing the chain.
+    // Encrypt using the recipient's viewing key with SIV construction.
+    // SIV derives the nonce from Hash(key, plaintext), making nonce reuse
+    // structurally impossible. The blinding in each note ensures unique plaintext.
     let enc_key = derive_key(viewing_key);
-    let nonce = generate_unique_nonce(used_nonces)?;
-
-    let encrypted = encrypt_note_memo(
-        &enc_key,
-        &nonce,
+    let plaintext = [
         note.asset_id,
         note.amount_lo,
         note.amount_hi,
-        &note.blinding,
-    );
+        note.blinding[0],
+        note.blinding[1],
+        note.blinding[2],
+        note.blinding[3],
+    ];
+
+    let siv = poseidon2_encrypt_siv(&enc_key, &plaintext)
+        .map_err(|e| TxBuilderError::Rng(e.to_string()))?;
+
+    // Combine ciphertext + MAC for backward-compatible 11-element format
+    // (decrypt_note_memo expects 7 ciphertext + 4 MAC).
+    let mut encrypted = Vec::with_capacity(11);
+    encrypted.extend_from_slice(&siv.ciphertext);
+    encrypted.extend_from_slice(&siv.mac);
 
     Ok(EncryptedMemoJson {
         encrypted_data: m31_array_to_hex(&encrypted),
         nonce: format!(
             "0x{:08x}{:08x}{:08x}{:08x}",
-            nonce[0].0, nonce[1].0, nonce[2].0, nonce[3].0,
+            siv.nonce[0].0, siv.nonce[1].0, siv.nonce[2].0, siv.nonce[3].0,
         ),
         recipient_pubkey: format!(
             "0x{:08x}{:08x}{:08x}{:08x}",

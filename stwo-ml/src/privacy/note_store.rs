@@ -13,7 +13,7 @@ use stwo::core::fields::m31::BaseField as M31;
 
 use crate::crypto::commitment::{Note, NoteCommitment, PublicKey};
 use crate::crypto::encryption::{
-    decrypt_note_memo, derive_key, poseidon2_decrypt, poseidon2_encrypt,
+    decrypt_note_memo, derive_key, poseidon2_decrypt, poseidon2_encrypt_siv,
 };
 use crate::crypto::poseidon2_m31::RATE;
 
@@ -80,6 +80,8 @@ pub enum NoteStoreError {
     Json(String),
     #[error("note not found: {0}")]
     NotFound(String),
+    #[error("crypto error: {0}")]
+    Crypto(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,14 +271,14 @@ impl NoteStore {
             // Pack bytes into M31 (3 bytes per element, safe: max 2^24 < 2^31)
             let plaintext_m31 = bytes_to_m31_packed(inner_bytes);
 
-            // Generate random nonce
-            let nonce = generate_nonce()?;
-            let encrypted = poseidon2_encrypt(key, &nonce, &plaintext_m31);
+            // SIV: nonce derived from content, no nonce management needed.
+            let siv = poseidon2_encrypt_siv(key, &plaintext_m31)
+                .map_err(|e| NoteStoreError::Crypto(e.to_string()))?;
 
-            let enc_hex = m31_vec_to_hex(&encrypted);
+            let enc_hex = m31_vec_to_hex(&siv.ciphertext);
             let nonce_hex = format!(
                 "0x{:08x}{:08x}{:08x}{:08x}",
-                nonce[0].0, nonce[1].0, nonce[2].0, nonce[3].0,
+                siv.nonce[0].0, siv.nonce[1].0, siv.nonce[2].0, siv.nonce[3].0,
             );
 
             format!(
