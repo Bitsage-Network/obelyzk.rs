@@ -1142,6 +1142,35 @@ fn prove_mle_opening_with_commitment_qm31_u32_gpu_tree(
                         eprintln!("[DIAG] hash matches tree node = {}", hash_result == tn);
                     }
                 }
+
+                // Build 2-leaf CPU Merkle tree from the SAME leaf pair
+                let even_idx = left_idx & !1; // round down to even
+                let odd_idx = even_idx + 1;
+                let even_felt = securefield_to_felt(u32s_to_secure_field(
+                    &replay_qm31_words[even_idx * 4..(even_idx + 1) * 4]
+                ));
+                let odd_felt = securefield_to_felt(u32s_to_secure_field(
+                    &replay_qm31_words[odd_idx * 4..(odd_idx + 1) * 4]
+                ));
+                let cpu_hash = starknet_crypto::poseidon_hash(even_felt, odd_felt);
+                eprintln!("[DIAG] CPU poseidon_hash(leaf[{}], leaf[{}]) = {:?}", even_idx, odd_idx, cpu_hash);
+
+                // Also check the raw limbs fed to GPU
+                let even_limbs = qm31_u32_to_u64_limbs_direct(
+                    &replay_qm31_words[even_idx * 4..(even_idx + 1) * 4]
+                );
+                let odd_limbs = qm31_u32_to_u64_limbs_direct(
+                    &replay_qm31_words[odd_idx * 4..(odd_idx + 1) * 4]
+                );
+                eprintln!("[DIAG] GPU leaf limbs[{}] = {:?}", even_idx, even_limbs);
+                eprintln!("[DIAG] GPU leaf limbs[{}] = {:?}", odd_idx, odd_limbs);
+                let even_from_limbs = u64_limbs_to_felt252(&even_limbs);
+                let odd_from_limbs = u64_limbs_to_felt252(&odd_limbs);
+                eprintln!("[DIAG] limbs→felt even = {:?}", even_from_limbs);
+                eprintln!("[DIAG] limbs→felt odd  = {:?}", odd_from_limbs);
+                if let (Some(ef), Some(of)) = (even_from_limbs, odd_from_limbs) {
+                    eprintln!("[DIAG] felt roundtrip match = {} {}", ef == even_felt, of == odd_felt);
+                }
             }
 
             let left_siblings = build_gpu_merkle_path_with_leaf_sibling(
