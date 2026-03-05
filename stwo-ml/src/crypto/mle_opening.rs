@@ -1089,11 +1089,21 @@ fn prove_mle_opening_with_commitment_qm31_u32_gpu_tree(
 
             let left_value = u32s_to_secure_field(&left_words);
             let right_value = u32s_to_secure_field(&right_words);
+
+            // Read Merkle XOR-1 neighbors (NOT MLE fold partners).
+            // Merkle tree pairs consecutive leaves (i, i^1), not fold partners (i, mid+i).
+            let left_sib_words = gpu.mle_fold_session_read_qm31_at(&replay_session, left_idx ^ 1)
+                .map_err(|e| format!("download left merkle sib (round {}, query {}): {}", round, q, e))?;
+            let right_sib_words = gpu.mle_fold_session_read_qm31_at(&replay_session, right_idx ^ 1)
+                .map_err(|e| format!("download right merkle sib (round {}, query {}): {}", round, q, e))?;
+            let left_merkle_sib = u32s_to_secure_field(&left_sib_words);
+            let right_merkle_sib = u32s_to_secure_field(&right_sib_words);
+
             let left_siblings = build_gpu_merkle_path_with_leaf_sibling(
-                &tree, left_idx, replay_layer_size, right_value,
+                &tree, left_idx, replay_layer_size, left_merkle_sib,
             )?;
             let right_siblings = build_gpu_merkle_path_with_leaf_sibling(
-                &tree, right_idx, replay_layer_size, left_value,
+                &tree, right_idx, replay_layer_size, right_merkle_sib,
             )?;
 
             query_rounds[q].push(MleQueryRoundData {
