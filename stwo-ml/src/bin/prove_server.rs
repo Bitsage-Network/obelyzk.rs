@@ -1842,6 +1842,7 @@ async fn submit_audit(
                 owner_pubkey: Vec::new(),
                 submit_config: None,
                 billing: None,
+                model_dir: None,
             };
 
             let pipeline_result =

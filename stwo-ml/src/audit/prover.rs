@@ -35,12 +35,22 @@ use stwo::core::fields::m31::M31;
 pub struct AuditProver<'a> {
     graph: &'a ComputationGraph,
     weights: &'a GraphWeights,
+    weight_cache: Option<&'a crate::weight_cache::SharedWeightCache>,
 }
 
 impl<'a> AuditProver<'a> {
     /// Create a prover for a model.
     pub fn new(graph: &'a ComputationGraph, weights: &'a GraphWeights) -> Self {
-        Self { graph, weights }
+        Self { graph, weights, weight_cache: None }
+    }
+
+    /// Create a prover with a pre-warmed weight cache for GPU-accelerated proving.
+    pub fn with_cache(
+        graph: &'a ComputationGraph,
+        weights: &'a GraphWeights,
+        cache: &'a crate::weight_cache::SharedWeightCache,
+    ) -> Self {
+        Self { graph, weights, weight_cache: Some(cache) }
     }
 
     /// Prove all inferences in a time window.
@@ -247,7 +257,9 @@ impl<'a> AuditProver<'a> {
         // requires all weight MLEs in memory and OOMs for large models). The
         // serializable variant records gate warnings without hard failure.
         let agg_proof =
-            crate::aggregation::prove_model_pure_gkr_auto(self.graph, input, self.weights)
+            crate::aggregation::prove_model_pure_gkr_auto_with_cache(
+                self.graph, input, self.weights, self.weight_cache,
+            )
                 .map_err(|e| AuditError::ProvingFailed(format!("GKR proving failed: {}", e)))?;
         let gkr_proof = build_gkr_serializable_proof(&agg_proof, model_id, input)
             .map_err(|e| AuditError::ProvingFailed(format!("GKR proving failed: {}", e)))?;

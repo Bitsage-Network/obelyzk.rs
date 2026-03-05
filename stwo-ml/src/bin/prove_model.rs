@@ -4655,6 +4655,7 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
             owner_pubkey: Vec::new(),
             submit_config: None,
             billing: None,
+            model_dir: cmd.model_dir.clone(),
         };
         let result = run_audit(&log, graph, weights, &config, None, None).unwrap_or_else(|e| {
             eprintln!("Error: audit failed: {e}");
@@ -4801,6 +4802,7 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
             owner_pubkey,
             submit_config,
             billing: None,
+            model_dir: cmd.model_dir.clone(),
         };
 
         let result = run_audit(

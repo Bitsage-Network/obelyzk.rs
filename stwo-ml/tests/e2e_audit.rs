@@ -241,6 +241,7 @@ fn test_e2e_audit_full_pipeline() {
         owner_pubkey: view_key,
         submit_config: Some(SubmitConfig::default()),
         billing: None,
+        model_dir: None,
     };
 
     let result = run_audit(

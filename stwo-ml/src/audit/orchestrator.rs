@@ -52,6 +52,8 @@ pub struct AuditPipelineConfig {
     pub submit_config: Option<SubmitConfig>,
     /// Billing info (None if not tracked).
     pub billing: Option<crate::audit::types::BillingInfo>,
+    /// Model directory for weight cache loading (enables GPU-accelerated weight commitment).
+    pub model_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for AuditPipelineConfig {
@@ -72,6 +74,7 @@ impl Default for AuditPipelineConfig {
             owner_pubkey: Vec::new(),
             submit_config: None,
             billing: None,
+            model_dir: None,
         }
     }
 }
@@ -133,7 +136,34 @@ pub fn run_audit(
     );
 
     // ── Step 2: Prove inferences ──────────────────────────────────────────
-    let prover = AuditProver::new(graph, weights);
+    // Load weight cache from model_dir for GPU-accelerated weight commitment.
+    // Without the cache, the prover falls back to CPU for Merkle root computation.
+    let weight_cache = if let Some(ref model_dir) = config.model_dir {
+        let cache = crate::weight_cache::shared_cache_for_model_mmap(
+            model_dir, &config.model_info.model_id, weights,
+        );
+        info!("Audit pipeline: weight cache loaded from {}", model_dir.display());
+
+        // Pre-warm GPU roots before proving to avoid CPU fallback.
+        #[cfg(feature = "cuda-runtime")]
+        {
+            let newly_computed = crate::weight_cache::prewarm_weight_roots_gpu_exclusive(
+                weights, &cache, Some(model_dir.as_path()),
+            );
+            if newly_computed > 0 {
+                info!(roots = newly_computed, "Audit pipeline: pre-warmed weight roots on GPU");
+            }
+        }
+        Some(cache)
+    } else {
+        None
+    };
+
+    let prover = if let Some(ref cache) = weight_cache {
+        AuditProver::with_cache(graph, weights, cache)
+    } else {
+        AuditProver::new(graph, weights)
+    };
     let audit_result = prover.prove_window(log, &config.request)?;
 
     info!(
@@ -353,6 +383,7 @@ pub fn run_audit_dry(
         owner_pubkey: Vec::new(),
         submit_config: None,
         billing: None,
+        model_dir: None,
     };
 
     let result = run_audit(log, graph, weights, &config, None, None)?;
