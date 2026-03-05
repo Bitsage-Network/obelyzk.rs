@@ -133,10 +133,19 @@ pub struct AggregatedWeightBindingProof {
     pub sumcheck_round_polys: Vec<(SecureField, SecureField, SecureField)>,
     /// Oracle evaluation W_global(s) at the sumcheck challenge point.
     pub oracle_eval_at_s: SecureField,
-    /// Single MLE opening proof against the super-root.
+    /// Single MLE opening proof against the super-root (legacy path).
     pub opening_proof: MleOpeningProof,
     /// Super-root data.
     pub super_root: SuperRoot,
+    /// Per-matrix MLE opening proofs (when set, verifier uses these instead of
+    /// the single opening_proof against the super-root). Each proof is against
+    /// the matrix's own commitment root at the local challenge point.
+    /// This avoids building a 16GB+ virtual MLE Merkle tree.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub per_matrix_openings: Option<Vec<MleOpeningProof>>,
+    /// Per-matrix evaluations at the local challenge point (paired with per_matrix_openings).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub per_matrix_evals: Option<Vec<SecureField>>,
 }
 
 // ─── Zero tree ───────────────────────────────────────────────────────────────
@@ -704,6 +713,8 @@ pub fn prove_aggregated_binding(
         oracle_eval_at_s: oracle_eval,
         opening_proof,
         super_root,
+        per_matrix_openings: None,
+        per_matrix_evals: None,
     }
 }
 
@@ -787,6 +798,8 @@ pub fn prove_aggregated_binding_gpu(
         oracle_eval_at_s: oracle_eval,
         opening_proof,
         super_root,
+        per_matrix_openings: None,
+        per_matrix_evals: None,
     }
 }
 
@@ -1706,35 +1719,62 @@ pub fn prove_aggregated_binding_streaming(
         }
     };
 
-    // 4. Oracle eval at challenge point (GPU-accelerated single eval)
-    let oracle_eval = match GpuSumcheckExecutor::cached() {
-        Ok(executor) => eval_unified_oracle_streaming_gpu(
-            &challenge_point, source, &claim_n_vars, &config, &executor,
-        ),
-        Err(_) => eval_unified_oracle_streaming(
-            &challenge_point, source, &claim_n_vars, &config,
-        ),
-    };
+    // 4. Per-matrix openings (each matrix fits on GPU individually)
+    //    Replaces the 16GB virtual MLE with per-matrix proofs (~2GB each).
+    let selector = &challenge_point[..config.selector_bits];
+    let local = &challenge_point[config.selector_bits..];
+    let t_opening = std::time::Instant::now();
+
+    let mut per_matrix_evals = Vec::with_capacity(source.len());
+    let mut per_matrix_openings = Vec::with_capacity(source.len());
+
+    for i in 0..source.len() {
+        let n_vars = claim_n_vars[i];
+        let local_truncated = &local[config.n_max - n_vars..];
+
+        let mle_u32 = source.get_mle_u32(i);
+        let (commitment, opening_proof) = prove_mle_opening_with_commitment_qm31_u32(
+            &mle_u32,
+            local_truncated,
+            channel,
+        );
+        debug_assert_eq!(
+            commitment, claims[i].commitment,
+            "Per-matrix commitment mismatch for matrix {i}"
+        );
+
+        // Evaluate MLE at challenge point for oracle_eval reconstruction
+        let mle = source.get_mle(i);
+        let w_val = evaluate_mle_at(&mle, local_truncated);
+        per_matrix_evals.push(w_val);
+        per_matrix_openings.push(opening_proof);
+    }
+
+    // Reconstruct oracle_eval = Σ sel_weight(i) * w_val(i)
+    let mut oracle_eval = SecureField::zero();
+    for i in 0..source.len() {
+        let sel_weight = compute_selector_weight(i, selector, &config);
+        oracle_eval = oracle_eval + sel_weight * per_matrix_evals[i];
+    }
     channel.mix_felts(&[oracle_eval]);
 
-    // 5. Build virtual MLE u32 sequentially and prove opening
-    let virtual_mle_u32 = build_virtual_mle_u32_streaming(source, &config);
-    let (commitment, opening_proof) =
-        prove_mle_opening_with_commitment_qm31_u32(&virtual_mle_u32, &challenge_point, channel);
-
-    debug_assert_eq!(
-        commitment, super_root.root,
-        "GPU virtual MLE commitment ({commitment:?}) diverged from super-root ({:?}). \
-         This indicates a data representation mismatch.",
-        super_root.root,
+    eprintln!(
+        "[GPU] per-matrix openings: {} proofs in {:.1}s",
+        source.len(),
+        t_opening.elapsed().as_secs_f64()
     );
+
+    // Dummy opening_proof for backward compat (unused when per_matrix_openings is set)
+    let dummy_opening = per_matrix_openings[0].clone();
 
     AggregatedWeightBindingProof {
         config,
         sumcheck_round_polys: round_polys,
         oracle_eval_at_s: oracle_eval,
-        opening_proof,
+        opening_proof: dummy_opening,
         super_root,
+        per_matrix_openings: Some(per_matrix_openings),
+        per_matrix_evals: Some(per_matrix_evals),
     }
 }
 
@@ -1779,6 +1819,8 @@ pub fn prove_aggregated_binding_streaming(
         oracle_eval_at_s: oracle_eval,
         opening_proof,
         super_root,
+        per_matrix_openings: None,
+        per_matrix_evals: None,
     }
 }
 
@@ -1868,16 +1910,57 @@ pub fn verify_aggregated_binding(
         return false;
     }
 
-    // 6. Mix oracle eval
-    channel.mix_felts(&[proof.oracle_eval_at_s]);
+    // 6-7. Verify MLE openings
+    if let (Some(ref pm_openings), Some(ref pm_evals)) =
+        (&proof.per_matrix_openings, &proof.per_matrix_evals)
+    {
+        // Per-matrix path: openings come BEFORE oracle_eval mix (matching prover order)
+        if pm_openings.len() != claims.len() || pm_evals.len() != claims.len() {
+            return false;
+        }
 
-    // 7. Verify single MLE opening against super-root
-    verify_mle_opening(
-        proof.super_root.root,
-        &proof.opening_proof,
-        &challenge_point,
-        channel,
-    )
+        let selector = &challenge_point[..config.selector_bits];
+        let local = &challenge_point[config.selector_bits..];
+
+        // Verify each per-matrix opening
+        for (i, claim) in claims.iter().enumerate() {
+            let n_vars = claim.local_n_vars;
+            let local_truncated = &local[config.n_max - n_vars..];
+
+            if !verify_mle_opening(
+                claim.commitment,
+                &pm_openings[i],
+                local_truncated,
+                channel,
+            ) {
+                return false;
+            }
+        }
+
+        // Verify oracle_eval = Σ sel_weight(i) * per_matrix_eval(i)
+        let mut expected_eval = SecureField::zero();
+        for i in 0..claims.len() {
+            let sel_weight = compute_selector_weight(i, selector, config);
+            expected_eval = expected_eval + sel_weight * pm_evals[i];
+        }
+        if expected_eval != proof.oracle_eval_at_s {
+            return false;
+        }
+
+        // Mix oracle eval AFTER per-matrix openings (matching prover order)
+        channel.mix_felts(&[proof.oracle_eval_at_s]);
+
+        true
+    } else {
+        // Legacy path: mix oracle eval, then single opening against super-root
+        channel.mix_felts(&[proof.oracle_eval_at_s]);
+        verify_mle_opening(
+            proof.super_root.root,
+            &proof.opening_proof,
+            &challenge_point,
+            channel,
+        )
+    }
 }
 
 // ─── Serialization helpers ───────────────────────────────────────────────────
@@ -1916,7 +1999,7 @@ fn estimate_mle_opening_felts(proof: &MleOpeningProof) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::mle_opening::{commit_mle_root_only, evaluate_mle_at};
+    use crate::crypto::mle_opening::{commit_mle_root_only, evaluate_mle_at, prove_mle_opening};
     use stwo::core::fields::cm31::CM31;
     use stwo::core::fields::qm31::QM31;
 
@@ -2746,5 +2829,161 @@ mod tests {
         assert_eq!(cpu_0, gpu_results[0], "3way mismatch at t=0");
         assert_eq!(cpu_1, gpu_results[1], "3way mismatch at t=1");
         assert_eq!(cpu_2, gpu_results[2], "3way mismatch at t=2");
+    }
+
+    /// Test that per-matrix opening proofs verify correctly (CPU-only test).
+    /// Constructs a proof with per-matrix openings by hand to validate
+    /// Fiat-Shamir transcript consistency between prover and verifier.
+    #[test]
+    fn test_per_matrix_openings_verify() {
+        let mle0 = random_mle(6);
+        let mle1 = random_mle(8);
+        let mle2 = random_mle(7);
+        let claims: Vec<AggregatedWeightClaim> = vec![
+            make_claim(0, &mle0),
+            make_claim(1, &mle1),
+            make_claim(2, &mle2),
+        ];
+        let config = AggregatedBindingConfig::from_claims(&claims);
+        let claim_n_vars: Vec<usize> = claims.iter().map(|c| c.local_n_vars).collect();
+
+        let mle_refs: Vec<&[SecureField]> = vec![&mle0, &mle1, &mle2];
+        let mles_u32: Vec<Vec<u32>> = mle_refs.iter().map(|m| securefield_mle_to_u32_aos(m)).collect();
+        let u32_refs: Vec<&[u32]> = mles_u32.iter().map(|m| m.as_slice()).collect();
+        let source = make_slice_source(&mle_refs, &u32_refs);
+
+        let mut prover_ch = PoseidonChannel::new();
+        prover_ch.mix_u64(42);
+        let mut verifier_ch = prover_ch.clone();
+
+        // --- Prover side: build proof with per-matrix openings ---
+
+        // 1. Super root
+        let super_root = build_super_root(&claims, &config);
+        prover_ch.mix_felt(super_root.root);
+
+        // 2. Betas
+        let betas = draw_beta_weights(&mut prover_ch, claims.len());
+
+        // 3. Mismatch sumcheck (CPU)
+        let (round_polys, challenge_point) = mismatch_sumcheck_streaming(
+            &claims, &source, &claim_n_vars, &config, &betas, &mut prover_ch,
+        );
+
+        // 4. Per-matrix openings
+        let selector = &challenge_point[..config.selector_bits];
+        let local = &challenge_point[config.selector_bits..];
+
+        let mut per_matrix_evals = Vec::new();
+        let mut per_matrix_openings = Vec::new();
+
+        for i in 0..source.len() {
+            let n_vars = claim_n_vars[i];
+            let local_truncated = &local[config.n_max - n_vars..];
+
+            let mle = source.get_mle(i);
+            let opening_proof = prove_mle_opening(&mle, local_truncated, &mut prover_ch);
+            let w_val = evaluate_mle_at(&mle, local_truncated);
+            per_matrix_evals.push(w_val);
+            per_matrix_openings.push(opening_proof);
+        }
+
+        // Oracle eval
+        let mut oracle_eval = SecureField::zero();
+        for i in 0..source.len() {
+            let sel_weight = compute_selector_weight(i, selector, &config);
+            oracle_eval = oracle_eval + sel_weight * per_matrix_evals[i];
+        }
+        prover_ch.mix_felts(&[oracle_eval]);
+
+        let dummy_opening = per_matrix_openings[0].clone();
+
+        let proof = AggregatedWeightBindingProof {
+            config,
+            sumcheck_round_polys: round_polys,
+            oracle_eval_at_s: oracle_eval,
+            opening_proof: dummy_opening,
+            super_root,
+            per_matrix_openings: Some(per_matrix_openings),
+            per_matrix_evals: Some(per_matrix_evals),
+        };
+
+        // --- Verifier side ---
+        assert!(
+            verify_aggregated_binding(&proof, &claims, &mut verifier_ch),
+            "per-matrix opening proof must verify"
+        );
+    }
+
+    /// Test that a tampered per-matrix eval fails verification.
+    #[test]
+    fn test_per_matrix_openings_tampered_eval_fails() {
+        let mle0 = random_mle(6);
+        let mle1 = random_mle(7);
+        let claims: Vec<AggregatedWeightClaim> = vec![
+            make_claim(0, &mle0),
+            make_claim(1, &mle1),
+        ];
+        let config = AggregatedBindingConfig::from_claims(&claims);
+        let claim_n_vars: Vec<usize> = claims.iter().map(|c| c.local_n_vars).collect();
+
+        let mle_refs: Vec<&[SecureField]> = vec![&mle0, &mle1];
+        let mles_u32: Vec<Vec<u32>> = mle_refs.iter().map(|m| securefield_mle_to_u32_aos(m)).collect();
+        let u32_refs: Vec<&[u32]> = mles_u32.iter().map(|m| m.as_slice()).collect();
+        let source = make_slice_source(&mle_refs, &u32_refs);
+
+        let mut prover_ch = PoseidonChannel::new();
+        prover_ch.mix_u64(77);
+        let mut verifier_ch = prover_ch.clone();
+
+        // Build valid proof with per-matrix openings
+        let super_root = build_super_root(&claims, &config);
+        prover_ch.mix_felt(super_root.root);
+        let betas = draw_beta_weights(&mut prover_ch, claims.len());
+        let (round_polys, challenge_point) = mismatch_sumcheck_streaming(
+            &claims, &source, &claim_n_vars, &config, &betas, &mut prover_ch,
+        );
+
+        let selector = &challenge_point[..config.selector_bits];
+        let local = &challenge_point[config.selector_bits..];
+
+        let mut per_matrix_evals = Vec::new();
+        let mut per_matrix_openings = Vec::new();
+
+        for i in 0..source.len() {
+            let n_vars = claim_n_vars[i];
+            let local_truncated = &local[config.n_max - n_vars..];
+            let mle = source.get_mle(i);
+            let opening_proof = prove_mle_opening(&mle, local_truncated, &mut prover_ch);
+            let w_val = evaluate_mle_at(&mle, local_truncated);
+            per_matrix_evals.push(w_val);
+            per_matrix_openings.push(opening_proof);
+        }
+
+        let mut oracle_eval = SecureField::zero();
+        for i in 0..source.len() {
+            let sel_weight = compute_selector_weight(i, selector, &config);
+            oracle_eval = oracle_eval + sel_weight * per_matrix_evals[i];
+        }
+        prover_ch.mix_felts(&[oracle_eval]);
+
+        // Tamper: flip one eval
+        let mut tampered_evals = per_matrix_evals.clone();
+        tampered_evals[0] = tampered_evals[0] + SecureField::from(M31::from(1));
+
+        let proof = AggregatedWeightBindingProof {
+            config,
+            sumcheck_round_polys: round_polys,
+            oracle_eval_at_s: oracle_eval,
+            opening_proof: per_matrix_openings[0].clone(),
+            super_root,
+            per_matrix_openings: Some(per_matrix_openings),
+            per_matrix_evals: Some(tampered_evals),
+        };
+
+        assert!(
+            !verify_aggregated_binding(&proof, &claims, &mut verifier_ch),
+            "tampered per-matrix eval should fail verification"
+        );
     }
 }
