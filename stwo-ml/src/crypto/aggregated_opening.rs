@@ -1697,9 +1697,10 @@ pub fn prove_aggregated_binding_streaming(
             local_truncated,
             channel,
         );
-        debug_assert_eq!(
+        assert_eq!(
             commitment, claims[i].commitment,
-            "Per-matrix commitment mismatch for matrix {i}"
+            "Per-matrix commitment mismatch for matrix {i}: prover_root={commitment:?}, claim_root={:?}",
+            claims[i].commitment
         );
 
         // Evaluate MLE at challenge point for oracle_eval reconstruction
@@ -1866,6 +1867,7 @@ pub fn verify_aggregated_binding(
     }
 
     if current_sum != verifier_sum {
+        eprintln!("[verify_aggregated_binding] FAIL: sumcheck final sum mismatch");
         return false;
     }
 
@@ -1875,6 +1877,7 @@ pub fn verify_aggregated_binding(
     {
         // Per-matrix path: openings come BEFORE oracle_eval mix (matching prover order)
         if pm_openings.len() != claims.len() || pm_evals.len() != claims.len() {
+            eprintln!("[verify_aggregated_binding] FAIL: per-matrix length mismatch");
             return false;
         }
 
@@ -1892,6 +1895,7 @@ pub fn verify_aggregated_binding(
                 local_truncated,
                 channel,
             ) {
+                eprintln!("[verify_aggregated_binding] FAIL: per-matrix opening {i} failed (n_vars={n_vars}, commitment={:?})", claim.commitment);
                 return false;
             }
         }
@@ -1903,6 +1907,7 @@ pub fn verify_aggregated_binding(
             expected_eval = expected_eval + sel_weight * pm_evals[i];
         }
         if expected_eval != proof.oracle_eval_at_s {
+            eprintln!("[verify_aggregated_binding] FAIL: oracle_eval mismatch (expected={expected_eval:?}, got={:?})", proof.oracle_eval_at_s);
             return false;
         }
 
