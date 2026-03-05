@@ -1924,17 +1924,20 @@ pub fn verify_mle_opening(
     }
 
     if proof.queries.len() != n_queries {
+        eprintln!("[verify_mle_opening] FAIL: query count mismatch: proof={}, expected={}", proof.queries.len(), n_queries);
         return false;
     }
 
     // 3. Verify each query chain
     for (q_idx, query) in proof.queries.iter().enumerate() {
         if query.rounds.len() != n_rounds {
+            eprintln!("[verify_mle_opening] FAIL: query {q_idx} has {} rounds, expected {n_rounds}", query.rounds.len());
             return false;
         }
 
         // Verify initial pair index matches channel-derived query
         if query.initial_pair_index as usize != query_indices[q_idx] {
+            eprintln!("[verify_mle_opening] FAIL: query {q_idx} pair_index mismatch: proof={}, channel={}", query.initial_pair_index, query_indices[q_idx]);
             return false;
         }
 
@@ -1965,9 +1968,11 @@ pub fn verify_mle_opening(
                 };
 
                 if !PoseidonMerkleTree::verify(layer_root, left_idx, left_leaf, &left_path) {
+                    eprintln!("[verify_mle_opening] FAIL: query {q_idx} round {round} LEFT merkle failed (left_idx={left_idx}, layer_size={layer_size}, siblings={}, root={layer_root:?})", left_path.siblings.len());
                     return false;
                 }
                 if !PoseidonMerkleTree::verify(layer_root, right_idx, right_leaf, &right_path) {
+                    eprintln!("[verify_mle_opening] FAIL: query {q_idx} round {round} RIGHT merkle failed (right_idx={right_idx}, layer_size={layer_size}, siblings={}, root={layer_root:?})", right_path.siblings.len());
                     return false;
                 }
             }
@@ -1979,6 +1984,7 @@ pub fn verify_mle_opening(
 
             // Last round: folded value must equal final_value
             if round == n_rounds - 1 && folded != proof.final_value {
+                eprintln!("[verify_mle_opening] FAIL: query {q_idx} final fold mismatch: folded={folded:?}, expected={:?}", proof.final_value);
                 return false;
             }
 
