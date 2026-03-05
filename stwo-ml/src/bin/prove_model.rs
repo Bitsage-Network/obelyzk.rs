@@ -29,6 +29,12 @@ use std::process;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+
+/// Returns true if --quiet was set.
+#[inline]
+fn is_quiet() -> bool {
+    stwo_ml::is_quiet()
+}
 use starknet_ff::FieldElement;
 use stwo::core::fields::m31::M31;
 #[cfg(feature = "cuda-runtime")]
@@ -203,6 +209,11 @@ struct Cli {
     /// Max fee in ETH for --submit-gkr transactions.
     #[arg(long, default_value = "0.05")]
     max_fee: String,
+
+    /// Suppress verbose diagnostic output ([CACHE], [BG], [mmap-cache] prefixes).
+    /// Keeps [GKR] progress lines for ETA during long proves.
+    #[arg(long)]
+    quiet: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -811,6 +822,10 @@ fn load_model(cli: &Cli) -> OnnxModel {
 fn main() {
     let cli = Cli::parse();
 
+    if cli.quiet {
+        stwo_ml::set_quiet(true);
+    }
+
     // Dispatch to subcommands if specified
     match cli.command {
         Some(Command::Audit(ref audit_cmd)) => {
@@ -895,31 +910,57 @@ fn main() {
             let mut any_crypto_check = false;
             let mut failed = false;
 
-            // (a) If gkr_calldata present, run verify_proof_fast() for
-            //     structural health checks (range, tags, PoW, truncation).
+            // (a) Structural health check on GKR calldata.
+            //     For ml_gkr format, use the disaggregated validator that understands
+            //     separate gkr/io/weight arrays. For other formats, fall back to V4 packed-IO.
             if let Some(gkr_arr) = proof_json.get("gkr_calldata").and_then(|v| v.as_array()) {
                 if !gkr_arr.is_empty() {
-                    let felts: Result<Vec<FieldElement>, _> = gkr_arr
-                        .iter()
-                        .map(|v| {
-                            let hex = v.as_str().unwrap_or("0x0");
-                            FieldElement::from_hex_be(hex)
-                        })
-                        .collect();
+                    let parse_felt_arr = |arr: &[serde_json::Value]| -> Result<Vec<FieldElement>, String> {
+                        arr.iter()
+                            .map(|v| {
+                                let hex = v.as_str().unwrap_or("0x0");
+                                FieldElement::from_hex_be(hex).map_err(|e| e.to_string())
+                            })
+                            .collect()
+                    };
 
-                    match felts {
-                        Ok(calldata) => {
-                            let health = stwo_ml::starknet::verify_proof_fast(&calldata);
-                            eprintln!("  proof health check ({} felts):", calldata.len());
+                    let gkr_felts = parse_felt_arr(gkr_arr);
+
+                    match gkr_felts {
+                        Ok(gkr_calldata) => {
+                            let health = if format == "ml_gkr" {
+                                // Disaggregated ml_gkr: parse io + weight arrays separately
+                                let io_calldata = proof_json
+                                    .get("io_calldata")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| parse_felt_arr(a).unwrap_or_default())
+                                    .unwrap_or_default();
+                                let wc = proof_json
+                                    .get("weight_commitments")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| parse_felt_arr(a).unwrap_or_default())
+                                    .unwrap_or_default();
+                                let nlp = proof_json
+                                    .get("num_layer_proofs")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as usize;
+                                stwo_ml::starknet::verify_proof_fast_ml_gkr(
+                                    &gkr_calldata, &io_calldata, &wc, nlp,
+                                )
+                            } else {
+                                stwo_ml::starknet::verify_proof_fast(&gkr_calldata)
+                            };
+
+                            eprintln!("  proof health check ({} felts):", health.total_felts);
                             for c in &health.checks {
-                                let mark = if c.passed { "✓" } else { "✗" };
+                                let mark = if c.passed { "PASS" } else { "FAIL" };
                                 eprintln!("    [{mark}] {}: {}", c.name, c.detail);
                             }
                             if !health.passed {
                                 eprintln!("VERIFICATION FAILED: proof health check failed");
                                 failed = true;
                             } else {
-                                eprintln!("  proof health: passed ✓");
+                                eprintln!("  proof health: PASSED");
                             }
                             any_crypto_check = true;
                         }
@@ -1629,29 +1670,35 @@ fn main() {
             let cache_count = wc.read().map(|c| c.len()).unwrap_or(0);
             let total_weights = model.weights.weights.len();
             if cache_count < total_weights {
-                eprintln!(
-                    "[CACHE] Pre-warming {} uncached weight Merkle roots (GPU exclusive)...",
-                    total_weights - cache_count,
-                );
+                if !is_quiet() {
+                    eprintln!(
+                        "[CACHE] Pre-warming {} uncached weight Merkle roots (GPU exclusive)...",
+                        total_weights - cache_count,
+                    );
+                }
                 let t_prewarm = Instant::now();
                 let computed = stwo_ml::weight_cache::prewarm_weight_roots_gpu_exclusive(
                     prewarm_weights, wc, prewarm_dir.as_deref(),
                 );
-                eprintln!(
-                    "[CACHE] Pre-warm complete: {computed} roots in {:.1}s",
-                    t_prewarm.elapsed().as_secs_f64(),
-                );
-            } else {
+                if !is_quiet() {
+                    eprintln!(
+                        "[CACHE] Pre-warm complete: {computed} roots in {:.1}s",
+                        t_prewarm.elapsed().as_secs_f64(),
+                    );
+                }
+            } else if !is_quiet() {
                 eprintln!("[CACHE] All {total_weights} weight roots cached — skipping pre-warm");
             }
         }
         let proof = run_proof();
         (proof, FieldElement::ZERO, std::time::Duration::ZERO)
     } else if serialize_gpu_commit {
-        eprintln!(
-            "[BG] Single-GPU mode: running weight commitment before proving to avoid GPU contention."
-        );
-        eprintln!("[BG] Set STWO_PARALLEL_GPU_COMMIT=1 to force overlapping commitment + proving.");
+        if !is_quiet() {
+            eprintln!(
+                "[BG] Single-GPU mode: running weight commitment before proving to avoid GPU contention."
+            );
+            eprintln!("[BG] Set STWO_PARALLEL_GPU_COMMIT=1 to force overlapping commitment + proving.");
+        }
         std::thread::scope(|s| {
             let _prewarm = prewarm_cache.as_ref().map(|wc| {
                 s.spawn(|| {
@@ -2363,6 +2410,28 @@ fn main() {
         eprintln!("  tee: none (zk-only)");
     }
 
+    // Clean summary block
+    let total_elapsed = t_e2e.elapsed();
+    eprintln!("=== Proof Summary ===");
+    eprintln!("  Model:       {} ({} layers, {} weights)",
+        model.metadata.name,
+        model.metadata.num_layers,
+        model.weights.weights.len(),
+    );
+    #[cfg(feature = "cuda-runtime")]
+    eprintln!("  Backend:     GPU");
+    #[cfg(not(feature = "cuda-runtime"))]
+    eprintln!("  Backend:     CPU");
+    eprintln!("  Prove time:  {:.1}s", prove_elapsed.as_secs_f64());
+    eprintln!("  Serialize:   {:.1}s", ser_elapsed.as_secs_f64());
+    eprintln!("  Total:       {:.1}s", total_elapsed.as_secs_f64());
+    eprintln!("  Output:      {} ({:.1} MB)",
+        cli.output.display(),
+        output_bytes as f64 / (1024.0 * 1024.0),
+    );
+    eprintln!("  Format:      {:?}", cli.format);
+    eprintln!("=====================");
+
     // --health-check and/or --dry-run: run fast proof validation before submission
     if cli.health_check || cli.dry_run {
         // Read back the proof file and parse calldata for health check
@@ -2370,40 +2439,50 @@ fn main() {
             eprintln!("Error: cannot read proof file for health check: {e}");
             process::exit(1);
         });
-        let proof_json: serde_json::Value = serde_json::from_str(&proof_contents).unwrap_or_else(|e| {
+        let hc_json: serde_json::Value = serde_json::from_str(&proof_contents).unwrap_or_else(|e| {
             eprintln!("Error: invalid JSON in proof file for health check: {e}");
             process::exit(1);
         });
 
-        // Extract GKR calldata for health check
-        let calldata_felts: Vec<FieldElement> = proof_json
-            .get("gkr_calldata")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .filter_map(|s| FieldElement::from_hex_be(s).ok())
-                    .collect()
-            })
-            .or_else(|| {
-                // Try io_calldata as fallback
-                proof_json.get("io_calldata").and_then(|v| v.as_array()).map(|arr| {
+        let hc_format = hc_json.get("format").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Helper to parse a JSON array of hex strings into FieldElements
+        let parse_felt_array = |key: &str| -> Vec<FieldElement> {
+            hc_json
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|arr| {
                     arr.iter()
                         .filter_map(|v| v.as_str())
                         .filter_map(|s| FieldElement::from_hex_be(s).ok())
                         .collect()
                 })
-            })
-            .unwrap_or_default();
+                .unwrap_or_default()
+        };
 
-        if calldata_felts.is_empty() {
+        let is_ml_gkr = hc_format == "ml_gkr";
+        let gkr_calldata = parse_felt_array("gkr_calldata");
+        let io_calldata_felts = parse_felt_array("io_calldata");
+        let wc_felts = parse_felt_array("weight_commitments");
+        let nlp = hc_json.get("num_layer_proofs").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        // Choose format-appropriate health check
+        let has_data = !gkr_calldata.is_empty() || !io_calldata_felts.is_empty();
+
+        if !has_data {
             eprintln!("Warning: no calldata found in proof file for health check");
         } else if cli.dry_run {
-            let result = stwo_ml::starknet::dry_run_onchain(
-                &calldata_felts,
-                cli.rpc_url.as_deref(),
-                Some(&cli.contract),
-            );
+            let result = if is_ml_gkr {
+                stwo_ml::starknet::dry_run_onchain_ml_gkr(
+                    &gkr_calldata, &io_calldata_felts, &wc_felts, nlp,
+                    cli.rpc_url.as_deref(), Some(&cli.contract),
+                )
+            } else {
+                let fallback = if gkr_calldata.is_empty() { &io_calldata_felts } else { &gkr_calldata };
+                stwo_ml::starknet::dry_run_onchain(
+                    fallback, cli.rpc_url.as_deref(), Some(&cli.contract),
+                )
+            };
             eprintln!("=== Dry-Run Report ===");
             eprintln!("  Calldata size: {} felts", result.calldata_size);
             eprintln!("  Estimated steps: {}", result.estimated_steps);
@@ -2427,10 +2506,15 @@ fn main() {
             eprintln!("Dry-run PASSED.");
         } else {
             // --health-check only
-            let report = stwo_ml::starknet::verify_proof_fast(&calldata_felts);
-            eprintln!("=== Health Check Report ===");
-            eprintln!("  Total felts: {}", report.total_felts);
-            eprintln!("  Estimated steps: {}", report.estimated_steps);
+            let report = if is_ml_gkr {
+                stwo_ml::starknet::verify_proof_fast_ml_gkr(
+                    &gkr_calldata, &io_calldata_felts, &wc_felts, nlp,
+                )
+            } else {
+                let fallback = if gkr_calldata.is_empty() { &io_calldata_felts } else { &gkr_calldata };
+                stwo_ml::starknet::verify_proof_fast(fallback)
+            };
+            eprintln!("=== Health Check ===");
             for check in &report.checks {
                 let status = if check.passed { "PASS" } else { "FAIL" };
                 eprintln!("  [{}] {}: {}", status, check.name, check.detail);
@@ -6064,11 +6148,13 @@ fn compute_weight_commitment(
     use std::sync::Arc;
 
     let n_weights = weights.weights.len();
-    eprintln!(
-        "[BG] Computing weight commitment ({} matrices, packed 7:1, parallel)...",
-        n_weights
-    );
-    eprintln!("[BG]   First run — will cache with fingerprint for instant validated reuse.");
+    if !is_quiet() {
+        eprintln!(
+            "[BG] Computing weight commitment ({} matrices, packed 7:1, parallel)...",
+            n_weights
+        );
+        eprintln!("[BG]   First run — will cache with fingerprint for instant validated reuse.");
+    }
     let t_commit = Instant::now();
     let progress_every = std::env::var("STWO_WEIGHT_PROGRESS_EVERY")
         .ok()
@@ -6079,10 +6165,12 @@ fn compute_weight_commitment(
     let weight_list: Vec<_> = weights.weights.iter().collect();
     let done_count = Arc::new(AtomicUsize::new(0));
     let total = weight_list.len();
-    eprintln!(
-        "[BG]   Progress update cadence: every {} matrix/matrices",
-        progress_every
-    );
+    if !is_quiet() {
+        eprintln!(
+            "[BG]   Progress update cadence: every {} matrix/matrices",
+            progress_every
+        );
+    }
     let ticker_stop = Arc::new(AtomicBool::new(false));
     let ticker_done_count = Arc::clone(&done_count);
     let ticker_stop_flag = Arc::clone(&ticker_stop);
@@ -6099,10 +6187,12 @@ fn compute_weight_commitment(
             } else {
                 100.0
             };
-            eprintln!(
-                "[BG]   Working... {}/{} ({:.1}%, {:.1}s elapsed)",
-                finished, total, pct, elapsed,
-            );
+            if !is_quiet() {
+                eprintln!(
+                    "[BG]   Working... {}/{} ({:.1}%, {:.1}s elapsed)",
+                    finished, total, pct, elapsed,
+                );
+            }
         }
     });
 
@@ -6112,10 +6202,12 @@ fn compute_weight_commitment(
         .filter(|&v| v > 0)
         .unwrap_or(4096);
     let chunk_size = 4096usize;
-    eprintln!(
-        "[BG]   Segment parallelism target: {} segments per matrix",
-        target_segments
-    );
+    if !is_quiet() {
+        eprintln!(
+            "[BG]   Segment parallelism target: {} segments per matrix",
+            target_segments
+        );
+    }
 
     let hash_packed_segment_cpu = |packed: &[FieldElement]| -> FieldElement {
         if packed.is_empty() {
@@ -6135,16 +6227,18 @@ fn compute_weight_commitment(
     #[cfg(feature = "cuda-runtime")]
     let mut gpu_hasher = match GpuCommitHasher::new() {
         Ok(hasher) => {
-            let strict = gpu_commit_strict_mode();
-            let harden = gpu_commit_hardening_enabled();
-            eprintln!(
-                "[BG]   GPU Poseidon hash-many enabled for segment hashing (strict={}, harden={})",
-                strict, harden
-            );
-            if harden {
+            if !is_quiet() {
+                let strict = gpu_commit_strict_mode();
+                let harden = gpu_commit_hardening_enabled();
                 eprintln!(
-                    "[BG]   Hardening enabled: GPU results are cross-checked on CPU (expect slower first run)"
+                    "[BG]   GPU Poseidon hash-many enabled for segment hashing (strict={}, harden={})",
+                    strict, harden
                 );
+                if harden {
+                    eprintln!(
+                        "[BG]   Hardening enabled: GPU results are cross-checked on CPU (expect slower first run)"
+                    );
+                }
             }
             Some(hasher)
         }
@@ -6152,21 +6246,25 @@ fn compute_weight_commitment(
             if gpu_commit_strict_mode() {
                 panic!("GPU commitment strict mode enabled, but GPU hasher init failed: {e}");
             }
-            eprintln!("[BG]   GPU Poseidon unavailable ({e}), falling back to CPU segment hashing");
+            if !is_quiet() {
+                eprintln!("[BG]   GPU Poseidon unavailable ({e}), falling back to CPU segment hashing");
+            }
             None
         }
     };
 
     let per_matrix_hashes: Vec<FieldElement> = weight_list.iter().enumerate().map(|(idx, (layer_id, w))| {
-        eprintln!(
-            "[BG]   Matrix {}/{} start: layer={}, shape={}x{} ({} elements)",
-            idx + 1,
-            total,
-            layer_id,
-            w.rows,
-            w.cols,
-            w.data.len(),
-        );
+        if !is_quiet() {
+            eprintln!(
+                "[BG]   Matrix {}/{} start: layer={}, shape={}x{} ({} elements)",
+                idx + 1,
+                total,
+                layer_id,
+                w.rows,
+                w.cols,
+                w.data.len(),
+            );
+        }
         let segment_count = target_segments.min(w.data.len().max(1));
         let seg_size = (w.data.len() + segment_count - 1) / segment_count;
         let raw_segments: Vec<&[M31]> = w.data
@@ -6210,10 +6308,12 @@ fn compute_weight_commitment(
                                     layer_id, e
                                 );
                             }
-                            eprintln!(
-                                "[BG]   Layer {} GPU Poseidon hash-many failed ({}), using CPU fallback",
-                                layer_id, e
-                            );
+                            if !is_quiet() {
+                                eprintln!(
+                                    "[BG]   Layer {} GPU Poseidon hash-many failed ({}), using CPU fallback",
+                                    layer_id, e
+                                );
+                            }
                             gpu_hasher = None;
                             cpu_hash_segments()
                         }
@@ -6258,10 +6358,12 @@ fn compute_weight_commitment(
                                     layer_id, e
                                 );
                             }
-                            eprintln!(
-                                "[BG]   Layer {} GPU matrix hash failed ({}), using CPU fallback",
-                                layer_id, e
-                            );
+                            if !is_quiet() {
+                                eprintln!(
+                                    "[BG]   Layer {} GPU matrix hash failed ({}), using CPU fallback",
+                                    layer_id, e
+                                );
+                            }
                             gpu_hasher = None;
                             starknet_crypto::poseidon_hash_many(&final_inputs)
                         }
@@ -6285,10 +6387,12 @@ fn compute_weight_commitment(
             } else {
                 100.0
             };
-            eprintln!(
-                "[BG]   Weight commitment: {}/{} ({:.1}%, {:.1}s elapsed, ~{:.0}s remaining)",
-                finished, total, pct, elapsed, eta,
-            );
+            if !is_quiet() {
+                eprintln!(
+                    "[BG]   Weight commitment: {}/{} ({:.1}%, {:.1}s elapsed, ~{:.0}s remaining)",
+                    finished, total, pct, elapsed, eta,
+                );
+            }
         }
         matrix_hash
     }).collect();
@@ -6321,7 +6425,9 @@ fn compute_weight_commitment(
                                 e
                             );
                         }
-                        eprintln!("[BG]   GPU root hash failed ({}), using CPU fallback", e);
+                        if !is_quiet() {
+                            eprintln!("[BG]   GPU root hash failed ({}), using CPU fallback", e);
+                        }
                         starknet_crypto::poseidon_hash_many(&per_matrix_hashes)
                     }
                 }
@@ -6334,10 +6440,12 @@ fn compute_weight_commitment(
             starknet_crypto::poseidon_hash_many(&per_matrix_hashes)
         }
     };
-    eprintln!(
-        "[BG] Weight commitment computed in {:.2}s",
-        t_commit.elapsed().as_secs_f64()
-    );
+    if !is_quiet() {
+        eprintln!(
+            "[BG] Weight commitment computed in {:.2}s",
+            t_commit.elapsed().as_secs_f64()
+        );
+    }
 
     // Cache with fingerprint for validated reuse
     if let Some(d) = model_dir {
@@ -6345,11 +6453,13 @@ fn compute_weight_commitment(
             let cache_path = d.join(format!(".weight_commitment_{fp}.hex"));
             let hex = format!("0x{:064x}", commitment);
             if let Err(e) = std::fs::write(&cache_path, &hex) {
-                eprintln!(
-                    "[BG]   Warning: could not cache to {}: {e}",
-                    cache_path.display()
-                );
-            } else {
+                if !is_quiet() {
+                    eprintln!(
+                        "[BG]   Warning: could not cache to {}: {e}",
+                        cache_path.display()
+                    );
+                }
+            } else if !is_quiet() {
                 eprintln!(
                     "[BG]   Cached to {} (auto-invalidates if weights change)",
                     cache_path.display()

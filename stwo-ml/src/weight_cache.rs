@@ -1018,10 +1018,12 @@ pub fn shared_cache_for_model_mmap(
                 // Validate fingerprint against current weights
                 let current_fp = compute_weight_fingerprint(weights);
                 if cache.fingerprint != [0u8; 32] && cache.fingerprint != current_fp {
-                    eprintln!(
-                        "[mmap-cache] fingerprint mismatch for '{}' — weights changed, invalidating",
-                        model_id,
-                    );
+                    if !crate::is_quiet() {
+                        eprintln!(
+                            "[mmap-cache] fingerprint mismatch for '{}' — weights changed, invalidating",
+                            model_id,
+                        );
+                    }
                     return Arc::new(RwLock::new(
                         WeightCommitmentCache::new_with_fingerprint(model_id, weights),
                     ));
@@ -1031,15 +1033,19 @@ pub fn shared_cache_for_model_mmap(
                     cache.fingerprint = current_fp;
                     cache.dirty = true;
                 }
-                eprintln!(
-                    "[mmap-cache] loaded {} entries for '{}' in <1ms",
-                    cache.len(),
-                    model_id,
-                );
+                if !crate::is_quiet() {
+                    eprintln!(
+                        "[mmap-cache] loaded {} entries for '{}' in <1ms",
+                        cache.len(),
+                        model_id,
+                    );
+                }
                 return Arc::new(RwLock::new(cache));
             }
             Err(e) => {
-                eprintln!("[mmap-cache] mmap failed ({}), falling back to file I/O", e);
+                if !crate::is_quiet() {
+                    eprintln!("[mmap-cache] mmap failed ({}), falling back to file I/O", e);
+                }
             }
         }
     }

@@ -3644,6 +3644,199 @@ pub fn verify_proof_fast(calldata: &[FieldElement]) -> ProofHealthReport {
     }
 }
 
+/// Run a structural health check on disaggregated ml_gkr proof components.
+///
+/// Unlike `verify_proof_fast` (which assumes V4 packed-IO layout), this function
+/// validates the separate `gkr_calldata`, `io_calldata`, and `weight_commitments`
+/// arrays that the `--format ml_gkr` pipeline produces.
+pub fn verify_proof_fast_ml_gkr(
+    gkr_calldata: &[FieldElement],
+    io_calldata: &[FieldElement],
+    weight_commitments: &[FieldElement],
+    num_layer_proofs: usize,
+) -> ProofHealthReport {
+    let mut checks = Vec::new();
+    let total_felts = gkr_calldata.len() + io_calldata.len() + weight_commitments.len();
+
+    // 1. GKR calldata length — must be non-empty and plausible for the layer count.
+    //    Each layer proof has at least a tag + a few sumcheck round values (~3 felts minimum).
+    let min_gkr_felts = if num_layer_proofs > 0 { num_layer_proofs * 3 } else { 1 };
+    let gkr_len_ok = gkr_calldata.len() >= min_gkr_felts;
+    checks.push(HealthCheck {
+        name: "gkr_calldata",
+        passed: gkr_len_ok,
+        detail: if gkr_len_ok {
+            format!("{} felts ({} layer proofs)", gkr_calldata.len(), num_layer_proofs)
+        } else {
+            format!(
+                "{} felts too small for {} layer proofs (need >= {})",
+                gkr_calldata.len(),
+                num_layer_proofs,
+                min_gkr_felts,
+            )
+        },
+    });
+
+    // 2. IO structure — validate [in_rows, in_cols, in_len, data..., out_rows, out_cols, out_len, data...]
+    let io_ok = if io_calldata.len() >= 6 {
+        let in_rows = felt_to_u64(&io_calldata[0]) as usize;
+        let in_cols = felt_to_u64(&io_calldata[1]) as usize;
+        let in_len = felt_to_u64(&io_calldata[2]) as usize;
+        let dims_match = in_rows * in_cols == in_len;
+        let out_start = 3 + in_len;
+        if dims_match && out_start + 3 <= io_calldata.len() {
+            let out_rows = felt_to_u64(&io_calldata[out_start]) as usize;
+            let out_cols = felt_to_u64(&io_calldata[out_start + 1]) as usize;
+            let out_len = felt_to_u64(&io_calldata[out_start + 2]) as usize;
+            let out_ok = out_rows * out_cols == out_len;
+            let total_expected = 3 + in_len + 3 + out_len;
+            checks.push(HealthCheck {
+                name: "io_data",
+                passed: out_ok && io_calldata.len() == total_expected,
+                detail: if out_ok && io_calldata.len() == total_expected {
+                    format!("input={}x{}, output={}x{}", in_rows, in_cols, out_rows, out_cols)
+                } else {
+                    format!(
+                        "dimension mismatch: in={}x{}(len={}), out={}x{}(len={}), total={} vs expected={}",
+                        in_rows, in_cols, in_len, out_rows, out_cols, out_len,
+                        io_calldata.len(), total_expected,
+                    )
+                },
+            });
+            out_ok && io_calldata.len() == total_expected
+        } else {
+            checks.push(HealthCheck {
+                name: "io_data",
+                passed: false,
+                detail: format!(
+                    "input dims {}x{} vs len={}, io_calldata.len()={}",
+                    in_rows, in_cols, in_len, io_calldata.len(),
+                ),
+            });
+            false
+        }
+    } else {
+        checks.push(HealthCheck {
+            name: "io_data",
+            passed: io_calldata.is_empty(),
+            detail: if io_calldata.is_empty() {
+                "no IO data (may be pre-committed)".to_string()
+            } else {
+                format!("truncated IO: {} felts (need >= 6)", io_calldata.len())
+            },
+        });
+        io_calldata.is_empty()
+    };
+    let _ = io_ok;
+
+    // 3. QM31 range check — spot-check 10 values from gkr_calldata
+    {
+        let sample_count = 10.min(gkr_calldata.len());
+        let mut range_failures = 0usize;
+        if sample_count > 0 {
+            let step = gkr_calldata.len() / sample_count;
+            for i in 0..sample_count {
+                let idx = i * step;
+                if idx < gkr_calldata.len() {
+                    let be = gkr_calldata[idx].to_bytes_be();
+                    if be[0] > 0x0F {
+                        range_failures += 1;
+                    }
+                }
+            }
+        }
+        let range_ok = range_failures == 0;
+        checks.push(HealthCheck {
+            name: "qm31_range",
+            passed: range_ok,
+            detail: if range_ok {
+                format!("{} samples valid", sample_count)
+            } else {
+                format!("{}/{} samples exceed felt252 range", range_failures, sample_count)
+            },
+        });
+    }
+
+    // 4. Weight commitments present
+    let wc_ok = !weight_commitments.is_empty();
+    checks.push(HealthCheck {
+        name: "weight_commitments",
+        passed: wc_ok,
+        detail: if wc_ok {
+            format!("{} present", weight_commitments.len())
+        } else {
+            "no weight commitments".to_string()
+        },
+    });
+
+    // 5. Step estimation using component sizes
+    let io_felts = io_calldata.len();
+    let estimated_steps = estimate_gkr_steps(num_layer_proofs, io_felts, weight_commitments.len());
+    let within_limit = estimated_steps < 9_000_000;
+    checks.push(HealthCheck {
+        name: "step_estimate",
+        passed: within_limit,
+        detail: format!(
+            "~{}M steps (limit: 10M, margin: 9M) — {}",
+            estimated_steps as f64 / 1_000_000.0,
+            if within_limit { "OK" } else { "EXCEEDS MARGIN" }
+        ),
+    });
+
+    let passed = checks.iter().all(|c| c.passed);
+    ProofHealthReport {
+        checks,
+        passed,
+        total_felts,
+        estimated_steps,
+    }
+}
+
+/// Run a dry-run simulation for disaggregated ml_gkr proof components.
+///
+/// Like `dry_run_onchain` but uses `verify_proof_fast_ml_gkr` instead of
+/// `verify_proof_fast`.
+pub fn dry_run_onchain_ml_gkr(
+    gkr_calldata: &[FieldElement],
+    io_calldata: &[FieldElement],
+    weight_commitments: &[FieldElement],
+    num_layer_proofs: usize,
+    rpc_url: Option<&str>,
+    _contract_address: Option<&str>,
+) -> DryRunResult {
+    let health = verify_proof_fast_ml_gkr(gkr_calldata, io_calldata, weight_commitments, num_layer_proofs);
+
+    let estimated_steps = health.estimated_steps;
+    let within_step_limit = estimated_steps < 10_000_000;
+    let estimated_fee_strk = (estimated_steps as f64) * 0.0000001;
+    let total_felts = gkr_calldata.len() + io_calldata.len() + weight_commitments.len();
+
+    // Optional RPC simulation — use gkr_calldata as the representative payload
+    let rpc_simulation = rpc_url.map(|url| {
+        match simulate_via_rpc(url, gkr_calldata) {
+            Ok((steps, _)) => RpcSimResult {
+                success: true,
+                actual_steps: steps,
+                error: None,
+            },
+            Err(e) => RpcSimResult {
+                success: false,
+                actual_steps: 0,
+                error: Some(e),
+            },
+        }
+    });
+
+    DryRunResult {
+        health,
+        calldata_size: total_felts,
+        estimated_fee_strk,
+        estimated_steps,
+        within_step_limit,
+        rpc_simulation,
+    }
+}
+
 /// Result of a dry-run simulation.
 #[derive(Debug)]
 pub struct DryRunResult {
@@ -7603,5 +7796,68 @@ mod tests {
             "first chunk should contain eval points + binding proof, got {} felts",
             first_chunk.calldata.len(),
         );
+    }
+
+    #[test]
+    fn test_verify_proof_fast_ml_gkr_valid() {
+        // Construct a minimal valid ml_gkr proof:
+        // gkr_calldata: 30 felts (enough for 8 layer proofs * 3 = 24 minimum)
+        let gkr_calldata: Vec<FieldElement> = (0..30)
+            .map(|i| FieldElement::from(i as u64 + 1))
+            .collect();
+
+        // io_calldata: 1x4 input, 1x4 output = [1, 4, 4, d0..d3, 1, 4, 4, d0..d3]
+        let mut io_calldata = vec![
+            FieldElement::from(1u64),  // in_rows
+            FieldElement::from(4u64),  // in_cols
+            FieldElement::from(4u64),  // in_len
+        ];
+        for i in 0..4 { io_calldata.push(FieldElement::from(100u64 + i)); }
+        io_calldata.push(FieldElement::from(1u64));  // out_rows
+        io_calldata.push(FieldElement::from(4u64));  // out_cols
+        io_calldata.push(FieldElement::from(4u64));  // out_len
+        for i in 0..4 { io_calldata.push(FieldElement::from(200u64 + i)); }
+
+        let weight_commitments = vec![
+            FieldElement::from(0xABCDu64),
+            FieldElement::from(0xDEF0u64),
+        ];
+
+        let report = verify_proof_fast_ml_gkr(&gkr_calldata, &io_calldata, &weight_commitments, 8);
+        assert!(report.passed, "all checks should pass, failures: {:?}",
+            report.checks.iter().filter(|c| !c.passed).map(|c| &c.name).collect::<Vec<_>>());
+        assert_eq!(report.total_felts, 30 + 14 + 2);
+    }
+
+    #[test]
+    fn test_verify_proof_fast_ml_gkr_io_mismatch() {
+        let gkr_calldata: Vec<FieldElement> = (0..10)
+            .map(|i| FieldElement::from(i as u64 + 1))
+            .collect();
+
+        // Bad IO: rows*cols != len (2*3 != 5)
+        let io_calldata = vec![
+            FieldElement::from(2u64),  // in_rows
+            FieldElement::from(3u64),  // in_cols
+            FieldElement::from(5u64),  // in_len (should be 6)
+            FieldElement::from(1u64),
+            FieldElement::from(2u64),
+            FieldElement::from(3u64),
+            FieldElement::from(4u64),
+            FieldElement::from(5u64),
+        ];
+
+        let report = verify_proof_fast_ml_gkr(&gkr_calldata, &io_calldata, &[FieldElement::ONE], 2);
+        // io_data check should fail
+        let io_check = report.checks.iter().find(|c| c.name == "io_data").unwrap();
+        assert!(!io_check.passed, "io_data should fail on dimension mismatch");
+    }
+
+    #[test]
+    fn test_verify_proof_fast_ml_gkr_empty_weights() {
+        let gkr_calldata = vec![FieldElement::from(1u64); 10];
+        let report = verify_proof_fast_ml_gkr(&gkr_calldata, &[], &[], 2);
+        let wc_check = report.checks.iter().find(|c| c.name == "weight_commitments").unwrap();
+        assert!(!wc_check.passed, "empty weights should fail");
     }
 }

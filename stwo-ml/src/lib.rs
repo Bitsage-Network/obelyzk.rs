@@ -16,6 +16,23 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global quiet flag: when true, suppresses verbose diagnostic output.
+/// Set via `set_quiet(true)` from the CLI binary.
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Enable or disable quiet mode globally.
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, Ordering::Relaxed);
+}
+
+/// Returns true if quiet mode is enabled.
+#[inline]
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
+}
+
 pub mod aggregation;
 pub mod backend;
 pub mod cairo_serde;

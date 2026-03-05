@@ -77,6 +77,79 @@ huggingface-cli download Qwen/Qwen3-14B --local-dir ~/.obelysk/models/qwen3-14b
   --output audit_report.json
 ```
 
+## Standalone GKR Proving
+
+For direct model proving without the audit pipeline, use `--format ml_gkr`:
+
+### Prove
+
+```bash
+./target/release/prove-model \
+  --model-dir ~/.obelysk/models/qwen3-14b \
+  --layers 1 \
+  --gkr \
+  --format ml_gkr \
+  --output proof.json
+```
+
+### Dry-run (health check + step estimation, no submission)
+
+```bash
+./target/release/prove-model \
+  --model-dir ~/.obelysk/models/qwen3-14b \
+  --layers 1 \
+  --gkr \
+  --format ml_gkr \
+  --dry-run \
+  --output proof.json
+```
+
+### Verify an existing proof
+
+```bash
+./target/release/prove-model \
+  --verify-proof proof.json \
+  --model-dir ~/.obelysk/models/qwen3-14b \
+  --layers 1
+```
+
+### Submit on-chain (gasless via AVNU paymaster)
+
+```bash
+./target/release/prove-model \
+  --model-dir ~/.obelysk/models/qwen3-14b \
+  --layers 1 \
+  --gkr \
+  --format ml_gkr \
+  --submit-paymaster \
+  --output proof.json
+```
+
+### Pre-warm weight cache
+
+First-time proving computes Merkle roots for all weight matrices (~60s for Qwen3-14B).
+Pre-warm the cache to make subsequent proves instant:
+
+```bash
+./target/release/prove-model \
+  --model-dir ~/.obelysk/models/qwen3-14b \
+  --generate-cache
+```
+
+### Useful flags
+
+| Flag | Description |
+|------|-------------|
+| `--format ml_gkr` | Recommended format for GKR proofs |
+| `--gkr` | Enable GKR proving (required for `ml_gkr`) |
+| `--dry-run` | Prove + health check + step estimation, skip submission |
+| `--health-check` | Run structural health check after proving |
+| `--verify-proof <path>` | Verify an existing proof file |
+| `--generate-cache` | Pre-compute weight cache and exit |
+| `--quiet` | Suppress verbose diagnostic output |
+| `--submit-paymaster` | Submit via AVNU gasless paymaster |
+| `--submit-gkr` | Submit via sncast (requires funded account) |
+
 ## Available Models
 
 | Model | Size | Auth | Preset |
@@ -94,12 +167,15 @@ huggingface-cli download Qwen/Qwen3-14B --local-dir ~/.obelysk/models/qwen3-14b
 
 ## Performance (H100)
 
-| Phase | Time |
-|-------|------|
-| Model loading | ~5s |
-| Forward pass (per inference) | ~3s |
-| ZK proof (per inference) | ~8s |
-| **3 inferences end-to-end** | **~37s** |
+| Phase | First Run | Cached |
+|-------|-----------|--------|
+| Model loading | ~5s | ~5s |
+| Weight cache pre-warm | ~60s | 0s (cached) |
+| Forward pass (1 layer) | ~1s | ~1s |
+| GKR prove (1 layer) | ~3s | ~3s |
+| Serialization | ~2.5s | ~2.5s |
+| **Total (1 layer, first run)** | **~140s** | **~8s** |
+| **Total (1 layer, cached)** | — | **~8s** |
 
 ## Troubleshooting
 
@@ -110,3 +186,22 @@ huggingface-cli download Qwen/Qwen3-14B --local-dir ~/.obelysk/models/qwen3-14b
 **Model download slow**: Use `--local-dir` to point to an existing download.
 
 **Out of memory**: Reduce `--layers` (try 2 instead of 5) or use a smaller model preset.
+Lower `STWO_GPU_MERKLE_THRESHOLD` (default 4096) to reduce GPU memory pressure.
+
+**Health check shows FAIL**: Update to the latest version and re-prove. Old proof files
+may use a different calldata layout. Use `--format ml_gkr` for the current format.
+
+**Soundness gate rejected**: Check environment variables. Default settings should work.
+See `docs/ENV_VARS.md` for a full reference.
+
+**Weight commitment is slow**: Use `--generate-cache` to pre-compute the cache once.
+Subsequent runs will load cached roots in <1ms.
+
+**GPU OOM during proving**: Lower `STWO_GPU_MERKLE_THRESHOLD` (e.g., `export STWO_GPU_MERKLE_THRESHOLD=2048`).
+
+**Streaming submission fails**: Ensure `STARKNET_ACCOUNT`, `STARKNET_PRIVATE_KEY` are set,
+and `node` (v18+) is available for the paymaster scripts.
+
+## Environment Variables
+
+See `docs/ENV_VARS.md` for a full categorized reference of all `STWO_*` environment variables.
