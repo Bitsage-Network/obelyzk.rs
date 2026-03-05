@@ -1942,34 +1942,41 @@ pub fn build_streaming_gkr_calldata(
         weight_expected_values.push(format!("0x{:x}", packed));
     }
 
-    // weight_eval_points: eval_point per weight claim for aggregated binding verification.
-    // Each eval_point is a variable-length array of packed QM31 coordinates.
-    let mut weight_eval_points: Vec<String> = Vec::new();
-    weight_eval_points.push(format!("{}", proof.weight_claims.len()));
+    // weight_eval_points: flat Array<felt252> containing nested [num_claims, inner_len, pts..., inner_len, pts...]
+    // Cairo Serde reads [total_felt_count, felt0, felt1, ...] so we serialize as flat array with total count.
+    let mut weight_eval_points_inner: Vec<String> = Vec::new();
+    weight_eval_points_inner.push(format!("{}", proof.weight_claims.len()));
     for wc in &proof.weight_claims {
-        weight_eval_points.push(format!("{}", wc.eval_point.len()));
+        weight_eval_points_inner.push(format!("{}", wc.eval_point.len()));
         for ep in &wc.eval_point {
             let packed = crate::crypto::poseidon_channel::securefield_to_felt(*ep);
-            weight_eval_points.push(format!("0x{:x}", packed));
+            weight_eval_points_inner.push(format!("0x{:x}", packed));
         }
     }
+    let mut weight_eval_points: Vec<String> = Vec::new();
+    weight_eval_points.push(format!("{}", weight_eval_points_inner.len()));
+    weight_eval_points.extend(weight_eval_points_inner);
+
     // Deferred weight claims eval points (from deferred proofs with MatMul kind)
     let deferred_matmul_count = proof
         .deferred_proofs
         .iter()
         .filter(|d| d.weight_claim().is_some())
         .count();
-    let mut deferred_eval_points: Vec<String> = Vec::new();
-    deferred_eval_points.push(format!("{}", deferred_matmul_count));
+    let mut deferred_eval_points_inner: Vec<String> = Vec::new();
+    deferred_eval_points_inner.push(format!("{}", deferred_matmul_count));
     for deferred in &proof.deferred_proofs {
         if let Some(wc) = deferred.weight_claim() {
-            deferred_eval_points.push(format!("{}", wc.eval_point.len()));
+            deferred_eval_points_inner.push(format!("{}", wc.eval_point.len()));
             for ep in &wc.eval_point {
                 let packed = crate::crypto::poseidon_channel::securefield_to_felt(*ep);
-                deferred_eval_points.push(format!("0x{:x}", packed));
+                deferred_eval_points_inner.push(format!("0x{:x}", packed));
             }
         }
     }
+    let mut deferred_eval_points: Vec<String> = Vec::new();
+    deferred_eval_points.push(format!("{}", deferred_eval_points_inner.len()));
+    deferred_eval_points.extend(deferred_eval_points_inner);
 
     // weight_binding_mode + data
     // Streaming path requires full aggregated binding proof for on-chain soundness.
