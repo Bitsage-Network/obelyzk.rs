@@ -4632,6 +4632,7 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
         max_inferences: cmd.max_inferences,
         gpu_device: if cmd.gpu { Some(0) } else { None },
         weight_binding: cmd.weight_binding.clone(),
+        verify_on_chain: cmd.verify_gkr,
     };
 
     // ── Run audit ────────────────────────────────────────────────────────
@@ -4673,13 +4674,34 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
 
         // Show GKR verification calldata info in dry-run mode
         if cmd.verify_gkr {
-            if let Some(ref gkr_calldata) = result.gkr_verification_calldata {
+            if let Some(ref streaming_steps) = result.streaming_verification_steps {
+                eprintln!();
+                eprintln!("=== Streaming GKR Verification Calldata (dry-run) ===");
+                for (idx, steps) in streaming_steps.iter().enumerate() {
+                    let total_felts: usize = steps.iter().map(|s| s.calldata.len()).sum();
+                    eprintln!("  Inference {}: {} steps, {} total felts", idx, steps.len(), total_felts);
+                    for step in steps {
+                        eprintln!("    {} ({}) → {} felts", step.filename, step.entrypoint, step.calldata.len());
+                    }
+
+                    // Write streaming calldata files for manual inspection
+                    let stream_dir = cmd.output.with_extension(format!("stream_{}", idx));
+                    if std::fs::create_dir_all(&stream_dir).is_ok() {
+                        for step in steps {
+                            let file_path = stream_dir.join(&step.filename);
+                            let calldata_flat = step.calldata.join(" ");
+                            let _ = std::fs::write(&file_path, &calldata_flat);
+                        }
+                        eprintln!("    Calldata dir: {}", stream_dir.display());
+                    }
+                }
+            } else if let Some(ref gkr_calldata) = result.gkr_verification_calldata {
                 eprintln!();
                 eprintln!("=== GKR Verification Calldata (dry-run) ===");
                 for (idx, cd) in gkr_calldata.iter().enumerate() {
                     eprintln!("  Inference {}: {} felts", idx, cd.len());
                     if cd.len() > 7500 {
-                        eprintln!("    Warning: exceeds 7500 single-TX limit");
+                        eprintln!("    Warning: exceeds 7500 single-TX limit, use --verify-gkr for streaming");
                     }
 
                     // Write calldata files for manual inspection
@@ -4982,7 +5004,121 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
                 eprintln!("Warning: --verify-gkr requires --mode gkr, skipping GKR verification");
             } else if acct_addr.is_empty() || priv_key.is_empty() {
                 eprintln!("Warning: --verify-gkr requires account credentials, skipping GKR verification");
+            } else if let Some(ref streaming_steps) = result.streaming_verification_steps {
+                // ── Streaming GKR verification (multi-TX) ────────────────────
+                eprintln!();
+                eprintln!("=== On-Chain Streaming GKR Verification ===");
+                eprintln!("  Verifier: {}", cmd.verifier_contract);
+                eprintln!("  Inferences: {}", streaming_steps.len());
+
+                let streaming_script = {
+                    let exe = std::env::current_exe().unwrap_or_default();
+                    let repo_root = exe
+                        .parent()
+                        .and_then(|p| p.parent())
+                        .and_then(|p| p.parent());
+                    match repo_root {
+                        Some(root) => root.join("scripts/pipeline/streaming_submit.mjs"),
+                        None => PathBuf::from("scripts/pipeline/streaming_submit.mjs"),
+                    }
+                };
+
+                let mut report = result.report.clone();
+                report.proof.gkr_verifier_contract = Some(cmd.verifier_contract.clone());
+
+                for (idx, steps) in streaming_steps.iter().enumerate() {
+                    eprintln!("  Inference {}: {} streaming steps", idx, steps.len());
+
+                    // Create temp directory for this inference's streaming calldata
+                    let stream_dir = cmd.output.with_extension(format!("stream_{}", idx));
+                    if let Err(e) = std::fs::create_dir_all(&stream_dir) {
+                        eprintln!("    Warning: could not create stream dir: {e}");
+                        continue;
+                    }
+
+                    // Write each step's calldata to a file
+                    for step in steps {
+                        let file_path = stream_dir.join(&step.filename);
+                        let calldata_flat = step.calldata.join(" ");
+                        if let Err(e) = std::fs::write(&file_path, &calldata_flat) {
+                            eprintln!("    Warning: could not write {}: {e}", step.filename);
+                        }
+                    }
+
+                    // Invoke streaming_submit.mjs
+                    let mut stream_cmd = std::process::Command::new("node");
+                    stream_cmd
+                        .arg(&streaming_script)
+                        .arg("--contract").arg(&cmd.verifier_contract)
+                        .arg("--calldata-dir").arg(&stream_dir)
+                        .arg("--account-address").arg(&acct_addr)
+                        .arg("--private-key").arg(&priv_key)
+                        .arg("--network").arg(&cmd.network);
+
+                    if let Ok(api_key) = std::env::var("AVNU_API_KEY") {
+                        stream_cmd.arg("--mode").arg("sponsored");
+                        stream_cmd.env("AVNU_API_KEY", api_key);
+                    } else {
+                        stream_cmd.arg("--mode").arg("direct");
+                    }
+
+                    match stream_cmd.output() {
+                        Ok(output) if output.status.success() => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            if !stderr.trim().is_empty() {
+                                eprintln!("    {}", stderr.trim());
+                            }
+
+                            // Parse TX hashes from streaming_submit.mjs output:
+                            // { success: true, steps: [{step, tx_hash, explorer_url, ...}], total_steps, ... }
+                            if let Ok(json) =
+                                serde_json::from_str::<serde_json::Value>(stdout.trim())
+                            {
+                                if let Some(steps_arr) = json.get("steps").and_then(|v| v.as_array()) {
+                                    for step_val in steps_arr {
+                                        if let Some(tx) = step_val.get("tx_hash").and_then(|v| v.as_str()) {
+                                            report.proof.gkr_verification_txs.push(tx.to_string());
+                                        }
+                                    }
+                                    eprintln!("    {} streaming TX(s) submitted", steps_arr.len());
+                                    if let Some(sid) = json.get("session_id").and_then(|v| v.as_str()) {
+                                        eprintln!("    Session ID: {}", sid);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            eprintln!("    Warning: streaming verification may have failed:");
+                            if !stderr.is_empty() {
+                                eprintln!("      {}", stderr.trim());
+                            }
+                            if !stdout.is_empty() {
+                                eprintln!("      {}", stdout.trim());
+                            }
+                            eprintln!("    Calldata saved to: {}", stream_dir.display());
+                        }
+                        Err(e) => {
+                            eprintln!("    Error: could not run streaming script: {e}");
+                            eprintln!("    Calldata saved to: {}", stream_dir.display());
+                        }
+                    }
+                }
+
+                // Re-write report with GKR verification TX hashes
+                if !report.proof.gkr_verification_txs.is_empty() {
+                    eprintln!();
+                    eprintln!(
+                        "  GKR streaming verification: {} TX(s) submitted",
+                        report.proof.gkr_verification_txs.len()
+                    );
+                    let report_json = serde_json::to_string_pretty(&report).unwrap();
+                    let _ = std::fs::write(&cmd.output, &report_json);
+                }
             } else if let Some(ref gkr_calldata) = result.gkr_verification_calldata {
+                // ── Single-TX GKR verification (fallback for small proofs) ───
                 eprintln!();
                 eprintln!("=== On-Chain GKR Verification (per-inference) ===");
                 eprintln!("  Verifier: {}", cmd.verifier_contract);
@@ -4995,7 +5131,7 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
                     let felt_count = inference_cd.len();
                     if felt_count > 7500 {
                         eprintln!(
-                            "  Inference {}: {} felts exceeds 7500 limit, skipping (multi-TX not yet supported)",
+                            "  Inference {}: {} felts exceeds 7500 limit, skipping (use --verify-gkr with verify_on_chain for streaming)",
                             idx, felt_count
                         );
                         continue;

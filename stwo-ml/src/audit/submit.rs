@@ -575,6 +575,7 @@ mod tests {
                 weight_opening_calldata: Vec::new(),
                 weight_commitments_calldata: Vec::new(),
                 proof_mode: ProofMode::Legacy,
+                streaming_steps: None,
             })
             .collect();
 

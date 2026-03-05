@@ -117,6 +117,10 @@ pub struct AuditRequest {
     /// Weight binding mode: "aggregated" (mode 4, default) or "sequential" (mode 0).
     #[serde(default = "default_weight_binding")]
     pub weight_binding: String,
+    /// When true, prove with full aggregated binding for on-chain streaming verification.
+    /// Slower (~10 min for large models) but produces streaming calldata.
+    #[serde(default)]
+    pub verify_on_chain: bool,
 }
 
 fn default_weight_binding() -> String {
@@ -134,6 +138,7 @@ impl Default for AuditRequest {
             max_inferences: 0,
             gpu_device: None,
             weight_binding: default_weight_binding(),
+            verify_on_chain: false,
         }
     }
 }
@@ -164,6 +169,17 @@ impl ProofMode {
             _ => ProofMode::Legacy,
         }
     }
+}
+
+/// A single step in streaming GKR verification for multi-TX on-chain submission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingVerificationStep {
+    /// Filename for the calldata (e.g. "stream_init.txt", "stream_layers_0.txt").
+    pub filename: String,
+    /// Cairo entrypoint to invoke (e.g. "verify_gkr_stream_init").
+    pub entrypoint: String,
+    /// Hex felt252 calldata strings for this step.
+    pub calldata: Vec<String>,
 }
 
 /// Result of proving a single inference within a batch.
@@ -202,6 +218,10 @@ pub struct InferenceProofResult {
     /// Which proving pipeline produced this proof.
     #[serde(default)]
     pub proof_mode: ProofMode,
+    /// Streaming GKR verification steps for multi-TX on-chain submission.
+    /// Present when verify_on_chain=true and proof requires streaming (>4500 felts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_steps: Option<Vec<StreamingVerificationStep>>,
 }
 
 /// Per-inference GKR calldata for on-chain verification via `verify_model_gkr()`.

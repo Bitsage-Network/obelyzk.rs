@@ -162,13 +162,17 @@ function discoverSteps(dir) {
     });
   }
 
-  const finInputMle = files.find((f) =>
-    f.startsWith("stream_finalize_input_mle")
-  );
-  if (finInputMle) {
+  const finInputMleFiles = files
+    .filter((f) => f.startsWith("stream_finalize_input_mle"))
+    .sort((a, b) => {
+      const na = parseInt(a.match(/(\d+)/)?.[1] || "0", 10);
+      const nb = parseInt(b.match(/(\d+)/)?.[1] || "0", 10);
+      return na - nb;
+    });
+  for (const f of finInputMleFiles) {
     steps.push({
-      name: "stream_finalize_input_mle",
-      file: finInputMle,
+      name: f.replace(".txt", ""),
+      file: f,
       entrypoint: "verify_gkr_stream_finalize_input_mle",
     });
   }

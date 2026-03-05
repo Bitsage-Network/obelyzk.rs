@@ -29,6 +29,7 @@ use crate::audit::storage::ArweaveClient;
 use crate::audit::submit::{digest_hex_to_felts, GkrVerificationConfig, SubmitConfig};
 use crate::audit::types::{
     AuditEncryption, AuditError, AuditReport, AuditRequest, ModelInfo, PrivacyInfo,
+    StreamingVerificationStep,
 };
 use crate::compiler::graph::{ComputationGraph, GraphWeights};
 
@@ -96,6 +97,9 @@ pub struct AuditPipelineResult {
     pub gkr_verification_calldata: Option<Vec<Vec<FieldElement>>>,
     /// GKR verification config extracted from the computation graph.
     pub gkr_verification_config: Option<GkrVerificationConfig>,
+    /// Per-inference streaming verification steps for multi-TX on-chain verification.
+    /// Present when verify_on_chain=true. Each inner Vec is one inference's streaming steps.
+    pub streaming_verification_steps: Option<Vec<Vec<StreamingVerificationStep>>>,
 }
 
 // ─── Main Orchestrator ─────────────────────────────────────────────────────
@@ -166,9 +170,20 @@ pub fn run_audit(
     };
     let audit_result = prover.prove_window(log, &config.request)?;
 
+    // Extract streaming verification steps from per-inference results.
+    let streaming_verification_steps = {
+        let steps: Vec<Vec<StreamingVerificationStep>> = audit_result
+            .inference_results
+            .iter()
+            .filter_map(|r| r.streaming_steps.clone())
+            .collect();
+        if steps.is_empty() { None } else { Some(steps) }
+    };
+
     info!(
         inferences = audit_result.inference_count,
         proving_ms = audit_result.proving_time_ms,
+        streaming = streaming_verification_steps.is_some(),
         "Audit pipeline: proving complete"
     );
 
@@ -361,6 +376,7 @@ pub fn run_audit(
         total_time_ms,
         gkr_verification_calldata,
         gkr_verification_config,
+        streaming_verification_steps,
     })
 }
 

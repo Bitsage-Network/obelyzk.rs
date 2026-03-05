@@ -422,6 +422,7 @@ mod tests {
                     weight_opening_calldata: Vec::new(),
                     weight_commitments_calldata: Vec::new(),
                     proof_mode: ProofMode::Legacy,
+                    streaming_steps: None,
                 },
                 InferenceProofResult {
                     sequence: 1,
@@ -435,6 +436,7 @@ mod tests {
                     weight_opening_calldata: Vec::new(),
                     weight_commitments_calldata: Vec::new(),
                     proof_mode: ProofMode::Legacy,
+                    streaming_steps: None,
                 },
             ],
             model_id: "0x42".to_string(),

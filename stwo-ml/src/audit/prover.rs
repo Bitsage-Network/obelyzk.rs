@@ -139,7 +139,7 @@ impl<'a> AuditProver<'a> {
                         .map(|(idx, entry)| {
                             #[cfg(feature = "multi-gpu")]
                             let _guard = crate::multi_gpu::DeviceGuard::new(idx % gpu_count);
-                            (idx, self.prove_inference(entry, log, &mode))
+                            (idx, self.prove_inference(entry, log, &mode, request.verify_on_chain))
                         })
                         .collect()
                 });
@@ -154,7 +154,7 @@ impl<'a> AuditProver<'a> {
 
         #[cfg(not(feature = "multi-query"))]
         for entry in entries {
-            let result = self.prove_inference(entry, log, &mode)?;
+            let result = self.prove_inference(entry, log, &mode, request.verify_on_chain)?;
             inference_results.push(result);
         }
 
@@ -207,6 +207,7 @@ impl<'a> AuditProver<'a> {
         entry: &crate::audit::types::InferenceLogEntry,
         log: &InferenceLog,
         mode: &ProofMode,
+        verify_on_chain: bool,
     ) -> Result<InferenceProofResult, AuditError> {
         let start = Instant::now();
 
@@ -222,7 +223,7 @@ impl<'a> AuditProver<'a> {
             // GKR/Direct: skip verify_replay — the proving pipeline runs its own
             // forward pass and computes io_commitment, which we cross-check below.
             // This avoids a redundant 2x forward pass.
-            ProofMode::Gkr => self.prove_inference_gkr(entry, &input, start),
+            ProofMode::Gkr => self.prove_inference_gkr(entry, &input, start, verify_on_chain),
             ProofMode::Direct => self.prove_inference_direct(entry, &input, start),
             // Legacy: must verify_replay since Blake2s proofs aren't on-chain verifiable.
             ProofMode::Legacy => {
@@ -245,16 +246,20 @@ impl<'a> AuditProver<'a> {
         entry: &crate::audit::types::InferenceLogEntry,
         input: &M31Matrix,
         start: Instant,
+        verify_on_chain: bool,
     ) -> Result<InferenceProofResult, AuditError> {
         // Parse model_id from the log entry.
         let model_id = FieldElement::from_hex_be(&entry.model_id).map_err(|_| {
             AuditError::ProvingFailed(format!("invalid model_id: {}", entry.model_id))
         })?;
 
-        // Audit pipeline uses RLC binding (fast path) — full aggregated binding
-        // proof is only needed for streaming on-chain verification, and the CPU-bound
-        // MLE evaluation takes 10+ minutes for large models.
-        std::env::set_var("STWO_AGGREGATED_RLC_ONLY", "1");
+        // When verify_on_chain is requested, we need full aggregated binding for
+        // streaming GKR verification. Otherwise use RLC-only (fast path).
+        if verify_on_chain {
+            std::env::remove_var("STWO_AGGREGATED_RLC_ONLY");
+        } else {
+            std::env::set_var("STWO_AGGREGATED_RLC_ONLY", "1");
+        }
 
         let agg_proof =
             crate::aggregation::prove_model_pure_gkr_auto_with_cache(
@@ -304,6 +309,39 @@ impl<'a> AuditProver<'a> {
         let proof_size_felts = gkr_proof.total_calldata_size;
         let layer_chain_commitment = format!("{:#066x}", gkr_proof.layer_chain_commitment);
 
+        // Build streaming verification steps when verify_on_chain is requested
+        // and the GKR proof is available from the aggregated proof.
+        let streaming_steps = if verify_on_chain {
+            if let Some(ref gkr) = agg_proof.gkr_proof {
+                match self.build_streaming_steps(gkr, model_id, input, &agg_proof.execution.output) {
+                    Ok(steps) => {
+                        info!(
+                            steps = steps.len(),
+                            seq = entry.sequence_number,
+                            "Built streaming GKR verification steps"
+                        );
+                        Some(steps)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            seq = entry.sequence_number,
+                            err = %e,
+                            "Failed to build streaming calldata, falling back to single-TX"
+                        );
+                        None
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    seq = entry.sequence_number,
+                    "verify_on_chain requested but no GKR proof available"
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(InferenceProofResult {
             sequence: entry.sequence_number,
             io_commitment: entry.io_commitment.clone(),
@@ -316,7 +354,82 @@ impl<'a> AuditProver<'a> {
             weight_commitments_calldata,
             weight_opening_calldata,
             proof_mode: ProofMode::Gkr,
+            streaming_steps,
         })
+    }
+
+    /// Build streaming verification steps from a GKR proof.
+    ///
+    /// Converts the proof into multi-TX streaming calldata using the existing
+    /// `build_streaming_gkr_calldata()` infrastructure.
+    fn build_streaming_steps(
+        &self,
+        gkr_proof: &crate::gkr::GKRProof,
+        model_id: FieldElement,
+        input: &M31Matrix,
+        output: &M31Matrix,
+    ) -> Result<Vec<crate::audit::types::StreamingVerificationStep>, AuditError> {
+        use crate::audit::types::StreamingVerificationStep;
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(self.graph)
+            .map_err(|e| AuditError::ProvingFailed(format!("Circuit compilation failed: {}", e)))?;
+
+        let raw_io = crate::cairo_serde::serialize_raw_io(input, output);
+
+        let streaming = crate::starknet::build_streaming_gkr_calldata(
+            gkr_proof, &circuit, model_id, &raw_io,
+        )
+        .map_err(|e| AuditError::ProvingFailed(format!("Streaming calldata build failed: {}", e)))?;
+
+        let mut steps = Vec::new();
+
+        // Init step
+        steps.push(StreamingVerificationStep {
+            filename: "stream_init.txt".to_string(),
+            entrypoint: "verify_gkr_stream_init".to_string(),
+            calldata: streaming.init_calldata,
+        });
+
+        // Output MLE chunks
+        for (i, chunk) in streaming.output_mle_chunks.iter().enumerate() {
+            steps.push(StreamingVerificationStep {
+                filename: format!("stream_output_mle_{}.txt", i),
+                entrypoint: "verify_gkr_stream_init_output_mle".to_string(),
+                calldata: chunk.calldata.clone(),
+            });
+        }
+
+        // Layer batches
+        for (i, batch) in streaming.stream_batches.iter().enumerate() {
+            steps.push(StreamingVerificationStep {
+                filename: format!("stream_layers_{}.txt", i),
+                entrypoint: "verify_gkr_stream_layers".to_string(),
+                calldata: batch.calldata.clone(),
+            });
+        }
+
+        // Input MLE finalization chunks
+        for (i, chunk) in streaming.input_mle_chunks.iter().enumerate() {
+            let entrypoint = if i == streaming.input_mle_chunks.len() - 1 {
+                "verify_gkr_stream_finalize_input_mle".to_string()
+            } else {
+                "verify_gkr_stream_finalize_input_mle".to_string()
+            };
+            steps.push(StreamingVerificationStep {
+                filename: format!("stream_finalize_input_mle_{}.txt", i),
+                entrypoint,
+                calldata: chunk.calldata.clone(),
+            });
+        }
+
+        // Final finalize step
+        steps.push(StreamingVerificationStep {
+            filename: "stream_finalize.txt".to_string(),
+            entrypoint: "verify_gkr_stream_finalize".to_string(),
+            calldata: streaming.finalize_calldata,
+        });
+
+        Ok(steps)
     }
 
     /// Direct pipeline: `prove_for_starknet_onchain()` → `StarknetModelProof`.
@@ -376,6 +489,7 @@ impl<'a> AuditProver<'a> {
             weight_opening_calldata: Vec::new(),
             weight_commitments_calldata: Vec::new(),
             proof_mode: ProofMode::Direct,
+            streaming_steps: None,
         })
     }
 
@@ -406,6 +520,7 @@ impl<'a> AuditProver<'a> {
             weight_opening_calldata: Vec::new(),
             weight_commitments_calldata: Vec::new(),
             proof_mode: ProofMode::Legacy,
+            streaming_steps: None,
         })
     }
 }
@@ -589,6 +704,9 @@ mod tests {
 
     #[test]
     fn test_prove_single_inference() {
+        // Hold env mutex to prevent parallel env var pollution (prove_inference_gkr sets env vars).
+        let _guard = EnvVarGuard::set("STWO_AGGREGATED_RLC_ONLY", "1");
+
         let dir = temp_dir();
         let (log, graph, weights) = setup_test_log(&dir, 1);
 
@@ -618,6 +736,8 @@ mod tests {
 
     #[test]
     fn test_prove_batch_commitments_deterministic() {
+        let _guard = EnvVarGuard::set("STWO_AGGREGATED_RLC_ONLY", "1");
+
         let dir1 = temp_dir();
         let dir2 = temp_dir();
         let (log1, graph1, weights1) = setup_test_log(&dir1, 3);
@@ -681,6 +801,7 @@ mod tests {
                 weight_opening_calldata: Vec::new(),
                 weight_commitments_calldata: Vec::new(),
                 proof_mode: ProofMode::Legacy,
+                streaming_steps: None,
             },
             InferenceProofResult {
                 sequence: 1,
@@ -694,6 +815,7 @@ mod tests {
                 weight_opening_calldata: Vec::new(),
                 weight_commitments_calldata: Vec::new(),
                 proof_mode: ProofMode::Legacy,
+                streaming_steps: None,
             },
         ];
 
@@ -765,6 +887,7 @@ mod tests {
                 weight_opening_calldata: Vec::new(),
                 weight_commitments_calldata: Vec::new(),
                 proof_mode: ProofMode::Direct,
+                streaming_steps: None,
             },
             InferenceProofResult {
                 sequence: 1,
@@ -778,6 +901,7 @@ mod tests {
                 weight_opening_calldata: Vec::new(),
                 weight_commitments_calldata: Vec::new(),
                 proof_mode: ProofMode::Direct,
+                streaming_steps: None,
             },
         ];
 
@@ -807,9 +931,123 @@ mod tests {
             weight_opening_calldata: Vec::new(),
             weight_commitments_calldata: Vec::new(),
             proof_mode: ProofMode::Legacy,
+            streaming_steps: None,
         }];
 
         let aggregated = aggregate_proof_calldata(&results);
         assert!(aggregated.is_empty());
+    }
+
+    /// EnvVarGuard: holds ENV_MUTEX and restores env var on drop.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let lock = crate::test_utils::ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev, _lock: lock }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let lock = crate::test_utils::ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.prev.as_ref() {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn test_prove_gkr_with_verify_on_chain_generates_streaming_steps() {
+        // Hold the env mutex to prevent RLC_ONLY pollution from parallel tests.
+        let _guard = EnvVarGuard::remove("STWO_AGGREGATED_RLC_ONLY");
+
+        let dir = temp_dir();
+        let (log, graph, weights) = setup_test_log(&dir, 1);
+
+        let prover = AuditProver::new(&graph, &weights);
+        let request = AuditRequest {
+            start_ns: 0,
+            end_ns: u64::MAX,
+            model_id: "0x2".to_string(),
+            mode: "gkr".to_string(),
+            verify_on_chain: true,
+            ..AuditRequest::default()
+        };
+
+        let result = prover.prove_window(&log, &request).unwrap();
+        assert_eq!(result.inference_count, 1);
+        assert_eq!(result.inference_results[0].proof_mode, ProofMode::Gkr);
+
+        // verify_on_chain should produce streaming steps
+        let steps = result.inference_results[0].streaming_steps.as_ref()
+            .expect("verify_on_chain=true should produce streaming_steps");
+
+        // Must have at least: init + finalize
+        assert!(steps.len() >= 2, "expected at least 2 streaming steps, got {}", steps.len());
+
+        // First step must be stream_init
+        assert_eq!(steps[0].filename, "stream_init.txt");
+        assert_eq!(steps[0].entrypoint, "verify_gkr_stream_init");
+        assert!(!steps[0].calldata.is_empty(), "init calldata must not be empty");
+
+        // Last step must be stream_finalize
+        let last = steps.last().unwrap();
+        assert_eq!(last.filename, "stream_finalize.txt");
+        assert_eq!(last.entrypoint, "verify_gkr_stream_finalize");
+
+        // All steps must have non-empty calldata
+        for step in steps {
+            assert!(!step.calldata.is_empty(), "step {} has empty calldata", step.filename);
+            assert!(!step.entrypoint.is_empty(), "step {} has empty entrypoint", step.filename);
+        }
+
+        // Verify expected entrypoints appear
+        let entrypoints: Vec<&str> = steps.iter().map(|s| s.entrypoint.as_str()).collect();
+        assert!(entrypoints.contains(&"verify_gkr_stream_init"));
+        assert!(entrypoints.contains(&"verify_gkr_stream_finalize"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_prove_gkr_without_verify_on_chain_has_no_streaming_steps() {
+        let _guard = EnvVarGuard::set("STWO_AGGREGATED_RLC_ONLY", "1");
+
+        let dir = temp_dir();
+        let (log, graph, weights) = setup_test_log(&dir, 1);
+
+        let prover = AuditProver::new(&graph, &weights);
+        let request = AuditRequest {
+            start_ns: 0,
+            end_ns: u64::MAX,
+            model_id: "0x2".to_string(),
+            mode: "gkr".to_string(),
+            verify_on_chain: false,
+            ..AuditRequest::default()
+        };
+
+        let result = prover.prove_window(&log, &request).unwrap();
+        assert_eq!(result.inference_count, 1);
+        assert!(
+            result.inference_results[0].streaming_steps.is_none(),
+            "verify_on_chain=false should not produce streaming_steps"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
