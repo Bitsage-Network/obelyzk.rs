@@ -975,11 +975,13 @@ fn main() {
                                 any_crypto_check = true;
                             }
                             Err(e) => {
-                                eprintln!("  Warning: could not parse io_calldata: {e}");
+                                eprintln!("VERIFICATION FAILED: could not parse io_calldata: {e}");
+                                failed = true;
                             }
                         },
                         Err(e) => {
-                            eprintln!("  Warning: could not parse io_calldata felts: {e}");
+                            eprintln!("VERIFICATION FAILED: could not parse io_calldata felts: {e}");
+                            failed = true;
                         }
                     }
                 }
@@ -991,14 +993,19 @@ fn main() {
 
             if any_crypto_check {
                 eprintln!("Proof verified (structural + commitment checks passed).");
+                eprintln!(
+                    "NOTE: For full cryptographic verification, use ml_gkr format \
+                     with --model-dir to replay the forward pass and re-verify the GKR proof."
+                );
             } else {
                 eprintln!(
-                    "WARNING: proof has no gkr_calldata or io_calldata — structural check only."
+                    "VERIFICATION FAILED: proof has no gkr_calldata or io_calldata — \
+                     cannot perform any cryptographic verification."
                 );
                 eprintln!(
-                    "Structural check is NOT a cryptographic guarantee. \
-                     Re-prove with ml_gkr format for full verification."
+                    "Re-prove with ml_gkr format for a verifiable proof file."
                 );
+                process::exit(1);
             }
             process::exit(0);
         }
@@ -1084,17 +1091,19 @@ fn main() {
 
         eprintln!("  io_commitment: verified ✓");
 
-        // Step C2: Check cryptographic_self_verified flag
+        // Step C2: Note cryptographic_self_verified flag (informational only —
+        // this is a self-reported field and MUST NOT be trusted for verification).
         let self_verified = proof_json
             .get("cryptographic_self_verified")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if self_verified {
-            eprintln!("  cryptographic_self_verified: true ✓");
+            eprintln!(
+                "  cryptographic_self_verified: true (self-reported, not trusted — will re-verify)"
+            );
         } else {
             eprintln!(
-                "  WARNING: cryptographic_self_verified is false or missing — \
-                 proof was not self-verified at prove time"
+                "  cryptographic_self_verified: false — proof was not self-verified at prove time"
             );
         }
 
@@ -1165,60 +1174,78 @@ fn main() {
             }
 
             // Step C4: Full GKR cryptographic re-verification with native proof
-            if let Some(native_proof_val) = proof_json.get("gkr_proof_native") {
-                if !native_proof_val.is_null() {
-                    eprintln!("Re-verifying GKR proof cryptographically...");
-                    match serde_json::from_value::<stwo_ml::gkr::GKRProof>(
-                        native_proof_val.clone(),
-                    ) {
-                        Ok(native_proof) => {
-                            match stwo_ml::gkr::LayeredCircuit::from_graph(&model.graph) {
-                                Ok(circuit) => {
-                                    let mut ch =
-                                        stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
-                                    match stwo_ml::gkr::verify_gkr_with_weights(
-                                        &circuit,
-                                        &native_proof,
-                                        &output_matrix,
-                                        &model.weights,
-                                        &mut ch,
-                                    ) {
-                                        Ok(_) => {
-                                            eprintln!(
-                                                "  GKR cryptographic verification: passed ✓"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "VERIFICATION FAILED: GKR verification error: {e}"
-                                            );
-                                            process::exit(1);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "  Warning: could not build circuit for GKR re-verification: {e}"
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "  Warning: could not deserialize gkr_proof_native: {e}"
-                            );
-                        }
-                    }
+            // This is MANDATORY — without it, the proof is not cryptographically verified.
+            let native_proof_val = proof_json.get("gkr_proof_native");
+            let has_native_proof = native_proof_val
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+
+            if !has_native_proof {
+                eprintln!(
+                    "VERIFICATION FAILED: gkr_proof_native is missing or null."
+                );
+                eprintln!(
+                    "The proof file does not contain the native GKR proof data \
+                     required for cryptographic verification. Re-generate the proof \
+                     with native proof embedding enabled."
+                );
+                process::exit(1);
+            }
+
+            eprintln!("Re-verifying GKR proof cryptographically...");
+            let native_proof = serde_json::from_value::<stwo_ml::gkr::GKRProof>(
+                native_proof_val.unwrap().clone(),
+            )
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "VERIFICATION FAILED: could not deserialize gkr_proof_native: {e}"
+                );
+                process::exit(1);
+            });
+
+            let circuit = stwo_ml::gkr::LayeredCircuit::from_graph(&model.graph)
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "VERIFICATION FAILED: could not build circuit for GKR verification: {e}"
+                    );
+                    process::exit(1);
+                });
+
+            let mut ch = stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
+            match stwo_ml::gkr::verify_gkr_with_weights(
+                &circuit,
+                &native_proof,
+                &output_matrix,
+                &model.weights,
+                &mut ch,
+            ) {
+                Ok(_) => {
+                    eprintln!("  GKR cryptographic verification: passed ✓");
+                }
+                Err(e) => {
+                    eprintln!(
+                        "VERIFICATION FAILED: GKR verification error: {e}"
+                    );
+                    process::exit(1);
                 }
             }
         } else {
-            // No model — commitment-only verification
+            // No model — commitment-only verification is NOT sufficient.
+            // An attacker can forge io_calldata with a matching io_commitment.
+            // Full verification requires --model-dir to replay the forward pass
+            // and re-verify the GKR proof cryptographically.
             eprintln!(
-                "Proof commitment verified. For full cryptographic verification, provide --model-dir."
+                "VERIFICATION FAILED: --model-dir is required for cryptographic verification."
             );
+            eprintln!(
+                "Without the model, only the io_commitment was checked — but an attacker \
+                 can forge io_calldata with a matching commitment. Provide --model-dir \
+                 to replay the forward pass and verify the GKR proof."
+            );
+            process::exit(1);
         }
 
-        eprintln!("Proof verified.");
+        eprintln!("Proof verified (cryptographic).");
         process::exit(0);
     }
 
