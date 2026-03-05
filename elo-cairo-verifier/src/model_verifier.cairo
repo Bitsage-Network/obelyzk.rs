@@ -12,8 +12,8 @@
 //   0=MatMul, 1=Add, 2=Mul, 3=Activation, 4=LayerNorm,
 //   5=Attention, 6=Dequantize, 7=MatMulDualSimd, 8=RMSNorm
 
-use crate::field::{QM31, CM31, qm31_zero, log2_ceil, next_power_of_two, unpack_qm31_from_felt, unpack_qm31_pair_from_felt, pack_qm31_to_felt};
-use crate::channel::{PoseidonChannel, channel_mix_secure_field};
+use crate::field::{QM31, CM31, qm31_zero, qm31_sub, qm31_add, poly_eval_degree3, log2_ceil, next_power_of_two, unpack_qm31_from_felt, unpack_qm31_pair_from_felt, pack_qm31_to_felt};
+use crate::channel::{PoseidonChannel, channel_mix_secure_field, channel_mix_u64, channel_draw_qm31, channel_mix_poly_coeffs_deg3};
 use crate::types::{GKRClaim, CompressedRoundPoly, CompressedGkrRoundPoly};
 use crate::layer_verifiers::{
     verify_add_layer, verify_mul_layer, verify_matmul_layer,
@@ -267,6 +267,10 @@ fn dispatch_mul(
 }
 
 /// Parse and verify a Tag 3 (Activation) layer proof.
+///
+/// Serialization order (Rust cairo_serde.rs:serialize_layer_proof_packed_inner):
+///   tag(3), act_type, input_eval, output_eval, table_commitment,
+///   has_logup + [logup_data], has_ms + [ms_data], has_act_proof + [act_data]
 fn dispatch_activation(
     current_claim: @GKRClaim,
     ref reader: ProofReader,
@@ -281,6 +285,19 @@ fn dispatch_activation(
     let (ms_has, ms_n, ms_c0s, ms_c1s, ms_final, ms_claimed) =
         read_optional_multiplicity_sumcheck(ref reader);
 
+    // Read optional activation product proof (always serialized after multiplicity sumcheck).
+    // This flag was previously missing, causing a 1-felt reader offset drift that
+    // corrupted all subsequent layer reads (MATMUL_FINAL_MISMATCH).
+    let has_act_proof = read_u32(ref reader);
+
+    if has_act_proof == 1 {
+        // Activation product proof (Phase A soundness, replaces LogUp for ReLU).
+        // Channel transcript: mix "ACT" + claim_value, draw eta, deg3 sumcheck,
+        // mix final evals, optional bit evals.
+        return dispatch_activation_product_proof(current_claim, ref reader, ref ch);
+    }
+
+    // has_act_proof == 0: use original LogUp or no-LogUp path
     if has_logup {
         verify_activation_layer(
             current_claim, act_type_tag,
@@ -290,12 +307,84 @@ fn dispatch_activation(
         )
     } else {
         // LogUp skipped (M31 matmul outputs exceed table range).
-        // Still consume the mult sumcheck flag (always 0 here).
         channel_mix_secure_field(ref ch, input_eval);
         GKRClaim {
             point: clone_point(current_claim.point),
             value: input_eval,
         }
+    }
+}
+
+/// Read and verify an activation product proof (has_act_proof == 1 path).
+///
+/// Channel transcript (matches Rust starknet.rs:3354-3386):
+///   1. mix_u64(0x414354)   — "ACT" tag
+///   2. mix_secure_field(current_claim_value)
+///   3. draw_qm31            — eta
+///   4. For each round: mix_poly_coeffs_deg3(c0, c1, c2, c3), draw_qm31 — challenge
+///   5. mix_secure_field(act_input_eval)
+///   6. mix_secure_field(act_indicator_eval)
+///   7. Optional: for each bit_eval: mix_secure_field(bit_eval)
+fn dispatch_activation_product_proof(
+    current_claim: @GKRClaim,
+    ref reader: ProofReader,
+    ref ch: PoseidonChannel,
+) -> GKRClaim {
+    // 1-3: Mix "ACT" tag + current claim value, draw eta
+    channel_mix_u64(ref ch, 0x414354); // "ACT"
+    channel_mix_secure_field(ref ch, *current_claim.value);
+    let _eta = channel_draw_qm31(ref ch);
+
+    // 4: Degree-3 sumcheck rounds
+    let num_rounds = read_u32(ref reader);
+    let round_polys = read_compressed_deg3_polys(ref reader, num_rounds);
+
+    let mut act_sum = *current_claim.value;
+
+    let mut i: u32 = 0;
+    loop {
+        if i >= num_rounds {
+            break;
+        }
+        let poly = round_polys.at(i);
+        let c0 = *poly.c0;
+        let c2 = *poly.c2;
+        let c3 = *poly.c3;
+        // Reconstruct c1 = current_sum - 2*c0 - c2 - c3
+        let c1 = qm31_sub(
+            qm31_sub(qm31_sub(act_sum, qm31_add(c0, c0)), c2),
+            c3,
+        );
+        channel_mix_poly_coeffs_deg3(ref ch, c0, c1, c2, c3);
+        let challenge = channel_draw_qm31(ref ch);
+        act_sum = poly_eval_degree3(c0, c1, c2, c3, challenge);
+        i += 1;
+    };
+
+    // 5-6: Read and mix final evaluations
+    let act_input_eval = read_qm31(ref reader);
+    let act_indicator_eval = read_qm31(ref reader);
+    channel_mix_secure_field(ref ch, act_input_eval);
+    channel_mix_secure_field(ref ch, act_indicator_eval);
+
+    // 7: Optional Phase B binary decomposition bit evals
+    let has_bit_evals = read_u32(ref reader);
+    if has_bit_evals == 1 {
+        let num_bits = read_u32(ref reader);
+        let mut j: u32 = 0;
+        loop {
+            if j >= num_bits {
+                break;
+            }
+            let bit_eval = read_qm31(ref reader);
+            channel_mix_secure_field(ref ch, bit_eval);
+            j += 1;
+        };
+    }
+
+    GKRClaim {
+        point: clone_point(current_claim.point),
+        value: act_input_eval,
     }
 }
 
