@@ -268,22 +268,7 @@ async function main() {
 
   const provider = new RpcProvider({ nodeUrl: rpcUrl });
 
-  const accountOpts = {
-    provider,
-    address: opts.accountAddress,
-    signer: opts.privateKey,
-  };
-
-  if (opts.mode !== "direct") {
-    const { PaymasterRpc } = await import("starknet");
-    const paymasterOpts = { nodeUrl: paymasterUrl };
-    if (opts.mode === "sponsored" && opts.apiKey) {
-      paymasterOpts.headers = { "x-paymaster-api-key": opts.apiKey };
-    }
-    accountOpts.paymaster = new PaymasterRpc(paymasterOpts);
-  }
-
-  const account = new Account(accountOpts);
+  const account = new Account(provider, opts.accountAddress, opts.privateKey);
 
   // Discover streaming steps from calldata directory
   const steps = discoverSteps(opts.calldataDir);
