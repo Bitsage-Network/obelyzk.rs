@@ -520,24 +520,40 @@ fn extract_auth_paths_gpu_streaming(
             }
         };
 
+        // Read Merkle tree neighbors (XOR-1 adjacent) for leaf-pair siblings.
+        // NOTE: left_idx and right_idx are MLE fold partners (mid apart), NOT
+        // Merkle-adjacent. The Merkle tree pairs consecutive leaves (i, i^1).
+        let read_value_at = |idx: usize| -> SecureField {
+            match layer {
+                MleLayerValues::Qm31U32Aos(evals_u32) => {
+                    let base = idx * 4;
+                    u32s_to_secure_field(&[
+                        evals_u32[base], evals_u32[base + 1],
+                        evals_u32[base + 2], evals_u32[base + 3],
+                    ])
+                }
+                MleLayerValues::Secure(vals) => vals[idx],
+            }
+        };
+        let left_merkle_sib = read_value_at(left_idx ^ 1);
+        let right_merkle_sib = read_value_at(right_idx ^ 1);
+
         // Convert u64 limb auth paths to FieldElement auth paths.
-        // Auth path format: [leaf_sibling, level0_sibling, level1_sibling, ...]
-        // But we need to prepend the leaf-pair sibling (the other QM31 value).
+        // GPU streaming returns siblings from hash-level 0 upward (excludes leaf pair).
+        // Prepend the correct Merkle leaf-pair sibling (XOR neighbor, not MLE fold partner).
         let left_raw_siblings = &all_auth_paths[q * 2];
         let right_raw_siblings = &all_auth_paths[q * 2 + 1];
 
-        // Left auth path: first sibling is the right value (leaf pair sibling)
         let mut left_siblings = Vec::with_capacity(left_raw_siblings.len() + 1);
-        left_siblings.push(securefield_to_felt(right_value));
+        left_siblings.push(securefield_to_felt(left_merkle_sib));
         for limbs in left_raw_siblings {
             let felt = u64_limbs_to_felt252(limbs)
                 .ok_or_else(|| "invalid left sibling limbs".to_string())?;
             left_siblings.push(felt);
         }
 
-        // Right auth path: first sibling is the left value (leaf pair sibling)
         let mut right_siblings = Vec::with_capacity(right_raw_siblings.len() + 1);
-        right_siblings.push(securefield_to_felt(left_value));
+        right_siblings.push(securefield_to_felt(right_merkle_sib));
         for limbs in right_raw_siblings {
             let felt = u64_limbs_to_felt252(limbs)
                 .ok_or_else(|| "invalid right sibling limbs".to_string())?;
