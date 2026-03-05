@@ -1112,8 +1112,9 @@ fn prove_mle_opening_with_commitment_qm31_u32_gpu_tree(
 
             // Diagnostic: check session reads vs bulk download consistency
             if round == 0 && q == 0 {
+                let left_xor = left_idx ^ 1;
                 let bulk_left = &replay_qm31_words[left_idx * 4..(left_idx + 1) * 4];
-                let bulk_sib = &replay_qm31_words[(left_idx ^ 1) * 4..(left_idx ^ 1 + 1) * 4];
+                let bulk_sib = &replay_qm31_words[left_xor * 4..(left_xor + 1) * 4];
                 eprintln!("[DIAG] left_idx={left_idx}, left_idx^1={}", left_idx ^ 1);
                 eprintln!("[DIAG] session left_words = {:?}", left_words);
                 eprintln!("[DIAG] bulk    left_words = {:?}", bulk_left);
