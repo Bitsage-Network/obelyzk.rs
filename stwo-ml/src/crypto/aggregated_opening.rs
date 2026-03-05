@@ -18,7 +18,7 @@
 #[cfg(feature = "cuda-runtime")]
 use crate::crypto::mle_opening::prove_mle_opening_with_commitment_qm31_u32;
 #[cfg(feature = "cuda-runtime")]
-use crate::gpu_sumcheck::GpuSumcheckExecutor;
+use crate::gpu_sumcheck::{GpuMleFoldSession, GpuSumcheckExecutor};
 use crate::crypto::mle_opening::{
     evaluate_mle_at, mle_n_queries, prove_mle_opening, verify_mle_opening, MleOpeningProof,
 };
@@ -1229,9 +1229,9 @@ fn mismatch_sumcheck_streaming(
 
 /// Evaluate the sumcheck polynomial at 3 values (t=0, t=1, t=2) for a round.
 ///
-/// **Matrix-first loop order**: each weight MLE is loaded to GPU **once per round**
-/// and evaluated for ALL claims before being dropped. This reduces GPU uploads
-/// from `n_claims × n_matrices` to `n_matrices` per round (160× for production).
+/// **Matrix-first loop order** with **pre-cached GPU sessions**: each MLE is
+/// uploaded once at sumcheck start and stays on GPU. Per round, we clone from
+/// the cached session (dtod copy, ~5ms) instead of re-uploading (~80ms).
 #[cfg(feature = "cuda-runtime")]
 fn eval_round_3way_gpu(
     round: usize,
@@ -1244,6 +1244,8 @@ fn eval_round_3way_gpu(
     eq_prefix: &[SecureField],
     challenge_point: &[SecureField],
     executor: &GpuSumcheckExecutor,
+    // Pre-uploaded GPU sessions (None for small MLEs or upload failures).
+    gpu_sessions: &[Option<GpuMleFoldSession>],
 ) -> (SecureField, SecureField, SecureField) {
     let one = SecureField::from(M31::from(1));
     let two = SecureField::from(M31::from(2));
@@ -1272,7 +1274,7 @@ fn eval_round_3way_gpu(
         })
         .collect();
 
-    // MATRIX-FIRST: load each MLE once, evaluate for all claims, then drop
+    // MATRIX-FIRST: clone from cached session, evaluate for all claims
     for mat_idx in 0..source.len() {
         let n_vars = claim_n_vars[mat_idx];
 
@@ -1296,8 +1298,8 @@ fn eval_round_3way_gpu(
             continue;
         }
 
-        if n_vars < GPU_MLE_THRESHOLD {
-            // CPU path for small MLEs — load once, evaluate for all claims
+        if gpu_sessions[mat_idx].is_none() {
+            // CPU path for small MLEs or upload failures
             let mle = source.get_mle(mat_idx);
             for (ci, claim) in claims.iter().enumerate() {
                 let gp = &global_points[ci];
@@ -1320,38 +1322,7 @@ fn eval_round_3way_gpu(
                 }
             }
         } else {
-            // GPU path: upload MLE ONCE, clone per-claim
-            let mle_u32 = source.get_mle_u32(mat_idx);
-            let base_session = match executor.start_mle_fold_session_u32(&mle_u32) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[GPU] session start error for matrix {mat_idx}: {e:?}");
-                    // Full CPU fallback for this matrix
-                    let mle = source.get_mle(mat_idx);
-                    for (ci, claim) in claims.iter().enumerate() {
-                        let gp = &global_points[ci];
-                        for k in 0..3 {
-                            if claim_sel_weights[ci][k] == SecureField::zero() {
-                                continue;
-                            }
-                            let local = &eval_pts[ci][k][config.selector_bits..];
-                            let lt = &local[config.n_max - n_vars..];
-                            let w_val = evaluate_mle_at(&mle, lt);
-                            let eq_round = gp[round] * values[k]
-                                + (one - gp[round]) * (one - values[k]);
-                            s[k] = s[k]
-                                + betas[ci]
-                                    * eq_prefix[ci]
-                                    * eq_round
-                                    * claim_sel_weights[ci][k]
-                                    * (w_val - claim.expected_value);
-                        }
-                    }
-                    continue;
-                }
-            };
-            // MLE u32 data no longer needed on CPU
-            drop(mle_u32);
+            let base_session = gpu_sessions[mat_idx].as_ref().unwrap();
 
             // For each claim: clone base session → fold to claim's point → accumulate
             for (ci, claim) in claims.iter().enumerate() {
@@ -1557,6 +1528,32 @@ fn mismatch_sumcheck_streaming_gpu(
     );
     let t_start = std::time::Instant::now();
 
+    // Pre-upload all large MLEs to GPU once. Sessions stay resident across rounds.
+    // For small MLEs (< 2^GPU_MLE_THRESHOLD), we use CPU eval (None slot).
+    let gpu_sessions: Vec<Option<GpuMleFoldSession>> = (0..source.len())
+        .map(|i| {
+            let nv = claim_n_vars[i];
+            if nv < GPU_MLE_THRESHOLD {
+                return None;
+            }
+            let mle_u32 = source.get_mle_u32(i);
+            match executor.start_mle_fold_session_u32(&mle_u32) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("[GPU-sumcheck] pre-upload failed for matrix {i}: {e:?}");
+                    None
+                }
+            }
+        })
+        .collect();
+    let n_cached = gpu_sessions.iter().filter(|s| s.is_some()).count();
+    eprintln!(
+        "[GPU-sumcheck] pre-uploaded {}/{} MLEs to GPU in {:.1}s",
+        n_cached,
+        source.len(),
+        t_start.elapsed().as_secs_f64()
+    );
+
     let global_points: Vec<Vec<SecureField>> =
         claims.iter().map(|c| global_point(c, config)).collect();
 
@@ -1577,6 +1574,7 @@ fn mismatch_sumcheck_streaming_gpu(
             &eq_prefix,
             &challenge_point,
             executor,
+            &gpu_sessions,
         );
         if round < 3 || round == n - 1 || (round + 1) % 10 == 0 {
             eprintln!(
