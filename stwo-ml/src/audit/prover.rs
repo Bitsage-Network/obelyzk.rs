@@ -251,11 +251,11 @@ impl<'a> AuditProver<'a> {
             AuditError::ProvingFailed(format!("invalid model_id: {}", entry.model_id))
         })?;
 
-        // Use prove_model_pure_gkr_auto + build_gkr_serializable_proof instead of
-        // prove_for_starknet_ml_gkr. The latter enforces strict soundness gates that
-        // reject AggregatedOracleSumcheck mode without a full binding proof (which
-        // requires all weight MLEs in memory and OOMs for large models). The
-        // serializable variant records gate warnings without hard failure.
+        // Audit pipeline uses RLC binding (fast path) — full aggregated binding
+        // proof is only needed for streaming on-chain verification, and the CPU-bound
+        // MLE evaluation takes 10+ minutes for large models.
+        std::env::set_var("STWO_AGGREGATED_RLC_ONLY", "1");
+
         let agg_proof =
             crate::aggregation::prove_model_pure_gkr_auto_with_cache(
                 self.graph, input, self.weights, self.weight_cache,
