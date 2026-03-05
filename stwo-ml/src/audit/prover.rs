@@ -119,7 +119,7 @@ impl<'a> AuditProver<'a> {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(parallelism)
                 .build()
-                .map_err(|e| AuditError::Internal(format!("Failed to build rayon pool: {e}")))?;
+                .map_err(|e| AuditError::ProvingFailed(format!("Failed to build rayon pool: {e}")))?;
 
             let results: Vec<(usize, Result<InferenceProofResult, AuditError>)> =
                 pool.install(|| {

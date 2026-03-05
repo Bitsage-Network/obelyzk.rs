@@ -166,6 +166,8 @@ struct AppState {
     scheduler: stwo_ml::gpu_scheduler::GpuScheduler,
     #[cfg(feature = "multi-query")]
     weight_caches: RwLock<HashMap<String, stwo_ml::weight_cache::SharedWeightCache>>,
+    #[cfg(feature = "server-audit")]
+    audit_jobs: RwLock<HashMap<String, AuditJob>>,
 }
 
 // =============================================================================
@@ -372,6 +374,62 @@ struct PrivacyBatchSubmitCalldataResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+// =============================================================================
+// Audit types (server-audit)
+// =============================================================================
+
+#[cfg(feature = "server-audit")]
+struct AuditJob {
+    job_id: String,
+    model_id: String,
+    status: JobStatus,
+    started_at: Instant,
+    completed_at: Option<Instant>,
+    error: Option<String>,
+    report: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "server-audit")]
+#[derive(Deserialize)]
+struct AuditTriggerRequest {
+    model_id: String,
+    /// Proof mode: "gkr" (default) or "direct".
+    #[serde(default = "default_audit_mode")]
+    mode: String,
+    /// Max inferences to audit (0 = all).
+    #[serde(default)]
+    max_inferences: usize,
+    /// Weight binding mode: "aggregated" (default).
+    #[serde(default = "default_weight_binding_mode")]
+    weight_binding: String,
+}
+
+#[cfg(feature = "server-audit")]
+fn default_audit_mode() -> String {
+    "gkr".to_string()
+}
+#[cfg(feature = "server-audit")]
+fn default_weight_binding_mode() -> String {
+    "aggregated".to_string()
+}
+
+#[cfg(feature = "server-audit")]
+#[derive(Serialize)]
+struct AuditSubmitResponse {
+    job_id: String,
+    status: JobStatus,
+}
+
+#[cfg(feature = "server-audit")]
+#[derive(Serialize)]
+struct AuditStatusResponse {
+    job_id: String,
+    status: JobStatus,
+    elapsed_secs: f64,
+    report: Option<serde_json::Value>,
+    error: Option<String>,
 }
 
 // =============================================================================
@@ -1660,6 +1718,195 @@ async fn build_privacy_submit_calldata(
 }
 
 // =============================================================================
+// Audit endpoints (server-audit)
+// =============================================================================
+
+#[cfg(feature = "server-audit")]
+async fn submit_audit(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AuditTriggerRequest>,
+) -> Result<(StatusCode, Json<AuditSubmitResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Verify model is loaded and has an audit capture hook
+    let models = state.models.read().await;
+    let model = models.get(&req.model_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Model '{}' not found", req.model_id),
+            }),
+        )
+    })?;
+
+    let capture_hook = model.capture_hook.as_ref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Audit capture not enabled for this model. Set AUDIT_LOG_DIR.".to_string(),
+            }),
+        )
+    })?;
+
+    if capture_hook.entry_count() == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No inferences captured yet. Run some proofs first.".to_string(),
+            }),
+        ));
+    }
+
+    let graph = Arc::clone(&model.graph);
+    let weights = Arc::clone(&model.weights);
+    let model_id = model.model_id.clone();
+    let weight_commitment = model.weight_commitment.clone();
+    let num_layers = model.num_layers;
+
+    // Flush pending captures before audit
+    capture_hook.flush();
+
+    // Resolve the log directory from AUDIT_LOG_DIR
+    let audit_dir = std::env::var("AUDIT_LOG_DIR").map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "AUDIT_LOG_DIR not set".to_string(),
+            }),
+        )
+    })?;
+    let log_dir = std::path::PathBuf::from(&audit_dir).join(&req.model_id);
+
+    drop(models);
+
+    let job_id = Uuid::new_v4().to_string();
+    let job = AuditJob {
+        job_id: job_id.clone(),
+        model_id: model_id.clone(),
+        status: JobStatus::Queued,
+        started_at: Instant::now(),
+        completed_at: None,
+        error: None,
+        report: None,
+    };
+    state.audit_jobs.write().await.insert(job_id.clone(), job);
+
+    let resp = AuditSubmitResponse {
+        job_id: job_id.clone(),
+        status: JobStatus::Queued,
+    };
+
+    let mode = req.mode.clone();
+    let max_inferences = req.max_inferences;
+    let weight_binding = req.weight_binding.clone();
+    let state_clone = state.clone();
+    let jid = job_id.clone();
+
+    tokio::task::spawn(async move {
+        {
+            let mut jobs = state_clone.audit_jobs.write().await;
+            if let Some(j) = jobs.get_mut(&jid) {
+                j.status = JobStatus::Proving;
+            }
+        }
+
+        let result = tokio::task::spawn_blocking(move || {
+            // Load the inference log
+            let log = stwo_ml::audit::log::InferenceLog::load(&log_dir)
+                .map_err(|e| format!("Failed to load audit log: {e}"))?;
+
+            let request = stwo_ml::audit::types::AuditRequest {
+                start_ns: 0,
+                end_ns: u64::MAX,
+                model_id: model_id.clone(),
+                mode,
+                evaluate_semantics: false,
+                max_inferences,
+                gpu_device: None,
+                weight_binding,
+            };
+
+            let model_info = stwo_ml::audit::types::ModelInfo {
+                model_id: model_id.clone(),
+                name: model_id.clone(),
+                architecture: "transformer".to_string(),
+                parameters: format!("{} layers", num_layers),
+                layers: num_layers as u32,
+                weight_commitment: weight_commitment.clone(),
+            };
+
+            let config = stwo_ml::audit::orchestrator::AuditPipelineConfig {
+                request,
+                model_info,
+                evaluate_semantics: false,
+                prove_evaluations: false,
+                privacy_tier: "none".to_string(),
+                owner_pubkey: Vec::new(),
+                submit_config: None,
+                billing: None,
+            };
+
+            let pipeline_result =
+                stwo_ml::audit::orchestrator::run_audit(&log, &graph, &weights, &config, None, None)
+                    .map_err(|e| format!("Audit pipeline failed: {e}"))?;
+
+            serde_json::to_value(&pipeline_result.report)
+                .map_err(|e| format!("Failed to serialize report: {e}"))
+        })
+        .await;
+
+        let mut jobs = state_clone.audit_jobs.write().await;
+        match result {
+            Ok(Ok(report_json)) => {
+                if let Some(j) = jobs.get_mut(&jid) {
+                    j.status = JobStatus::Completed;
+                    j.completed_at = Some(Instant::now());
+                    j.report = Some(report_json);
+                }
+            }
+            Ok(Err(e)) => {
+                if let Some(j) = jobs.get_mut(&jid) {
+                    j.status = JobStatus::Failed;
+                    j.error = Some(e);
+                    j.completed_at = Some(Instant::now());
+                }
+            }
+            Err(e) => {
+                if let Some(j) = jobs.get_mut(&jid) {
+                    j.status = JobStatus::Failed;
+                    j.error = Some(format!("Task panicked: {e}"));
+                    j.completed_at = Some(Instant::now());
+                }
+            }
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(resp)))
+}
+
+#[cfg(feature = "server-audit")]
+async fn get_audit_status(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> Result<Json<AuditStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let jobs = state.audit_jobs.read().await;
+    let job = jobs.get(&job_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Audit job '{job_id}' not found"),
+            }),
+        )
+    })?;
+
+    Ok(Json(AuditStatusResponse {
+        job_id: job.job_id.clone(),
+        status: job.status,
+        elapsed_secs: job.started_at.elapsed().as_secs_f64(),
+        report: job.report.clone(),
+        error: job.error.clone(),
+    }))
+}
+
+// =============================================================================
 // Dashboard + WebSocket
 // =============================================================================
 
@@ -1848,6 +2095,8 @@ async fn main() {
         scheduler,
         #[cfg(feature = "multi-query")]
         weight_caches: RwLock::new(HashMap::new()),
+        #[cfg(feature = "server-audit")]
+        audit_jobs: RwLock::new(HashMap::new()),
     });
 
     let mut router: Router<Arc<AppState>> = Router::new()
@@ -1878,6 +2127,13 @@ async fn main() {
         router = router.route("/api/v1/queue", get(get_queue_stats));
     }
 
+    #[cfg(feature = "server-audit")]
+    {
+        router = router
+            .route("/api/v1/audit", post(submit_audit))
+            .route("/api/v1/audit/{job_id}", get(get_audit_status));
+    }
+
     #[cfg(feature = "proof-stream")]
     {
         router = router.route("/ws", get(ws_handler));
@@ -1904,6 +2160,7 @@ async fn main() {
     #[cfg(feature = "server-audit")]
     if let Ok(audit_dir) = std::env::var("AUDIT_LOG_DIR") {
         eprintln!("  Audit: enabled (AUDIT_LOG_DIR={audit_dir})");
+        eprintln!("  Audit API: POST /api/v1/audit, GET /api/v1/audit/{{job_id}}");
     } else {
         eprintln!("  Audit: disabled (set AUDIT_LOG_DIR to enable)");
     }
@@ -1911,5 +2168,30 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .expect("Failed to bind");
-    axum::serve(listener, app).await.expect("Server error");
+
+    // Graceful shutdown: drain in-flight jobs on SIGTERM/SIGINT
+    let shutdown = async {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => eprintln!("\nReceived SIGINT, shutting down gracefully..."),
+            _ = terminate => eprintln!("\nReceived SIGTERM, shutting down gracefully..."),
+        }
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .expect("Server error");
+
+    eprintln!("prove-server shut down.");
 }
