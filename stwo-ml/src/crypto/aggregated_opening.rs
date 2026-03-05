@@ -1227,11 +1227,11 @@ fn mismatch_sumcheck_streaming(
     (round_polys, challenge_point)
 }
 
-/// Evaluate the sumcheck polynomial at 3 values (t=0, t=1, t=2) for a round
-/// using GPU-accelerated 3-way batched oracle evaluation.
+/// Evaluate the sumcheck polynomial at 3 values (t=0, t=1, t=2) for a round.
 ///
-/// Replaces 3 separate calls to [`eval_round_at_value_streaming`] with a single
-/// pass that uploads each weight MLE once per round instead of 3 times.
+/// **Matrix-first loop order**: each weight MLE is loaded to GPU **once per round**
+/// and evaluated for ALL claims before being dropped. This reduces GPU uploads
+/// from `n_claims × n_matrices` to `n_matrices` per round (160× for production).
 #[cfg(feature = "cuda-runtime")]
 fn eval_round_3way_gpu(
     round: usize,
@@ -1248,46 +1248,281 @@ fn eval_round_3way_gpu(
     let one = SecureField::from(M31::from(1));
     let two = SecureField::from(M31::from(2));
     let n = config.n_global;
-
-    let mut s = [SecureField::zero(); 3];
     let values = [SecureField::zero(), one, two];
 
-    // For each claim, build 3 eval points (t=0,1,2) and batch-evaluate the oracle
-    for (i, claim) in claims.iter().enumerate() {
-        let gp = &global_points[i];
+    let mut s = [SecureField::zero(); 3];
 
-        // Build 3 eval points differing only at position `round`
-        let mut eval_pts_storage: [Vec<SecureField>; 3] = [
-            Vec::with_capacity(n),
-            Vec::with_capacity(n),
-            Vec::with_capacity(n),
-        ];
-        for k in 0..3 {
-            eval_pts_storage[k].extend_from_slice(challenge_point);
-            eval_pts_storage[k].push(values[k]);
-            eval_pts_storage[k].extend_from_slice(&gp[round + 1..]);
+    // Pre-build eval points for all claims: eval_pts[claim][k] = full point
+    let eval_pts: Vec<[Vec<SecureField>; 3]> = claims
+        .iter()
+        .enumerate()
+        .map(|(ci, _)| {
+            let gp = &global_points[ci];
+            let mut pts: [Vec<SecureField>; 3] = [
+                Vec::with_capacity(n),
+                Vec::with_capacity(n),
+                Vec::with_capacity(n),
+            ];
+            for k in 0..3 {
+                pts[k].extend_from_slice(challenge_point);
+                pts[k].push(values[k]);
+                pts[k].extend_from_slice(&gp[round + 1..]);
+            }
+            pts
+        })
+        .collect();
+
+    // MATRIX-FIRST: load each MLE once, evaluate for all claims, then drop
+    for mat_idx in 0..source.len() {
+        let n_vars = claim_n_vars[mat_idx];
+
+        // Check if ANY claim needs this matrix (any non-zero selector weight)
+        let mut any_nonzero = false;
+        let claim_sel_weights: Vec<[SecureField; 3]> = (0..claims.len())
+            .map(|ci| {
+                let mut sw = [SecureField::zero(); 3];
+                for k in 0..3 {
+                    let selector = &eval_pts[ci][k][..config.selector_bits];
+                    sw[k] = compute_selector_weight(mat_idx, selector, config);
+                    if sw[k] != SecureField::zero() {
+                        any_nonzero = true;
+                    }
+                }
+                sw
+            })
+            .collect();
+
+        if !any_nonzero {
+            continue;
         }
 
-        let eval_pts_refs: [&[SecureField]; 3] = [
-            &eval_pts_storage[0],
-            &eval_pts_storage[1],
-            &eval_pts_storage[2],
-        ];
+        if n_vars < GPU_MLE_THRESHOLD {
+            // CPU path for small MLEs — load once, evaluate for all claims
+            let mle = source.get_mle(mat_idx);
+            for (ci, claim) in claims.iter().enumerate() {
+                let gp = &global_points[ci];
+                for k in 0..3 {
+                    if claim_sel_weights[ci][k] == SecureField::zero() {
+                        continue;
+                    }
+                    let local = &eval_pts[ci][k][config.selector_bits..];
+                    let local_truncated = &local[config.n_max - n_vars..];
+                    let w_val = evaluate_mle_at(&mle, local_truncated);
+                    let eq_round =
+                        gp[round] * values[k] + (one - gp[round]) * (one - values[k]);
+                    let mismatch = w_val - claim.expected_value;
+                    s[k] = s[k]
+                        + betas[ci]
+                            * eq_prefix[ci]
+                            * eq_round
+                            * claim_sel_weights[ci][k]
+                            * mismatch;
+                }
+            }
+        } else {
+            // GPU path: upload MLE ONCE, clone per-claim
+            let mle_u32 = source.get_mle_u32(mat_idx);
+            let base_session = match executor.start_mle_fold_session_u32(&mle_u32) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[GPU] session start error for matrix {mat_idx}: {e:?}");
+                    // Full CPU fallback for this matrix
+                    let mle = source.get_mle(mat_idx);
+                    for (ci, claim) in claims.iter().enumerate() {
+                        let gp = &global_points[ci];
+                        for k in 0..3 {
+                            if claim_sel_weights[ci][k] == SecureField::zero() {
+                                continue;
+                            }
+                            let local = &eval_pts[ci][k][config.selector_bits..];
+                            let lt = &local[config.n_max - n_vars..];
+                            let w_val = evaluate_mle_at(&mle, lt);
+                            let eq_round = gp[round] * values[k]
+                                + (one - gp[round]) * (one - values[k]);
+                            s[k] = s[k]
+                                + betas[ci]
+                                    * eq_prefix[ci]
+                                    * eq_round
+                                    * claim_sel_weights[ci][k]
+                                    * (w_val - claim.expected_value);
+                        }
+                    }
+                    continue;
+                }
+            };
+            // MLE u32 data no longer needed on CPU
+            drop(mle_u32);
 
-        // 3-way GPU oracle evaluation (1 upload per matrix per claim)
-        let w_vals = eval_unified_oracle_3way_gpu(
-            eval_pts_refs,
-            source,
-            claim_n_vars,
-            config,
-            executor,
-        );
+            // For each claim: clone base session → fold to claim's point → accumulate
+            for (ci, claim) in claims.iter().enumerate() {
+                let gp = &global_points[ci];
+                let local_0 = &eval_pts[ci][0][config.selector_bits..];
+                let local_truncated = &local_0[config.n_max - n_vars..];
 
-        // Accumulate with eq and beta weights
-        for k in 0..3 {
-            let eq_round = gp[round] * values[k] + (one - gp[round]) * (one - values[k]);
-            let mismatch = w_vals[k] - claim.expected_value;
-            s[k] = s[k] + betas[i] * eq_prefix[i] * eq_round * mismatch;
+                // Determine if this claim's 3 points differ in the local region
+                // (they always differ at position `round` in the full point, which
+                // is either in selector, padding, or real local vars)
+                let branch_global = round;
+                let branch_in_selector = branch_global < config.selector_bits;
+                let local_offset = config.n_max - n_vars;
+                let branch_in_padding = !branch_in_selector
+                    && (branch_global - config.selector_bits) < local_offset;
+
+                if branch_in_selector || branch_in_padding {
+                    // MLE eval is identical for all 3 t-values; only weights differ
+                    let mut fork = match executor.clone_fold_session(&base_session) {
+                        Ok(f) => f,
+                        Err(_) => {
+                            let mle = source.get_mle(mat_idx);
+                            let w_val = evaluate_mle_at(&mle, local_truncated);
+                            for k in 0..3 {
+                                if claim_sel_weights[ci][k] == SecureField::zero() {
+                                    continue;
+                                }
+                                let eq_round = gp[round] * values[k]
+                                    + (one - gp[round]) * (one - values[k]);
+                                s[k] = s[k]
+                                    + betas[ci]
+                                        * eq_prefix[ci]
+                                        * eq_round
+                                        * claim_sel_weights[ci][k]
+                                        * (w_val - claim.expected_value);
+                            }
+                            continue;
+                        }
+                    };
+                    let w_val = match executor.finish_fold_and_read(&mut fork, local_truncated) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let mle = source.get_mle(mat_idx);
+                            evaluate_mle_at(&mle, local_truncated)
+                        }
+                    };
+                    for k in 0..3 {
+                        if claim_sel_weights[ci][k] == SecureField::zero() {
+                            continue;
+                        }
+                        let eq_round =
+                            gp[round] * values[k] + (one - gp[round]) * (one - values[k]);
+                        s[k] = s[k]
+                            + betas[ci]
+                                * eq_prefix[ci]
+                                * eq_round
+                                * claim_sel_weights[ci][k]
+                                * (w_val - claim.expected_value);
+                    }
+                } else {
+                    // Branch is in real local vars — 3-way fork
+                    let local_branch_pos =
+                        (branch_global - config.selector_bits) - local_offset;
+
+                    // Clone and fold shared prefix
+                    let mut prefix_session = match executor.clone_fold_session(&base_session) {
+                        Ok(f) => f,
+                        Err(_) => {
+                            let mle = source.get_mle(mat_idx);
+                            for k in 0..3 {
+                                if claim_sel_weights[ci][k] == SecureField::zero() {
+                                    continue;
+                                }
+                                let lt_k =
+                                    &eval_pts[ci][k][config.selector_bits + local_offset..];
+                                let w_val = evaluate_mle_at(&mle, lt_k);
+                                let eq_round = gp[round] * values[k]
+                                    + (one - gp[round]) * (one - values[k]);
+                                s[k] = s[k]
+                                    + betas[ci]
+                                        * eq_prefix[ci]
+                                        * eq_round
+                                        * claim_sel_weights[ci][k]
+                                        * (w_val - claim.expected_value);
+                            }
+                            continue;
+                        }
+                    };
+
+                    // Fold shared prefix (vars before branch)
+                    let prefix = &local_truncated[..local_branch_pos];
+                    let mut prefix_ok = true;
+                    for &ch in prefix.iter() {
+                        if executor
+                            .mle_fold_session_step_in_place(&mut prefix_session, ch)
+                            .is_err()
+                        {
+                            prefix_ok = false;
+                            break;
+                        }
+                    }
+                    if !prefix_ok {
+                        let mle = source.get_mle(mat_idx);
+                        for k in 0..3 {
+                            if claim_sel_weights[ci][k] == SecureField::zero() {
+                                continue;
+                            }
+                            let lt_k = &eval_pts[ci][k][config.selector_bits + local_offset..];
+                            let w_val = evaluate_mle_at(&mle, lt_k);
+                            let eq_round = gp[round] * values[k]
+                                + (one - gp[round]) * (one - values[k]);
+                            s[k] = s[k]
+                                + betas[ci]
+                                    * eq_prefix[ci]
+                                    * eq_round
+                                    * claim_sel_weights[ci][k]
+                                    * (w_val - claim.expected_value);
+                        }
+                        continue;
+                    }
+
+                    let suffix = &local_truncated[local_branch_pos + 1..];
+                    let branch_values = [
+                        eval_pts[ci][0][config.selector_bits + local_offset + local_branch_pos],
+                        eval_pts[ci][1][config.selector_bits + local_offset + local_branch_pos],
+                        eval_pts[ci][2][config.selector_bits + local_offset + local_branch_pos],
+                    ];
+
+                    // Fork 3 ways from prefix_session
+                    for k in 0..3 {
+                        if claim_sel_weights[ci][k] == SecureField::zero() {
+                            continue;
+                        }
+                        let mut fork = match executor.clone_fold_session(&prefix_session) {
+                            Ok(f) => f,
+                            Err(_) => {
+                                let mle = source.get_mle(mat_idx);
+                                let lt_k =
+                                    &eval_pts[ci][k][config.selector_bits + local_offset..];
+                                let w_val = evaluate_mle_at(&mle, lt_k);
+                                let eq_round = gp[round] * values[k]
+                                    + (one - gp[round]) * (one - values[k]);
+                                s[k] = s[k]
+                                    + betas[ci]
+                                        * eq_prefix[ci]
+                                        * eq_round
+                                        * claim_sel_weights[ci][k]
+                                        * (w_val - claim.expected_value);
+                                continue;
+                            }
+                        };
+                        // Fold branch variable + suffix
+                        if executor
+                            .mle_fold_session_step_in_place(&mut fork, branch_values[k])
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        if let Ok(w_val) = executor.finish_fold_and_read(&mut fork, suffix) {
+                            let eq_round = gp[round] * values[k]
+                                + (one - gp[round]) * (one - values[k]);
+                            s[k] = s[k]
+                                + betas[ci]
+                                    * eq_prefix[ci]
+                                    * eq_round
+                                    * claim_sel_weights[ci][k]
+                                    * (w_val - claim.expected_value);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1296,9 +1531,8 @@ fn eval_round_3way_gpu(
 
 /// Run the mismatch sumcheck using GPU-accelerated 3-way batched evaluation.
 ///
-/// Same protocol and Fiat-Shamir transcript as [`mismatch_sumcheck_streaming`]
-/// but uses [`eval_round_3way_gpu`] to upload each weight MLE once per round
-/// instead of 3 times (t=0, t=1, t=2).
+/// **Matrix-first loop order**: each MLE loaded once per round (not once per claim).
+/// Same Fiat-Shamir transcript as [`mismatch_sumcheck_streaming`].
 #[cfg(feature = "cuda-runtime")]
 fn mismatch_sumcheck_streaming_gpu(
     claims: &[AggregatedWeightClaim],
@@ -1315,6 +1549,14 @@ fn mismatch_sumcheck_streaming_gpu(
     let n = config.n_global;
     let one = SecureField::from(M31::from(1));
 
+    eprintln!(
+        "[GPU-sumcheck] starting: {} rounds, {} claims, {} matrices",
+        n,
+        claims.len(),
+        source.len()
+    );
+    let t_start = std::time::Instant::now();
+
     let global_points: Vec<Vec<SecureField>> =
         claims.iter().map(|c| global_point(c, config)).collect();
 
@@ -1323,6 +1565,7 @@ fn mismatch_sumcheck_streaming_gpu(
     let mut eq_prefix: Vec<SecureField> = vec![one; claims.len()];
 
     for round in 0..n {
+        let t_round = std::time::Instant::now();
         let (s0, s1, s2) = eval_round_3way_gpu(
             round,
             claims,
@@ -1335,6 +1578,15 @@ fn mismatch_sumcheck_streaming_gpu(
             &challenge_point,
             executor,
         );
+        if round < 3 || round == n - 1 || (round + 1) % 10 == 0 {
+            eprintln!(
+                "[GPU-sumcheck] round {}/{} in {:.2}s (total {:.1}s)",
+                round + 1,
+                n,
+                t_round.elapsed().as_secs_f64(),
+                t_start.elapsed().as_secs_f64()
+            );
+        }
 
         // Degree-2 polynomial through (0, s0), (1, s1), (2, s2)
         let two = SecureField::from(M31::from(2));
@@ -1354,6 +1606,12 @@ fn mismatch_sumcheck_streaming_gpu(
             eq_prefix[i] = eq_prefix[i] * (r * g_val + (one - r) * (one - g_val));
         }
     }
+
+    eprintln!(
+        "[GPU-sumcheck] complete: {} rounds in {:.1}s",
+        n,
+        t_start.elapsed().as_secs_f64()
+    );
 
     (round_polys, challenge_point)
 }
