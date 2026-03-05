@@ -2298,135 +2298,132 @@ __device__ void felt_sub(felt252* r, const felt252* a, const felt252* b) {
     }
 }
 
-// r = a * b (mod P) using schoolbook 256×256→512 then Barrett-like reduction
-// For simplicity, we use a 4×4 schoolbook multiply then reduce.
-__device__ void felt_mul(felt252* r, const felt252* a, const felt252* b) {
-    // 512-bit product in 8 limbs using PTX mul.hi/mul.lo
-    uint64_t prod[8] = {0};
+// =============================================================================
+// Montgomery multiplication for correct modular arithmetic
+// =============================================================================
+//
+// R = 2^256, P = 2^251 + 17*2^192 + 1
+// P_INV_NEG = -P^(-1) mod 2^64 = 0xFFFFFFFFFFFFFFFF (since P ≡ 1 mod 2^64)
+// MONT_R2 = R^2 mod P (precomputed)
+//
+// Montgomery REDC: given 512-bit T, computes T * R^(-1) mod P
+// felt_mul(a,b) = REDC(REDC(a * R2) * b) = a * b mod P
+
+__constant__ uint64_t MONT_R2[4] = {
+    0xFFFFFD737E000401ULL,  // R^2 mod P, limb[0]
+    0x00000001330FFFFFULL,  // limb[1]
+    0xFFFFFFFFFF6F8000ULL,  // limb[2]
+    0x07FFD4AB5E008810ULL   // limb[3]
+};
+
+#define P_INV_NEG 0xFFFFFFFFFFFFFFFFULL
+
+// Montgomery reduction: T (8 limbs, 512 bits) → result (4 limbs) = T * R^(-1) mod P
+__device__ void mont_redc(uint64_t T[8], felt252* r) {
     for (int i = 0; i < 4; i++) {
+        // m = T[i] * P_INV_NEG mod 2^64
+        uint64_t m = T[i] * P_INV_NEG;
+
+        // T += m * P << (64*i)
+        // P = [1, 0, 0, 0x0800000000000011]
+        // m*P[0] = m*1 = m
+        // m*P[1] = 0
+        // m*P[2] = 0
+        // m*P[3] = m * 0x0800000000000011
+        //
+        // Optimized: only P[0]=1 and P[3] are nonzero.
         uint64_t carry = 0;
-        for (int j = 0; j < 4; j++) {
-            // prod[i+j] += a[i]*b[j] + carry
+
+        // j=0: T[i+0] += m * P[0] = m * 1 = m
+        {
+            uint64_t s = T[i] + m;
+            carry = (s < T[i]) ? 1ULL : 0ULL;
+            T[i] = s;  // This should become 0 mod 2^64 by construction
+        }
+
+        // j=1: T[i+1] += 0 + carry
+        {
+            uint64_t s = T[i+1] + carry;
+            carry = (s < T[i+1]) ? 1ULL : 0ULL;
+            T[i+1] = s;
+        }
+
+        // j=2: T[i+2] += 0 + carry
+        {
+            uint64_t s = T[i+2] + carry;
+            carry = (s < T[i+2]) ? 1ULL : 0ULL;
+            T[i+2] = s;
+        }
+
+        // j=3: T[i+3] += m * P[3] + carry
+        {
             uint64_t hi;
-            uint64_t lo = mad64(a->limb[i], b->limb[j], prod[i+j], &hi);
+            uint64_t lo = mad64(m, STARK_P[3], T[i+3], &hi);
             uint64_t s = lo + carry;
             if (s < lo) hi++;
-            prod[i+j] = s;
+            T[i+3] = s;
             carry = hi;
         }
-        prod[i+4] += carry;
-    }
-    // Reduce mod P = 2^251 + 17*2^192 + 1
-    // Split prod into low (bits 0..251) and high (bits 251..)
-    // prod = low + high * 2^251, and 2^251 ≡ -(17*2^192 + 1) mod P
-    // So prod ≡ low - high*(17*2^192 + 1) mod P
-    // But this is complex. Use simpler: Montgomery or just repeated subtraction.
-    // For H100 SM9.0, use the fact that P has special structure.
 
-    // Extract bits: low = prod[0..3] with top bit of prod[3] masked to 251 bits
-    // high = (prod[3] >> 59) | (prod[4] << 5) | ... shifted
-    // 251 = 3*64 + 59, so bit 251 is bit 59 of limb[3]
-
-    uint64_t low[4];
-    low[0] = prod[0];
-    low[1] = prod[1];
-    low[2] = prod[2];
-    low[3] = prod[3] & ((1ULL << 59) - 1); // bottom 59 bits of limb[3]
-
-    // high = prod >> 251
-    uint64_t high[5] = {0};
-    high[0] = (prod[3] >> 59) | (prod[4] << 5);
-    high[1] = (prod[4] >> 59) | (prod[5] << 5);
-    high[2] = (prod[5] >> 59) | (prod[6] << 5);
-    high[3] = (prod[6] >> 59) | (prod[7] << 5);
-    high[4] = (prod[7] >> 59);
-
-    // prod ≡ low + high * 2^251 mod P
-    // 2^251 ≡ -(17*2^192 + 1) mod P
-    // So prod ≡ low - high*(17*2^192 + 1) mod P
-    // = low - high - high*17*2^192
-
-    // Compute high * 1 (just high itself)
-    // Compute high * 17 * 2^192
-    // 2^192 = limb[3] shift, so high*17*2^192 = (high*17) << 192
-    // high*17 in limbs: multiply each limb by 17, propagate carry
-    uint64_t h17[6] = {0};
-    uint64_t carry = 0;
-    for (int i = 0; i < 5; i++) {
-        uint64_t hi;
-        uint64_t lo = mad64(high[i], 17ULL, carry, &hi);
-        h17[i] = lo;
-        carry = hi;
-    }
-    h17[5] = carry;
-
-    // h17_shifted = h17 << 192 bits = shift by 3 limbs
-    // sub_val = high + h17_shifted
-    // But this can overflow 256 bits. We'll compute in 512-bit space then reduce again.
-    // Actually, high has ~261 bits max (512-251=261), so high*17*2^192 has ~261+4+192=457 bits.
-    // We need another round. For simplicity, do two rounds of reduction.
-
-    // Round 1: r = low - high - (high*17) << 192, handling borrow as addition of P
-    // Start with r = low
-    felt252 result;
-    result.limb[0] = low[0]; result.limb[1] = low[1];
-    result.limb[2] = low[2]; result.limb[3] = low[3];
-
-    // Subtract high[0..3] from result
-    {
-        uint64_t borrow = 0;
-        for (int i = 0; i < 4; i++) {
-            uint64_t sub = (i < 5 ? high[i] : 0) + borrow;
-            borrow = (result.limb[i] < sub) ? 1ULL : 0ULL;
-            result.limb[i] -= sub;
-        }
-        // If borrow, add P
-        if (borrow) {
-            uint64_t c2 = 0;
-            for (int i = 0; i < 4; i++) {
-                result.limb[i] = add64_carry(result.limb[i], STARK_P[i], c2, &c2);
-            }
+        // Propagate carry into T[i+4..7]
+        for (int k = i + 4; k < 8 && carry; k++) {
+            uint64_t s = T[k] + carry;
+            carry = (s < T[k]) ? 1ULL : 0ULL;
+            T[k] = s;
         }
     }
 
-    // Subtract h17 << 192 (= h17[0] in limb[3], h17[1] in overflow)
-    // h17_shifted[0..2] = 0, h17_shifted[3] = h17[0], overflow = h17[1..5]
-    {
-        uint64_t borrow = 0;
-        // limbs 0,1,2 unaffected (subtract 0)
-        uint64_t sub3 = h17[0] + borrow;
-        borrow = (result.limb[3] < sub3) ? 1ULL : 0ULL;
-        result.limb[3] -= sub3;
-        // Remaining h17[1..5] and high[4] are overflow — need more reduction
-        // For practical 252-bit inputs, high is small enough that one round suffices.
-        // Add P for each borrow
-        if (borrow || h17[1] || h17[2]) {
-            // Multiple P additions needed. Simplified: add P once per borrow.
-            uint64_t c2 = 0;
-            for (int i = 0; i < 4; i++) {
-                result.limb[i] = add64_carry(result.limb[i], STARK_P[i], c2, &c2);
-            }
-        }
-    }
+    // Result is in T[4..7]
+    r->limb[0] = T[4];
+    r->limb[1] = T[5];
+    r->limb[2] = T[6];
+    r->limb[3] = T[7];
 
-    // Final normalization: ensure result < P (up to 2 subtractions)
-    for (int rep = 0; rep < 3; rep++) {
-        int ge = 0;
-        for (int i = 3; i >= 0; i--) {
-            if (result.limb[i] > STARK_P[i]) { ge = 1; break; }
-            if (result.limb[i] < STARK_P[i]) break;
-            if (i == 0) ge = 1;
-        }
-        if (!ge) break;
+    // Conditional subtraction: if result >= P, subtract P
+    if (felt_gte(r, STARK_P)) {
         uint64_t borrow = 0;
         for (int i = 0; i < 4; i++) {
             uint64_t sub = STARK_P[i] + borrow;
-            borrow = (result.limb[i] < sub) ? 1ULL : 0ULL;
-            result.limb[i] -= sub;
+            borrow = (r->limb[i] < sub) ? 1ULL : 0ULL;
+            r->limb[i] -= sub;
         }
     }
+}
 
-    *r = result;
+// Schoolbook 4×4 multiply: T[8] = a * b (512-bit product)
+__device__ void schoolbook_mul(uint64_t T[8], const felt252* a, const felt252* b) {
+    T[0] = T[1] = T[2] = T[3] = T[4] = T[5] = T[6] = T[7] = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t carry = 0;
+        for (int j = 0; j < 4; j++) {
+            uint64_t hi;
+            uint64_t lo = mad64(a->limb[i], b->limb[j], T[i+j], &hi);
+            uint64_t s = lo + carry;
+            if (s < lo) hi++;
+            T[i+j] = s;
+            carry = hi;
+        }
+        T[i+4] += carry;
+    }
+}
+
+// r = a * b (mod P) using Montgomery multiplication
+// Computes: a_mont = REDC(a * R^2) = a*R mod P, then REDC(a_mont * b) = a*b mod P
+__device__ void felt_mul(felt252* r, const felt252* a, const felt252* b) {
+    // Step 1: a_mont = REDC(a * R^2) = a * R mod P
+    felt252 r2_const;
+    r2_const.limb[0] = MONT_R2[0]; r2_const.limb[1] = MONT_R2[1];
+    r2_const.limb[2] = MONT_R2[2]; r2_const.limb[3] = MONT_R2[3];
+
+    uint64_t T1[8];
+    schoolbook_mul(T1, a, &r2_const);
+    felt252 a_mont;
+    mont_redc(T1, &a_mont);
+
+    // Step 2: result = REDC(a_mont * b) = a*R * b * R^(-1) = a*b mod P
+    uint64_t T2[8];
+    schoolbook_mul(T2, &a_mont, b);
+    mont_redc(T2, r);
 }
 
 // r = a^2 (mod P) — uses felt_mul for simplicity; can be optimized with Karatsuba
