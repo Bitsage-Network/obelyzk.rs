@@ -1926,7 +1926,49 @@ pub fn build_streaming_gkr_calldata(
         weight_expected_values.push(format!("0x{:x}", packed));
     }
 
+    // weight_eval_points: eval_point per weight claim for aggregated binding verification.
+    // Each eval_point is a variable-length array of packed QM31 coordinates.
+    let mut weight_eval_points: Vec<String> = Vec::new();
+    weight_eval_points.push(format!("{}", proof.weight_claims.len()));
+    for wc in &proof.weight_claims {
+        weight_eval_points.push(format!("{}", wc.eval_point.len()));
+        for ep in &wc.eval_point {
+            let packed = crate::crypto::poseidon_channel::securefield_to_felt(*ep);
+            weight_eval_points.push(format!("0x{:x}", packed));
+        }
+    }
+    // Deferred weight claims eval points (from deferred proofs with MatMul kind)
+    let deferred_matmul_count = proof
+        .deferred_proofs
+        .iter()
+        .filter(|d| d.weight_claim().is_some())
+        .count();
+    let mut deferred_eval_points: Vec<String> = Vec::new();
+    deferred_eval_points.push(format!("{}", deferred_matmul_count));
+    for deferred in &proof.deferred_proofs {
+        if let Some(wc) = deferred.weight_claim() {
+            deferred_eval_points.push(format!("{}", wc.eval_point.len()));
+            for ep in &wc.eval_point {
+                let packed = crate::crypto::poseidon_channel::securefield_to_felt(*ep);
+                deferred_eval_points.push(format!("0x{:x}", packed));
+            }
+        }
+    }
+
     // weight_binding_mode + data
+    // Streaming path requires full aggregated binding proof for on-chain soundness.
+    // RLC-only (aggregated_binding: None) does not verify weight claims against
+    // registered weight commitments, so it must be rejected for streaming submissions.
+    if proof.weight_opening_transcript_mode
+        == crate::gkr::types::WeightOpeningTranscriptMode::AggregatedOracleSumcheck
+        && proof.aggregated_binding.is_none()
+    {
+        return Err(StarknetModelError::SoundnessGate(
+            "Streaming GKR requires full aggregated binding proof for on-chain submission. \
+             Ensure STWO_AGGREGATED_RLC_ONLY is not set (full binding is now default)."
+                .to_string(),
+        ));
+    }
     let binding_data = starknet_weight_binding_data(proof)?;
     let mut weight_binding_calldata: Vec<String> = Vec::new();
     weight_binding_calldata.push(format!("{}", binding_mode));
@@ -2023,8 +2065,10 @@ pub fn build_streaming_gkr_calldata(
         calldata.push(if is_last { "1".to_string() } else { "0".to_string() });
 
         if chunk_idx == 0 {
-            // First chunk: include weight binding + deferred proofs + IO commitment
+            // First chunk: include weight binding + eval points + deferred proofs + IO commitment
             calldata.extend(weight_expected_values.clone());
+            calldata.extend(weight_eval_points.clone());
+            calldata.extend(deferred_eval_points.clone());
             calldata.extend(weight_binding_calldata.clone());
             calldata.extend(deferred_proof_calldata.clone());
             calldata.extend(deferred_dims_calldata.clone());
@@ -2032,6 +2076,8 @@ pub fn build_streaming_gkr_calldata(
         } else {
             // Subsequent chunks: empty weight/deferred/IO arrays
             calldata.push("0".to_string()); // weight_expected_values: empty array
+            calldata.push("0".to_string()); // weight_eval_points: empty array
+            calldata.push("0".to_string()); // deferred_eval_points: empty array
             calldata.push("0".to_string()); // weight_binding_mode: 0 (ignored)
             calldata.push("0".to_string()); // weight_binding_data: empty array
             calldata.push("0".to_string()); // deferred_proof_data: empty array
@@ -7389,5 +7435,173 @@ mod tests {
         let pd2 = p_read_u32(&mut poff);
         assert_eq!(packed_proof_felts.len() - poff, 0, "Packed: remaining felts");
         println!("PACKED roundtrip also passes! (deferred={})", pd2);
+    }
+
+    #[test]
+    fn test_streaming_calldata_includes_aggregated_binding() {
+        // Default mode (full binding ON) should produce streaming calldata with
+        // a serialized AggregatedWeightBindingProof, not an RLC marker.
+        use crate::aggregation::prove_model_pure_gkr;
+        let _guard = EnvVarGuard::unset("STWO_AGGREGATED_RLC_ONLY");
+
+        let mut builder = GraphBuilder::new((1, 4));
+        builder.linear(2);
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, 4);
+        for j in 0..4 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
+
+        let mut weights = GraphWeights::new();
+        let mut w = M31Matrix::new(4, 2);
+        for i in 0..4 {
+            for j in 0..2 {
+                w.set(i, j, M31::from((i * 2 + j + 1) as u32));
+            }
+        }
+        weights.add_weight(0, w);
+
+        let proof = prove_model_pure_gkr(&graph, &input, &weights)
+            .expect("GKR proving should succeed");
+        let gkr = proof.gkr_proof.as_ref().expect("GKR proof expected");
+
+        // With default settings, full binding proof should be present
+        assert!(
+            gkr.aggregated_binding.is_some(),
+            "default mode should produce full aggregated binding proof"
+        );
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
+        let raw_io = crate::cairo_serde::serialize_raw_io(&input, &proof.execution.output);
+        let model_id = FieldElement::from(0xBEEFu64);
+
+        let streaming = build_streaming_gkr_calldata(gkr, &circuit, model_id, &raw_io)
+            .expect("streaming calldata should build with full binding");
+
+        // First input MLE chunk should contain weight binding data (not just 2-felt RLC marker)
+        assert!(
+            !streaming.input_mle_chunks.is_empty(),
+            "should have at least one input MLE chunk"
+        );
+        let first_chunk = &streaming.input_mle_chunks[0];
+        // The binding data is embedded in the calldata; with a full proof it should be
+        // significantly larger than the 2-felt RLC marker
+        assert!(
+            first_chunk.calldata.len() > 20,
+            "first chunk should contain substantial binding proof data, got {} felts",
+            first_chunk.calldata.len(),
+        );
+    }
+
+    #[test]
+    fn test_streaming_rejects_rlc_only() {
+        // When aggregated_binding is None (RLC-only), streaming calldata builder
+        // should return a SoundnessGate error.
+        use crate::aggregation::prove_model_pure_gkr;
+        use crate::gkr::types::WeightOpeningTranscriptMode;
+        let _guard = EnvVarGuard::set("STWO_AGGREGATED_RLC_ONLY", "1");
+
+        let mut builder = GraphBuilder::new((1, 4));
+        builder.linear(2);
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, 4);
+        for j in 0..4 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
+
+        let mut weights = GraphWeights::new();
+        let mut w = M31Matrix::new(4, 2);
+        for i in 0..4 {
+            for j in 0..2 {
+                w.set(i, j, M31::from((i * 2 + j + 1) as u32));
+            }
+        }
+        weights.add_weight(0, w);
+
+        let mut proof = prove_model_pure_gkr(&graph, &input, &weights)
+            .expect("GKR proving should succeed");
+        let gkr = proof.gkr_proof.as_mut().expect("GKR proof expected");
+
+        // Force RLC-only mode
+        gkr.weight_opening_transcript_mode = WeightOpeningTranscriptMode::AggregatedOracleSumcheck;
+        gkr.aggregated_binding = None;
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
+        let raw_io = crate::cairo_serde::serialize_raw_io(&input, &proof.execution.output);
+        let model_id = FieldElement::from(0xBEEFu64);
+
+        let err = build_streaming_gkr_calldata(gkr, &circuit, model_id, &raw_io)
+            .expect_err("streaming calldata should reject RLC-only binding");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("full aggregated binding proof"),
+            "error should mention full binding requirement, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_streaming_calldata_includes_eval_points() {
+        // Verify that streaming calldata includes weight eval points alongside expected values.
+        use crate::aggregation::prove_model_pure_gkr;
+        let _guard = EnvVarGuard::unset("STWO_AGGREGATED_RLC_ONLY");
+
+        let mut builder = GraphBuilder::new((1, 4));
+        builder.linear(4).activation(ActivationType::ReLU).linear(2);
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, 4);
+        for j in 0..4 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
+
+        let mut weights = GraphWeights::new();
+        let mut w0 = M31Matrix::new(4, 4);
+        for i in 0..4 {
+            for j in 0..4 {
+                w0.set(i, j, M31::from(((i + j) % 7 + 1) as u32));
+            }
+        }
+        weights.add_weight(0, w0);
+        let mut w2 = M31Matrix::new(4, 2);
+        for i in 0..4 {
+            for j in 0..2 {
+                w2.set(i, j, M31::from((i + j + 1) as u32));
+            }
+        }
+        weights.add_weight(2, w2);
+
+        let proof = prove_model_pure_gkr(&graph, &input, &weights)
+            .expect("GKR proving should succeed");
+        let gkr = proof.gkr_proof.as_ref().expect("GKR proof expected");
+
+        // Should have weight claims with eval points
+        assert!(
+            !gkr.weight_claims.is_empty(),
+            "should have weight claims"
+        );
+        for wc in &gkr.weight_claims {
+            assert!(
+                !wc.eval_point.is_empty(),
+                "each weight claim should have a non-empty eval point"
+            );
+        }
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
+        let raw_io = crate::cairo_serde::serialize_raw_io(&input, &proof.execution.output);
+        let model_id = FieldElement::from(0xBEEFu64);
+
+        let streaming = build_streaming_gkr_calldata(gkr, &circuit, model_id, &raw_io)
+            .expect("streaming calldata should build");
+
+        // First chunk calldata should be larger than without eval points
+        let first_chunk = &streaming.input_mle_chunks[0];
+        assert!(
+            first_chunk.calldata.len() > 30,
+            "first chunk should contain eval points + binding proof, got {} felts",
+            first_chunk.calldata.len(),
+        );
     }
 }

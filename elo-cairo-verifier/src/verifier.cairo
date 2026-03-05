@@ -300,6 +300,8 @@ pub trait ISumcheckVerifier<TContractState> {
         is_last_chunk: bool,
         // Only needed on first call (weight binding + IO commitment):
         weight_expected_values: Array<felt252>,
+        weight_eval_points: Array<felt252>,
+        deferred_eval_points: Array<felt252>,
         weight_binding_mode: u32,
         weight_binding_data: Array<felt252>,
         deferred_proof_data: Array<felt252>,
@@ -326,17 +328,20 @@ mod SumcheckVerifierContract {
         evaluate_mle_eq_dot_partial,
         extract_m31_from_packed,
         pack_qm31_to_felt, unpack_qm31_from_felt,
-        qm31_zero, qm31_one, qm31_add, qm31_mul,
+        qm31_zero, qm31_add,
     };
     use crate::channel::{
         PoseidonChannel,
         channel_default, channel_mix_u64,
-        channel_draw_qm31, channel_draw_qm31s, channel_mix_secure_field,
+        channel_draw_qm31s, channel_mix_secure_field,
     };
     use crate::model_verifier::{
-        verify_gkr_layers_batch,
+        verify_gkr_layers_batch, WeightClaimData,
         reader_new as mv_reader_new, read_u32 as mv_read_u32,
         read_qm31 as mv_read_qm31, dispatch_matmul as mv_dispatch_matmul,
+    };
+    use crate::aggregated_binding::{
+        AggregatedWeightBindingProof, verify_aggregated_binding,
     };
     use super::PackedDigest;
     use starknet::storage::{
@@ -1374,6 +1379,8 @@ mod SumcheckVerifierContract {
             chunk_len: u32,
             is_last_chunk: bool,
             weight_expected_values: Array<felt252>,
+            weight_eval_points: Array<felt252>,
+            deferred_eval_points: Array<felt252>,
             weight_binding_mode: u32,
             weight_binding_data: Array<felt252>,
             deferred_proof_data: Array<felt252>,
@@ -1498,40 +1505,108 @@ mod SumcheckVerifierContract {
                     "STREAM_WEIGHT_COUNT_VS_REGISTERED",
                 );
 
-                // ── Weight binding (RLC mode 4) ──
+                // ── Weight binding (Mode 4: aggregated binding proof) ──
                 assert!(
                     weight_binding_mode == WEIGHT_BINDING_MODE_AGGREGATED_ORACLE_SUMCHECK,
-                    "STREAM_ONLY_SUPPORTS_RLC_MODE",
+                    "STREAM_ONLY_SUPPORTS_MODE_4",
                 );
-                let weight_binding_span = weight_binding_data.span();
-                assert!(weight_binding_span.len() == 2, "STREAM_BINDING_DATA_LEN");
-                assert!(*weight_binding_span.at(0) == WEIGHT_BINDING_RLC_MARKER, "STREAM_BINDING_NOT_RLC");
 
-                let rho = channel_draw_qm31(ref ch);
-                let mut rho_pow = qm31_one();
-                let mut combined = qm31_zero();
+                // Read registered weight commitments from storage
+                let mut registered_weights: Array<felt252> = array![];
+                let mut wi: u32 = 0;
+                loop {
+                    if wi >= registered_weight_count {
+                        break;
+                    }
+                    registered_weights.append(self.model_gkr_weights.entry((model_id, wi)).read());
+                    wi += 1;
+                };
+
+                // Build WeightClaimData array from expected values + eval points
+                let mut all_weight_claims: Array<WeightClaimData> = array![];
+
+                // Parse main walk eval points
+                let eval_pts_span = weight_eval_points.span();
+                let mut ep_offset: u32 = 0;
+                let main_ep_count: u32 = (*eval_pts_span.at(ep_offset)).try_into().unwrap();
+                ep_offset += 1;
+                assert!(main_ep_count == expected_weight_count, "STREAM_EVAL_POINT_COUNT_MISMATCH");
+
                 let mut claim_i: u32 = 0;
                 loop {
                     if claim_i >= expected_weight_count {
                         break;
                     }
                     let ev = unpack_qm31_from_felt(*weight_expected_values.at(claim_i));
-                    combined = qm31_add(combined, qm31_mul(rho_pow, ev));
-                    rho_pow = qm31_mul(rho_pow, rho);
+                    let pt_len: u32 = (*eval_pts_span.at(ep_offset)).try_into().unwrap();
+                    ep_offset += 1;
+                    let mut eval_point: Array<QM31> = array![];
+                    let mut pi: u32 = 0;
+                    loop {
+                        if pi >= pt_len {
+                            break;
+                        }
+                        eval_point.append(unpack_qm31_from_felt(*eval_pts_span.at(ep_offset)));
+                        ep_offset += 1;
+                        pi += 1;
+                    };
+                    all_weight_claims.append(WeightClaimData {
+                        eval_point,
+                        expected_value: ev,
+                    });
                     claim_i += 1;
                 };
+
+                // Parse deferred eval points and combine with deferred weight evals
+                let def_ep_span = deferred_eval_points.span();
+                let mut dep_offset: u32 = 0;
+                let def_ep_count: u32 = (*def_ep_span.at(dep_offset)).try_into().unwrap();
+                dep_offset += 1;
                 let deferred_evs_span = deferred_weight_evs.span();
+                assert!(
+                    def_ep_count == deferred_evs_span.len(),
+                    "STREAM_DEFERRED_EVAL_POINT_COUNT_MISMATCH",
+                );
+
                 let mut def_wi: u32 = 0;
                 loop {
-                    if def_wi >= deferred_evs_span.len() {
+                    if def_wi >= def_ep_count {
                         break;
                     }
                     let ev = unpack_qm31_from_felt(*deferred_evs_span.at(def_wi));
-                    combined = qm31_add(combined, qm31_mul(rho_pow, ev));
-                    rho_pow = qm31_mul(rho_pow, rho);
+                    let pt_len: u32 = (*def_ep_span.at(dep_offset)).try_into().unwrap();
+                    dep_offset += 1;
+                    let mut eval_point: Array<QM31> = array![];
+                    let mut pi: u32 = 0;
+                    loop {
+                        if pi >= pt_len {
+                            break;
+                        }
+                        eval_point.append(unpack_qm31_from_felt(*def_ep_span.at(dep_offset)));
+                        dep_offset += 1;
+                        pi += 1;
+                    };
+                    all_weight_claims.append(WeightClaimData {
+                        eval_point,
+                        expected_value: ev,
+                    });
                     def_wi += 1;
                 };
-                channel_mix_secure_field(ref ch, combined);
+
+                // Deserialize aggregated binding proof from weight_binding_data
+                let mut weight_binding_span = weight_binding_data.span();
+                let binding_proof = Serde::<AggregatedWeightBindingProof>::deserialize(
+                    ref weight_binding_span,
+                ).expect('STREAM_BINDING_DESER');
+
+                // Verify aggregated binding against registered weight commitments
+                let binding_ok = verify_aggregated_binding(
+                    @binding_proof,
+                    all_weight_claims.span(),
+                    registered_weights.span(),
+                    ref ch,
+                );
+                assert!(binding_ok, "STREAM_AGGREGATED_BINDING_FAILED");
 
                 // ── IO commitment verification ──
                 let stored_original_io_len = self.stream_original_io_len.entry(session_id).read();

@@ -2950,17 +2950,17 @@ pub fn serialize_aggregated_binding_proof(
     // oracle_eval_at_s: QM31
     serialize_qm31(proof.oracle_eval_at_s, output);
 
-    // opening_proof: MleOpeningProof
-    serialize_mle_opening_proof(&proof.opening_proof, output);
-
-    // super_root
+    // super_root: felt252
     output.push(proof.super_root.root);
+
+    // subtree_roots: Array<felt252>
     serialize_u32(proof.super_root.subtree_roots.len() as u32, output);
     for root in &proof.super_root.subtree_roots {
         output.push(*root);
     }
-    output.push(proof.super_root.zero_tree_root);
-    serialize_usize(proof.super_root.top_levels, output);
+
+    // opening_proof: MleOpeningProof (must come after subtree_roots to match Cairo Serde order)
+    serialize_mle_opening_proof(&proof.opening_proof, output);
 }
 
 #[cfg(test)]

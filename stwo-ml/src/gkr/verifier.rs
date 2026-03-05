@@ -4574,9 +4574,11 @@ mod tests {
 
     #[test]
     fn test_verify_gkr_rejects_rlc_only_without_weights() {
-        // Default Mode 4 (AggregatedOracleSumcheck) with RLC-only (no full binding)
+        // Mode 4 (AggregatedOracleSumcheck) with RLC-only (no full binding)
         // must be rejected by verify_gkr() (no weights) but accepted by
         // verify_gkr_with_weights().
+        // RLC-only requires explicit opt-in since full binding is now default.
+        let _guard = EnvVarGuard::set("STWO_AGGREGATED_RLC_ONLY", "1");
         let mut builder = GraphBuilder::new((2, 4));
         builder.linear(2);
         let graph = builder.build();
@@ -4629,6 +4631,8 @@ mod tests {
     fn test_rlc_with_weights_detects_fabricated_claim() {
         // Prove correctly with Mode 4 RLC-only, then tamper a weight claim's
         // expected_value. verify_gkr_with_weights() must detect the mismatch.
+        // RLC-only requires explicit opt-in since full binding is now default.
+        let _guard = EnvVarGuard::set("STWO_AGGREGATED_RLC_ONLY", "1");
         let mut builder = GraphBuilder::new((2, 4));
         builder.linear(2);
         let graph = builder.build();

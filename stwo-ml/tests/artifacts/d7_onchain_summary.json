@@ -7,7 +7,7 @@
   "model_id": "0xd7",
   "num_layers": 1,
   "register_calldata_len": 6,
-  "verify_calldata_len": 60,
+  "verify_calldata_len": 236,
   "weight_commitments": [
     "0x280b62c993d021a4be8ac506a2be7e41b8f4964c23a68f58d950761e3d73ded"
   ]

@@ -382,9 +382,19 @@ fn apply_aggregated_oracle_sumcheck(
     // Check if full binding proof is needed. MLEs are always dropped after
     // commitment — streaming mode reloads them on demand from GraphWeights,
     // keeping peak memory at ~4 GB (single largest matrix) instead of ~640 GB.
-    let need_full_binding = std::env::var("STWO_AGGREGATED_FULL_BINDING")
+    //
+    // Default: ON (full binding proof for on-chain soundness).
+    // Opt-out: STWO_AGGREGATED_RLC_ONLY=1 for testing/debugging (RLC-only, no opening proof).
+    let rlc_only_override = std::env::var("STWO_AGGREGATED_RLC_ONLY")
         .map(|v| !v.is_empty() && v != "0" && v != "false")
         .unwrap_or(false);
+    let need_full_binding = if rlc_only_override {
+        false
+    } else {
+        std::env::var("STWO_AGGREGATED_FULL_BINDING")
+            .map(|v| !v.is_empty() && v != "0" && v != "false")
+            .unwrap_or(true)
+    };
     let total_claims = weight_data.len() + deferred_weight_claims_data.len();
     eprintln!(
         "  [{log_tag}] aggregated oracle sumcheck: preparing {total_claims} weight commitments..."
