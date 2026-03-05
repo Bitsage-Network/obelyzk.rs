@@ -17,6 +17,8 @@
 
 #[cfg(feature = "cuda-runtime")]
 use crate::crypto::mle_opening::prove_mle_opening_with_commitment_qm31_u32;
+#[cfg(feature = "cuda-runtime")]
+use crate::gpu_sumcheck::GpuSumcheckExecutor;
 use crate::crypto::mle_opening::{
     evaluate_mle_at, mle_n_queries, prove_mle_opening, verify_mle_opening, MleOpeningProof,
 };
@@ -825,6 +827,254 @@ fn eval_unified_oracle_streaming(
     result
 }
 
+/// GPU minimum MLE size (2^GPU_MLE_THRESHOLD) below which we fall back to CPU.
+/// Small MLEs are faster to evaluate on CPU than to upload to GPU.
+#[cfg(feature = "cuda-runtime")]
+const GPU_MLE_THRESHOLD: usize = 14;
+
+/// Evaluate the unified oracle at 3 points that differ only at one variable,
+/// loading each weight MLE to GPU once and forking 3 evaluation paths.
+///
+/// When all 3 eval points share a common prefix and suffix (differing only at
+/// `branch_pos`), the MLE is uploaded once, the shared prefix is folded, then
+/// the GPU buffer is cloned 2× to fork for the 3 branch values.
+///
+/// For selector rounds (round < selector_bits), only the selector weight differs
+/// across the 3 eval points — the MLE evaluation is identical, so we evaluate once.
+#[cfg(feature = "cuda-runtime")]
+fn eval_unified_oracle_3way_gpu(
+    eval_pts: [&[SecureField]; 3],
+    source: &dyn WeightSource,
+    claim_n_vars: &[usize],
+    config: &AggregatedBindingConfig,
+    executor: &GpuSumcheckExecutor,
+) -> [SecureField; 3] {
+    let mut results = [SecureField::zero(); 3];
+
+    // Extract selector and local portions from each eval point
+    let selectors: [&[SecureField]; 3] = [
+        &eval_pts[0][..config.selector_bits],
+        &eval_pts[1][..config.selector_bits],
+        &eval_pts[2][..config.selector_bits],
+    ];
+    let locals: [&[SecureField]; 3] = [
+        &eval_pts[0][config.selector_bits..],
+        &eval_pts[1][config.selector_bits..],
+        &eval_pts[2][config.selector_bits..],
+    ];
+
+    // Find which position differs (branch_pos) in the full eval_pt
+    let branch_pos = (0..eval_pts[0].len())
+        .find(|&j| eval_pts[0][j] != eval_pts[1][j])
+        .unwrap_or(0);
+
+    // Check if branching is in selector vs local region
+    let branch_in_selector = branch_pos < config.selector_bits;
+
+    for i in 0..source.len() {
+        let sel_weights: [SecureField; 3] = [
+            compute_selector_weight(i, selectors[0], config),
+            compute_selector_weight(i, selectors[1], config),
+            compute_selector_weight(i, selectors[2], config),
+        ];
+
+        // Skip if all 3 selector weights are zero
+        if sel_weights[0] == SecureField::zero()
+            && sel_weights[1] == SecureField::zero()
+            && sel_weights[2] == SecureField::zero()
+        {
+            continue;
+        }
+
+        let n_vars = claim_n_vars[i];
+        let local_truncated_0 = &locals[0][config.n_max - n_vars..];
+
+        if branch_in_selector {
+            // Branching variable is in the selector — MLE eval is identical for all 3.
+            // Evaluate once, multiply by 3 different selector weights.
+            let w_val = if n_vars < GPU_MLE_THRESHOLD {
+                let mle = source.get_mle(i);
+                evaluate_mle_at(&mle, local_truncated_0)
+            } else {
+                let mle_u32 = source.get_mle_u32(i);
+                executor
+                    .evaluate_mle_at_gpu_u32(&mle_u32, local_truncated_0)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[GPU] 3way selector fallback for matrix {i}: {e:?}");
+                        let mle = source.get_mle(i);
+                        evaluate_mle_at(&mle, local_truncated_0)
+                    })
+            };
+            for k in 0..3 {
+                results[k] = results[k] + sel_weights[k] * w_val;
+            }
+        } else {
+            // Branching variable is in the local region.
+            // Upload MLE once, fold shared prefix, clone+fork for the 3 branch values.
+            let local_branch_pos = branch_pos - config.selector_bits - (config.n_max - n_vars);
+
+            if n_vars < GPU_MLE_THRESHOLD {
+                // CPU fallback for small MLEs
+                for k in 0..3 {
+                    if sel_weights[k] == SecureField::zero() {
+                        continue;
+                    }
+                    let local_truncated_k = &locals[k][config.n_max - n_vars..];
+                    let mle = source.get_mle(i);
+                    let w_val = evaluate_mle_at(&mle, local_truncated_k);
+                    results[k] = results[k] + sel_weights[k] * w_val;
+                }
+            } else {
+                let mle_u32 = source.get_mle_u32(i);
+                match executor.start_mle_fold_session_u32(&mle_u32) {
+                    Ok(mut session) => {
+                        // Fold shared prefix (variables before branch_pos in local space)
+                        let prefix = &local_truncated_0[..local_branch_pos];
+                        for &challenge in prefix.iter() {
+                            if let Err(e) =
+                                executor.mle_fold_session_step_in_place(&mut session, challenge)
+                            {
+                                eprintln!("[GPU] 3way prefix fold error: {e:?}, falling back to CPU");
+                                for k in 0..3 {
+                                    if sel_weights[k] == SecureField::zero() {
+                                        continue;
+                                    }
+                                    let lt = &locals[k][config.n_max - n_vars..];
+                                    let mle = source.get_mle(i);
+                                    results[k] = results[k] + sel_weights[k] * evaluate_mle_at(&mle, lt);
+                                }
+                                break;
+                            }
+                        }
+
+                        // Fork: clone session for branches 1 and 2, reuse original for branch 0
+                        let suffix = &local_truncated_0[local_branch_pos + 1..];
+                        let branch_values: [SecureField; 3] = [
+                            locals[0][config.n_max - n_vars + local_branch_pos],
+                            locals[1][config.n_max - n_vars + local_branch_pos],
+                            locals[2][config.n_max - n_vars + local_branch_pos],
+                        ];
+
+                        for k in 0..3 {
+                            if sel_weights[k] == SecureField::zero() {
+                                continue;
+                            }
+                            let mut fork = if k == 0 {
+                                // Reuse original for first branch (avoid unnecessary clone)
+                                match executor.clone_fold_session(&session) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        eprintln!("[GPU] clone_fold_session error: {e:?}");
+                                        let lt = &locals[k][config.n_max - n_vars..];
+                                        let mle = source.get_mle(i);
+                                        results[k] = results[k] + sel_weights[k] * evaluate_mle_at(&mle, lt);
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                match executor.clone_fold_session(&session) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        eprintln!("[GPU] clone_fold_session error: {e:?}");
+                                        let lt = &locals[k][config.n_max - n_vars..];
+                                        let mle = source.get_mle(i);
+                                        results[k] = results[k] + sel_weights[k] * evaluate_mle_at(&mle, lt);
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            // Fold branch variable
+                            if let Err(e) = executor
+                                .mle_fold_session_step_in_place(&mut fork, branch_values[k])
+                            {
+                                eprintln!("[GPU] branch fold error: {e:?}");
+                                let lt = &locals[k][config.n_max - n_vars..];
+                                let mle = source.get_mle(i);
+                                results[k] = results[k] + sel_weights[k] * evaluate_mle_at(&mle, lt);
+                                continue;
+                            }
+
+                            // Fold suffix and read result
+                            match executor.finish_fold_and_read(&mut fork, suffix) {
+                                Ok(w_val) => {
+                                    results[k] = results[k] + sel_weights[k] * w_val;
+                                }
+                                Err(e) => {
+                                    eprintln!("[GPU] finish_fold error: {e:?}");
+                                    let lt = &locals[k][config.n_max - n_vars..];
+                                    let mle = source.get_mle(i);
+                                    results[k] = results[k] + sel_weights[k] * evaluate_mle_at(&mle, lt);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Full CPU fallback on session start failure
+                        eprintln!("[GPU] session start error for matrix {i}: {e:?}");
+                        for k in 0..3 {
+                            if sel_weights[k] == SecureField::zero() {
+                                continue;
+                            }
+                            let lt = &locals[k][config.n_max - n_vars..];
+                            let mle = source.get_mle(i);
+                            results[k] = results[k] + sel_weights[k] * evaluate_mle_at(&mle, lt);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Evaluate the unified oracle at a single point on GPU (streaming).
+///
+/// Same as [`eval_unified_oracle_streaming`] but uses GPU for large MLEs.
+#[cfg(feature = "cuda-runtime")]
+fn eval_unified_oracle_streaming_gpu(
+    t: &[SecureField],
+    source: &dyn WeightSource,
+    claim_n_vars: &[usize],
+    config: &AggregatedBindingConfig,
+    executor: &GpuSumcheckExecutor,
+) -> SecureField {
+    let selector = &t[..config.selector_bits];
+    let local = &t[config.selector_bits..];
+    assert_eq!(local.len(), config.n_max);
+
+    let mut result = SecureField::zero();
+    for i in 0..source.len() {
+        let sel_weight = compute_selector_weight(i, selector, config);
+
+        if sel_weight == SecureField::zero() {
+            continue;
+        }
+
+        let n_vars = claim_n_vars[i];
+        let local_truncated = &local[config.n_max - n_vars..];
+
+        let w_val = if n_vars < GPU_MLE_THRESHOLD {
+            let mle = source.get_mle(i);
+            evaluate_mle_at(&mle, local_truncated)
+        } else {
+            let mle_u32 = source.get_mle_u32(i);
+            executor
+                .evaluate_mle_at_gpu_u32(&mle_u32, local_truncated)
+                .unwrap_or_else(|e| {
+                    eprintln!("[GPU] oracle eval fallback for matrix {i}: {e:?}");
+                    let mle = source.get_mle(i);
+                    evaluate_mle_at(&mle, local_truncated)
+                })
+        };
+
+        result = result + sel_weight * w_val;
+    }
+
+    result
+}
+
 /// Evaluate the sumcheck polynomial for a specific round at a given value,
 /// using streaming weight MLE access.
 ///
@@ -952,6 +1202,137 @@ fn mismatch_sumcheck_streaming(
     (round_polys, challenge_point)
 }
 
+/// Evaluate the sumcheck polynomial at 3 values (t=0, t=1, t=2) for a round
+/// using GPU-accelerated 3-way batched oracle evaluation.
+///
+/// Replaces 3 separate calls to [`eval_round_at_value_streaming`] with a single
+/// pass that uploads each weight MLE once per round instead of 3 times.
+#[cfg(feature = "cuda-runtime")]
+fn eval_round_3way_gpu(
+    round: usize,
+    claims: &[AggregatedWeightClaim],
+    source: &dyn WeightSource,
+    claim_n_vars: &[usize],
+    config: &AggregatedBindingConfig,
+    betas: &[SecureField],
+    global_points: &[Vec<SecureField>],
+    eq_prefix: &[SecureField],
+    challenge_point: &[SecureField],
+    executor: &GpuSumcheckExecutor,
+) -> (SecureField, SecureField, SecureField) {
+    let one = SecureField::from(M31::from(1));
+    let two = SecureField::from(M31::from(2));
+    let n = config.n_global;
+
+    let mut s = [SecureField::zero(); 3];
+    let values = [SecureField::zero(), one, two];
+
+    // For each claim, build 3 eval points (t=0,1,2) and batch-evaluate the oracle
+    for (i, claim) in claims.iter().enumerate() {
+        let gp = &global_points[i];
+
+        // Build 3 eval points differing only at position `round`
+        let mut eval_pts_storage: [Vec<SecureField>; 3] = [
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        ];
+        for k in 0..3 {
+            eval_pts_storage[k].extend_from_slice(challenge_point);
+            eval_pts_storage[k].push(values[k]);
+            eval_pts_storage[k].extend_from_slice(&gp[round + 1..]);
+        }
+
+        let eval_pts_refs: [&[SecureField]; 3] = [
+            &eval_pts_storage[0],
+            &eval_pts_storage[1],
+            &eval_pts_storage[2],
+        ];
+
+        // 3-way GPU oracle evaluation (1 upload per matrix per claim)
+        let w_vals = eval_unified_oracle_3way_gpu(
+            eval_pts_refs,
+            source,
+            claim_n_vars,
+            config,
+            executor,
+        );
+
+        // Accumulate with eq and beta weights
+        for k in 0..3 {
+            let eq_round = gp[round] * values[k] + (one - gp[round]) * (one - values[k]);
+            let mismatch = w_vals[k] - claim.expected_value;
+            s[k] = s[k] + betas[i] * eq_prefix[i] * eq_round * mismatch;
+        }
+    }
+
+    (s[0], s[1], s[2])
+}
+
+/// Run the mismatch sumcheck using GPU-accelerated 3-way batched evaluation.
+///
+/// Same protocol and Fiat-Shamir transcript as [`mismatch_sumcheck_streaming`]
+/// but uses [`eval_round_3way_gpu`] to upload each weight MLE once per round
+/// instead of 3 times (t=0, t=1, t=2).
+#[cfg(feature = "cuda-runtime")]
+fn mismatch_sumcheck_streaming_gpu(
+    claims: &[AggregatedWeightClaim],
+    source: &dyn WeightSource,
+    claim_n_vars: &[usize],
+    config: &AggregatedBindingConfig,
+    betas: &[SecureField],
+    channel: &mut PoseidonChannel,
+    executor: &GpuSumcheckExecutor,
+) -> (
+    Vec<(SecureField, SecureField, SecureField)>,
+    Vec<SecureField>,
+) {
+    let n = config.n_global;
+    let one = SecureField::from(M31::from(1));
+
+    let global_points: Vec<Vec<SecureField>> =
+        claims.iter().map(|c| global_point(c, config)).collect();
+
+    let mut challenge_point = Vec::with_capacity(n);
+    let mut round_polys = Vec::with_capacity(n);
+    let mut eq_prefix: Vec<SecureField> = vec![one; claims.len()];
+
+    for round in 0..n {
+        let (s0, s1, s2) = eval_round_3way_gpu(
+            round,
+            claims,
+            source,
+            claim_n_vars,
+            config,
+            betas,
+            &global_points,
+            &eq_prefix,
+            &challenge_point,
+            executor,
+        );
+
+        // Degree-2 polynomial through (0, s0), (1, s1), (2, s2)
+        let two = SecureField::from(M31::from(2));
+        let c0 = s0;
+        let two_inv = two.inverse();
+        let c2 = (s0 - two * s1 + s2) * two_inv;
+        let c1 = s1 - s0 - c2;
+
+        channel.mix_poly_coeffs(c0, c1, c2);
+        round_polys.push((c0, c1, c2));
+
+        let r = channel.draw_qm31();
+        challenge_point.push(r);
+
+        for (i, gp) in global_points.iter().enumerate() {
+            let g_val = gp[round];
+            eq_prefix[i] = eq_prefix[i] * (r * g_val + (one - r) * (one - g_val));
+        }
+    }
+
+    (round_polys, challenge_point)
+}
+
 /// Build the virtual MLE u32 array slot-by-slot from a streaming source.
 ///
 /// Each matrix u32 MLE is loaded, copied into its slot, and then dropped.
@@ -1006,9 +1387,9 @@ fn build_virtual_mle_streaming(
 /// on-demand from a [`WeightSource`] instead of requiring all MLEs in memory.
 /// Peak MLE memory drops from ~640 GB (all matrices) to ~4 GB (largest single matrix).
 ///
-/// The sumcheck loads each MLE 3× per round (t=0,1,2) across all claim evaluations,
-/// then drops it. The final virtual MLE u32 is still fully materialized for the
-/// GPU MLE opening proof.
+/// The sumcheck uses GPU-accelerated 3-way batched evaluation: each weight MLE
+/// is uploaded to GPU once per round and folded to 3 eval points (t=0,1,2)
+/// via prefix-fold + clone-fork, reducing upload cost by 3×.
 #[cfg(feature = "cuda-runtime")]
 pub fn prove_aggregated_binding_streaming(
     claims: &[AggregatedWeightClaim],
@@ -1028,13 +1409,31 @@ pub fn prove_aggregated_binding_streaming(
     // 2. Draw β weights
     let betas = draw_beta_weights(channel, claims.len());
 
-    // 3. Streaming mismatch sumcheck
-    let (round_polys, challenge_point) =
-        mismatch_sumcheck_streaming(claims, source, &claim_n_vars, &config, &betas, channel);
+    // 3. GPU-accelerated streaming mismatch sumcheck
+    let (round_polys, challenge_point) = match GpuSumcheckExecutor::cached() {
+        Ok(executor) => {
+            eprintln!("[GPU] Using GPU-accelerated aggregated binding sumcheck");
+            mismatch_sumcheck_streaming_gpu(
+                claims, source, &claim_n_vars, &config, &betas, channel, &executor,
+            )
+        }
+        Err(e) => {
+            eprintln!("[GPU] Executor init failed ({e:?}), falling back to CPU sumcheck");
+            mismatch_sumcheck_streaming(
+                claims, source, &claim_n_vars, &config, &betas, channel,
+            )
+        }
+    };
 
-    // 4. Oracle eval at challenge point (one more streaming eval)
-    let oracle_eval =
-        eval_unified_oracle_streaming(&challenge_point, source, &claim_n_vars, &config);
+    // 4. Oracle eval at challenge point (GPU-accelerated single eval)
+    let oracle_eval = match GpuSumcheckExecutor::cached() {
+        Ok(executor) => eval_unified_oracle_streaming_gpu(
+            &challenge_point, source, &claim_n_vars, &config, &executor,
+        ),
+        Err(_) => eval_unified_oracle_streaming(
+            &challenge_point, source, &claim_n_vars, &config,
+        ),
+    };
     channel.mix_felts(&[oracle_eval]);
 
     // 5. Build virtual MLE u32 sequentially and prove opening
@@ -1954,5 +2353,117 @@ mod tests {
             let got = compute_selector_weight(matrix_idx, &selector, &config);
             assert_eq!(got, expected, "selector weight mismatch at index {matrix_idx}");
         }
+    }
+
+    #[test]
+    #[cfg(feature = "cuda-runtime")]
+    fn test_gpu_evaluate_mle_at_matches_cpu() {
+        use crate::gpu_sumcheck::{secure_field_to_u32s, GpuSumcheckExecutor};
+
+        let executor = match GpuSumcheckExecutor::cached() {
+            Ok(e) => e,
+            Err(_) => {
+                eprintln!("Skipping GPU test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Test across MLE sizes from 2^10 to 2^20
+        for n_vars in [10, 12, 14, 16, 18, 20] {
+            let mle = random_mle(n_vars);
+            let point: Vec<SecureField> = (0..n_vars).map(|_| random_qm31()).collect();
+
+            // CPU evaluation
+            let cpu_result = evaluate_mle_at(&mle, &point);
+
+            // GPU evaluation (u32 path)
+            let mle_u32: Vec<u32> = mle
+                .iter()
+                .flat_map(|sf| secure_field_to_u32s(*sf))
+                .collect();
+            let gpu_result = executor
+                .evaluate_mle_at_gpu_u32(&mle_u32, &point)
+                .expect("GPU eval failed");
+
+            assert_eq!(
+                cpu_result, gpu_result,
+                "CPU/GPU mismatch at n_vars={n_vars}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "cuda-runtime")]
+    fn test_gpu_3way_oracle_matches_cpu() {
+        use crate::gpu_sumcheck::GpuSumcheckExecutor;
+
+        let executor = match GpuSumcheckExecutor::cached() {
+            Ok(e) => e,
+            Err(_) => {
+                eprintln!("Skipping GPU test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Setup: 4 matrices of varying sizes
+        let mles: Vec<Vec<SecureField>> = vec![
+            random_mle(10),
+            random_mle(12),
+            random_mle(14),
+            random_mle(10),
+        ];
+        let claims: Vec<AggregatedWeightClaim> = mles
+            .iter()
+            .enumerate()
+            .map(|(i, mle)| make_claim(i, mle))
+            .collect();
+        let config = AggregatedBindingConfig::from_claims(&claims);
+        let claim_n_vars: Vec<usize> = claims.iter().map(|c| c.local_n_vars).collect();
+
+        let mle_refs: Vec<&[SecureField]> = mles.iter().map(|m| m.as_slice()).collect();
+        let mle_u32s: Vec<Vec<u32>> = mles
+            .iter()
+            .map(|m| {
+                use crate::gpu_sumcheck::secure_field_to_u32s;
+                m.iter().flat_map(|sf| secure_field_to_u32s(*sf)).collect()
+            })
+            .collect();
+        let mle_u32_refs: Vec<&[u32]> = mle_u32s.iter().map(|m| m.as_slice()).collect();
+        let source = SliceWeightSource {
+            mles: &mle_refs,
+            mles_u32: &mle_u32_refs,
+        };
+
+        // Build a random global-length eval point and 3 variants differing at position 5
+        let n = config.n_global;
+        let base_pt: Vec<SecureField> = (0..n).map(|_| random_qm31()).collect();
+        let one = SecureField::from(M31::from(1));
+        let two = SecureField::from(M31::from(2));
+
+        let branch_pos = config.selector_bits + 2; // inside local region
+        let mut pt0 = base_pt.clone();
+        let mut pt1 = base_pt.clone();
+        let mut pt2 = base_pt.clone();
+        pt0[branch_pos] = SecureField::zero();
+        pt1[branch_pos] = one;
+        pt2[branch_pos] = two;
+
+        // CPU reference
+        let cpu_0 = eval_unified_oracle_streaming(&pt0, &source, &claim_n_vars, &config);
+        let cpu_1 = eval_unified_oracle_streaming(&pt1, &source, &claim_n_vars, &config);
+        let cpu_2 = eval_unified_oracle_streaming(&pt2, &source, &claim_n_vars, &config);
+
+        // GPU 3-way
+        let gpu_results = eval_unified_oracle_3way_gpu(
+            [&pt0, &pt1, &pt2],
+            &source,
+            &claim_n_vars,
+            &config,
+            &executor,
+        );
+
+        assert_eq!(cpu_0, gpu_results[0], "3way mismatch at t=0");
+        assert_eq!(cpu_1, gpu_results[1], "3way mismatch at t=1");
+        assert_eq!(cpu_2, gpu_results[2], "3way mismatch at t=2");
     }
 }

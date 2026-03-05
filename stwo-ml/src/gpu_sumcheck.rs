@@ -1899,6 +1899,58 @@ impl GpuSumcheckExecutor {
         session.n_points
     }
 
+    /// Evaluate an MLE at a point on GPU from raw u32 AoS data.
+    ///
+    /// Uploads the MLE once, folds all variables sequentially, reads the scalar.
+    /// This is the u32 counterpart of [`evaluate_mle_gpu`].
+    pub fn evaluate_mle_at_gpu_u32(
+        &self,
+        mle_u32: &[u32],
+        point: &[SecureField],
+    ) -> Result<SecureField, CudaFftError> {
+        let mut session = self.start_mle_fold_session_u32(mle_u32)?;
+        for &challenge in point.iter() {
+            self.mle_fold_session_step_in_place(&mut session, challenge)?;
+        }
+        let raw = self.mle_fold_session_read_qm31_at(&session, 0)?;
+        Ok(u32s_to_secure_field(&raw))
+    }
+
+    /// Clone a fold session's GPU buffer, creating an independent copy for forking.
+    ///
+    /// Used by the 3-way batched evaluation to fold a shared prefix once, then
+    /// fork 3 copies for the diverging variable.
+    pub fn clone_fold_session(
+        &self,
+        session: &GpuMleFoldSession,
+    ) -> Result<GpuMleFoldSession, CudaFftError> {
+        let n_u32 = session.n_points * 4;
+        let mut d_clone = unsafe { self.device.alloc::<u32>(n_u32) }
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("clone_fold_session alloc: {:?}", e)))?;
+        self.device
+            .dtod_copy(&session.d_current, &mut d_clone)
+            .map_err(|e| CudaFftError::MemoryTransfer(format!("clone_fold_session copy: {:?}", e)))?;
+        Ok(GpuMleFoldSession {
+            d_current: d_clone,
+            n_points: session.n_points,
+        })
+    }
+
+    /// Fold remaining suffix variables and read the final scalar result.
+    ///
+    /// Convenience wrapper: folds each variable in `suffix`, then reads QM31 at index 0.
+    pub fn finish_fold_and_read(
+        &self,
+        session: &mut GpuMleFoldSession,
+        suffix: &[SecureField],
+    ) -> Result<SecureField, CudaFftError> {
+        for &challenge in suffix.iter() {
+            self.mle_fold_session_step_in_place(session, challenge)?;
+        }
+        let raw = self.mle_fold_session_read_qm31_at(session, 0)?;
+        Ok(u32s_to_secure_field(&raw))
+    }
+
     /// GPU fused row-restrict: uploads M31 matrix + Lagrange basis, returns QM31 on GPU.
     ///
     /// Equivalent to CPU `restrict_rows_unpadded(matrix, challenges, k_padded)` but
