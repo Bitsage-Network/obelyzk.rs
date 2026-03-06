@@ -21,8 +21,10 @@ use crate::field::{QM31, qm31_add, qm31_sub, qm31_mul, qm31_eq, pack_qm31_to_fel
 use crate::channel::{PoseidonChannel, channel_mix_felt, channel_draw_query_indices};
 use crate::types::MleOpeningProof;
 
-/// Number of spot-check queries for the MLE folding protocol.
-/// Matches Rust's MLE_N_QUERIES = 5.
+/// Default number of spot-check queries for the MLE folding protocol.
+/// Matches Rust's MLE_N_QUERIES = 5 default. The verifier now reads
+/// the actual query count from the proof (minimum 2 for security),
+/// allowing the prover to adjust for calldata size constraints.
 pub const MLE_NUM_QUERIES: u32 = 5;
 
 /// Verify a Poseidon Merkle authentication path.
@@ -69,7 +71,7 @@ fn next_query_pair_index(current_idx: u32, layer_mid: u32) -> u32 {
 /// 3. Lo/hi split folding (not consecutive pairs)
 /// 4. Raw packed QM31 leaves (no poseidon_hash(leaf, 0))
 /// 5. Forward folding order (first variable first)
-/// 6. MLE_NUM_QUERIES = 14
+/// 6. Query count read from proof (minimum 2, capped at half_n)
 pub fn verify_mle_opening(
     commitment_root: felt252,
     proof: @MleOpeningProof,
@@ -97,19 +99,22 @@ pub fn verify_mle_opening(
         return proof.queries.len() == 0;
     }
 
-    // Draw query indices
+    // Draw query indices.
+    // The number of queries is determined by the proof (not hardcoded).
+    // This allows the prover to use fewer queries to keep calldata under
+    // the Starknet sequencer limit while still providing adequate soundness.
+    // Minimum 2 queries enforced for security.
     let half_n: u32 = pow2(n_rounds - 1);
-    let n_queries: u32 = if MLE_NUM_QUERIES < half_n {
-        MLE_NUM_QUERIES
-    } else {
-        half_n
-    };
-    let query_indices = channel_draw_query_indices(ref ch, half_n, n_queries);
-
     let queries_span = proof.queries.span();
-    if queries_span.len() != n_queries {
+    let n_queries: u32 = queries_span.len();
+    if n_queries < 2 {
         return false;
     }
+    // Cap at half_n (can't have more queries than index space)
+    if n_queries > half_n {
+        return false;
+    }
+    let query_indices = channel_draw_query_indices(ref ch, half_n, n_queries);
 
     // Verify each query chain
     let mut q_idx: u32 = 0;
