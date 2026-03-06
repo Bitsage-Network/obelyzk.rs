@@ -37,6 +37,7 @@
 \usepackage{fancyhdr}
 \usepackage{titlesec}
 \usepackage{tcolorbox}
+\usepackage{pifont}
 
 % ---------- colours ----------
 \definecolor{starkblue}{HTML}{2563eb}
@@ -111,8 +112,10 @@
     privacy-preserving decentralized finance on Starknet.
     The system comprises three components:
     (1)~a GKR-based interactive proof protocol~\cite{goldwasser2015delegating}
-    for models up to 14~billion parameters, achieving 3.04\,s per-layer
-    proving on NVIDIA H100 GPUs;
+    that cryptographically verifies the linear arithmetic trace
+    (matrix multiplications and weight bindings) of models up to
+    14~billion parameters, achieving 3.04\,s per-layer proving on
+    NVIDIA H100 GPUs;
     (2)~a privacy protocol built on Poseidon2-M31~\cite{grassi2023poseidon2}
     with six DeFi mechanisms and Association Set Provider
     (ASP) compliance~\cite{buterin2023privacy}; and
@@ -185,26 +188,28 @@ This combination enables:
 
 Alongside ZKML verification, we deploy a privacy protocol native to the
 $\M$ field providing six DeFi mechanisms with ASP
-compliance~\cite{buterin2023privacy}, the broadest compliant privacy
-stack on any L2.
+compliance~\cite{buterin2023privacy}.
 
 \subsection{Contributions}
 
 \begin{enumerate}[nosep,leftmargin=1.4em]
-  \item \textbf{First production GKR verifier in Cairo} ---
-        $\sim$14\,K lines implementing the complete field tower,
-        Fiat-Shamir channel, sumcheck, MLE opening, streaming
-        verification, and aggregated weight binding (contract v31,
-        class hash \texttt{0x6a6b\ldots5439}).
-  \item \textbf{LLM-scale proving} --- verified inference of Qwen3-14B
-        (14\,B parameters, 40 transformer layers) at 3.04\,s/layer on GPU,
-        producing proofs consumable by the on-chain verifier.
-  \item \textbf{M31-native privacy protocol} --- six mechanisms using
-        Poseidon2-M31 throughout (no felt252 emulation overhead), with
-        ASP compliance for regulatory acceptability.
-  \item \textbf{Aggregated weight binding} --- a novel protocol reducing
+  \item \textbf{Cairo-native GKR verifier} ---
+        to our knowledge, the first deployed Cairo-based GKR verifier
+        for LLM-scale inference, comprising $\sim$14\,K lines implementing
+        the complete field tower, Fiat-Shamir channel, sumcheck, MLE
+        opening, streaming verification, and aggregated weight binding
+        (contract v31, class hash \texttt{0x6a6b\ldots5439}).
+  \item \textbf{LLM-scale proving} --- verified linear arithmetic trace
+        of Qwen3-14B (14\,B parameters, 40 transformer layers) at
+        3.04\,s/layer on GPU.
+        Nonlinear activations are specified but not yet enforced
+        in the deployed path (\Cref{rem:logup-status}).
+  \item \textbf{Aggregated weight binding} --- a protocol reducing
         weight verification calldata by $\approx$28$\times$ via random
         linear combination over a global oracle MLE.
+  \item \textbf{M31-native privacy layer} --- six DeFi privacy mechanisms
+        using Poseidon2-M31 throughout, with ASP compliance,
+        built atop the core ZKML verification infrastructure.
   \item \textbf{117\,K+ lines of Rust} (\texttt{stwo-ml} crate)
         with 20\,K+ CUDA kernel lines,
         1{,}029+ library tests, 10 end-to-end audit tests, and 95
@@ -227,6 +232,41 @@ stack on any L2.
 \Cref{sec:bench} reports benchmarks.
 \Cref{sec:related} surveys related work.
 \Cref{sec:conclusion} concludes.
+
+\subsection{Implementation Status}
+
+\Cref{tab:status} summarizes the maturity of each component.
+The core contribution --- linear arithmetic verification via
+GKR sumcheck with aggregated weight binding --- is fully deployed
+and benchmarked.
+Nonlinear activation enforcement is specified and implemented
+but not yet integrated into the deployed GKR path.
+
+\begin{table}[t]
+  \centering\scriptsize
+  \caption{Implementation status matrix.
+           \ding{51} = yes, \ding{55} = no, $\circ$ = partial.}
+  \label{tab:status}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{Component} & \textbf{Spec} & \textbf{Impl} & \textbf{Depl} & \textbf{Bench} \\
+    \midrule
+    MatMul sumcheck     & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+    Aggregated binding  & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+    Streaming verifier  & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+    MLE opening         & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+    Weight cache        & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+    Activation LogUp    & \ding{51} & \ding{51} & \ding{55} & \ding{55} \\
+    Privacy circuits    & \ding{51} & \ding{51} & \ding{51} & $\circ$ \\
+    Batch proving       & \ding{51} & \ding{51} & \ding{51} & $\circ$ \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{2pt}
+  {\scriptsize Spec = protocol specified; Impl = code implemented;
+   Depl = deployed on Starknet Sepolia; Bench = included in
+   reported benchmarks.}
+\end{table}
 
 
 % =========================================================================
@@ -638,15 +678,37 @@ $v_{\text{masked}} = \M(\text{raw.0}\;\&\;((1\ll 16)-1))$
 reduces outputs to the 16-bit table range while preserving
 the lookup argument's soundness.
 
-\begin{remark}[Activation LogUp status]
-  Activation LogUp is currently \emph{skipped} in the GKR mode for
-  all three prover backends (CPU, GPU, SIMD) because M31 matmul outputs
-  may exceed the activation table range.
-  The verifier accepts \texttt{logup\_proof: None} and only mixes
-  the input evaluation.
-  This is sound because the GKR claim chain still binds each layer's
-  output to its input through the sumcheck.
+\begin{remark}[Deployment status]\label{rem:logup-status}
+  Activation LogUp is \textbf{specified and implemented} but
+  \textbf{not enforced} in the current deployed GKR path.
+  In the deployed verifier, the prover supplies
+  \texttt{logup\_proof: None} and the verifier mixes only the
+  input MLE evaluation, effectively treating activation functions
+  as unconstrained witnesses.
 \end{remark}
+
+\textbf{Implications for verified computation.}
+The deployed verifier cryptographically enforces only the
+\emph{linear arithmetic trace}: matrix multiplications, additions,
+and scaling operations are bound through sumcheck reductions.
+Nonlinear activation functions (ReLU, GELU, Softmax, LayerNorm)
+are executed by the prover but not independently constrained.
+This means the verifier confirms that:
+\begin{enumerate}[nosep,leftmargin=1.4em]
+  \item the claimed output is consistent with the committed weights
+        through all linear layers;
+  \item the weight commitments match via aggregated binding;
+  \item the Fiat-Shamir transcript is honestly constructed.
+\end{enumerate}
+It does \emph{not} independently verify that the prover applied
+the correct nonlinear function between linear layers.
+\Cref{sec:security} provides a precise soundness statement
+for this partially-constrained verification mode.
+Enforcing activation LogUp in the GKR path is active
+development work; the primary obstacle is that M31 matmul
+outputs may exceed the precomputed activation table range
+($2^{16}$--$2^{20}$ entries), requiring either range reduction
+or expanded tables.
 
 
 % =========================================================================
@@ -1083,47 +1145,88 @@ from packed felts without unpacking.
 \section{Security Analysis}\label{sec:security}
 % =========================================================================
 
-\subsection{GKR Soundness}
+\subsection{Threat Model}
 
-\begin{theorem}[End-to-end GKR soundness]\label{thm:gkr-sound}
-  For Qwen3-14B with $L=40$ layers, each with $k\le 13$ sumcheck
-  rounds of degree $d=2$, over $\QM$ ($|\QM|\approx 2^{124}$),
-  the probability of a forged proof being accepted is:
-  \begin{equation}\label{eq:soundness}
-    \Pr[\text{forge}]
-    \le L\cdot\frac{k\,d}{|\QM|}
-    = \frac{40\cdot 13\cdot 2}{2^{124}}
-    \approx 2^{-114}.
-  \end{equation}
+We consider a malicious prover $\calP^*$ attempting to convince
+the on-chain verifier $\calV$ to accept an incorrect inference
+result.
+The following assumptions hold:
+\begin{itemize}[nosep,leftmargin=1.2em]
+  \item The Fiat-Shamir hash (Poseidon252) is modeled as a random
+        oracle binding transcript challenges to the full history.
+  \item The prover has unbounded computation but must produce
+        a valid transcript accepted by the Cairo verifier contract.
+  \item Starknet L2 provides data availability and transaction
+        ordering guarantees.
+  \item The relayer in the privacy pool is semi-trusted for liveness
+        (gating period) but not for correctness; after 120~blocks,
+        pool operations become permissionless.
+\end{itemize}
+
+\subsection{Deployed Verification Statement}
+
+The deployed verifier (v31) cryptographically enforces the following:
+
+\begin{theorem}[Deployed verification]\label{thm:deployed}
+  Given committed input $x$, output $y$, and weight matrices
+  $\{W_i\}_{i=1}^M$ with Poseidon2-M31 Merkle roots, the
+  verifier accepts if and only if:
+  \begin{enumerate}[nosep,leftmargin=1.4em]
+    \item each linear layer's sumcheck reduction is consistent
+          (matmul, addition, scaling);
+    \item the aggregated weight binding confirms all weight MLE
+          evaluations against committed roots;
+    \item the MLE opening spot-checks pass at each fold;
+    \item the Fiat-Shamir transcript is honestly constructed.
+  \end{enumerate}
+  \textbf{Not enforced:} nonlinear activation functions between
+  linear layers (\Cref{rem:logup-status}).
+  The prover supplies activations as unconstrained witnesses.
 \end{theorem}
 
-\begin{proof}
-  By \Cref{thm:sumcheck}, each layer's sumcheck has soundness
-  error at most $kd/|\QM|$.
-  The Fiat-Shamir transformation binds each layer's challenges to
-  the full transcript, so a union bound over $L$ layers gives
-  $L\cdot kd/|\QM|$.
-  With $L=40$, $k=13$, $d=2$:
-  $40\cdot 26/2^{124} \approx 1040/2^{124} < 2^{11}/2^{124} = 2^{-113}$.
-\end{proof}
+\subsection{Soundness of Linear Arithmetic Verification}
+
+\begin{theorem}[Sumcheck soundness per layer]\label{thm:gkr-sound}
+  For a matmul layer with $k\le 13$ sumcheck rounds of degree
+  $d=2$, over $\QM$ ($|\QM|\approx 2^{124}$), a cheating prover
+  passes with probability at most $kd/|\QM| \le 26/2^{124}
+  \approx 2^{-119}$.
+\end{theorem}
+
+\begin{corollary}[End-to-end for 40 layers]
+  By union bound over $L=40$ layers:
+  $\Pr[\text{forge}] \le L\cdot kd/|\QM|
+  = 40\cdot 26/2^{124} < 2^{-113}$.
+\end{corollary}
 
 \textbf{MLE opening soundness.}
-With $q\in\{3,4,5\}$ spot-check queries per fold (default $q=5$),
-over $n=13$ folds:
+With $q=5$ spot-check queries per fold (runtime-configurable,
+default in Cairo), over $n=13$ folds:
 \begin{equation}\label{eq:mle-sound}
-  \Pr[\text{forged opening}] \le \left(\tfrac{1}{2}\right)^{q\cdot n}
-  = 2^{-5\cdot 13} = 2^{-65}.
+  \Pr[\text{forged opening}] \le (1/2)^{q\cdot n}
+  = 2^{-65}.
 \end{equation}
-The Fiat-Shamir binding prevents adaptive query-position selection,
-so the overall MLE opening soundness is $2^{-65}$.
+This is the weakest component.
+Increasing to $q=10$ yields $2^{-130}$; this is a
+deployment parameter, not a protocol limitation.
 
 \textbf{Aggregated weight binding.}
 By \Cref{prop:binding}, soundness is $\approx 2^{-117}$ for 160 matrices.
 
 \textbf{Combined soundness.}
-The minimum of all components: $\min(2^{-114}, 2^{-65}, 2^{-117})
-= 2^{-65}$, dominated by the MLE opening queries.
-Increasing to $q=10$ queries would improve to $2^{-130}$.
+$\min(2^{-113}, 2^{-65}, 2^{-117}) = 2^{-65}$, dominated by
+MLE opening queries at the current default $q=5$.
+
+\textbf{Limitation: unconstrained activations.}
+Because activation LogUp is not enforced in the deployed path,
+a malicious prover could substitute arbitrary values for
+nonlinear activation outputs while maintaining valid sumcheck
+reductions for all linear layers.
+The practical impact depends on the application: for weight
+binding verification (confirming a specific model was used),
+the linear trace provides strong guarantees; for full
+inference correctness including nonlinearities, activation
+LogUp enforcement is required.
 
 \subsection{Privacy Security}
 
@@ -1150,9 +1253,29 @@ Increasing to $q=10$ queries would improve to $2^{-130}$.
 \section{Benchmarks}\label{sec:bench}
 % =========================================================================
 
-\subsection{Inference Proving}
+\subsection{Experimental Setup}
 
-All benchmarks use NVIDIA H100 GPUs.
+\begin{table}[t]
+  \centering\small
+  \caption{Benchmark configuration.}
+  \label{tab:setup}
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    GPU              & NVIDIA H100 80\,GB SXM \\
+    CPU              & AMD EPYC 7763 (128 cores) \\
+    Model            & Qwen3-14B (HuggingFace checkpoint) \\
+    Parameters       & 14.2\,B (40 transformer layers) \\
+    Batch size       & 1 \\
+    Sequence length  & 1 token (single forward pass) \\
+    Precision        & M31 quantized (16-bit fixed-point) \\
+    Weight cache     & Warm (roots pre-computed) \\
+    Runs             & 5 per measurement; median reported \\
+    Proof scope      & Linear arithmetic trace only \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Inference Proving}
 
 \begin{table}[t]
   \centering\small
@@ -1174,9 +1297,12 @@ All benchmarks use NVIDIA H100 GPUs.
   \end{tabular}
 \end{table}
 
-\textbf{40-layer extrapolation:} $\sim$122\,s total.
-Weight cache hit reduces subsequent proofs from $\sim$500\,s to $<$1\,ms
-for commitment computation.
+\textbf{40-layer extrapolation:} $40\times 3.04 \approx 122$\,s
+(extrapolated; not a measured end-to-end run).
+Full end-to-end timing including model loading and serialization
+is not yet benchmarked.
+Weight cache hit reduces subsequent weight commitment computation
+from $\sim$500\,s to $<$1\,ms.
 
 % ---------- pgfplots: Proving Time Breakdown ----------
 \begin{figure}[t]
@@ -1274,8 +1400,9 @@ GPT-2 demos.
 zkLLM~\cite{sun2024zkllm} (ACM CCS 2024) introduces \emph{tlookup}
 for non-arithmetic tensor ops, proving up to 13\,B parameters in
 1--15 minutes with $<$200\,KB proofs.
-ObelyZK is the first with a \emph{deployed} on-chain verifier at
-14\,B scale with sub-4\,s per-layer proving.
+To our knowledge, ObelyZK is the first system with a publicly
+deployed on-chain verifier on Starknet for 14\,B-scale ZKML
+inference with sub-4\,s per-layer proving.
 
 \textbf{Privacy DeFi.}
 Railgun~\cite{railgun2024} provides shielded transfers on Ethereum
@@ -1283,8 +1410,9 @@ with BN254 Groth16.
 0xbow~\cite{0xbow2024} is the canonical Privacy Pools/ASP implementation.
 Penumbra~\cite{penumbra2024} runs a shielded DEX on its own chain.
 Aztec~\cite{aztec2024} builds a general-purpose privacy L2.
-ObelyZK differentiates with (1)~six mechanisms vs.\ 1--2,
-(2)~M31-native proving, and (3)~integrated ASP compliance.
+ObelyZK differentiates with (1)~six mechanisms vs.\ typically
+1--2, (2)~M31-native proving without felt252 emulation, and
+(3)~integrated ASP compliance on Starknet.
 
 \textbf{Interactive proofs.}
 The GKR protocol~\cite{goldwasser2015delegating} was made practical
