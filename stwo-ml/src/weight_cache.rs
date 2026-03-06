@@ -1,12 +1,54 @@
-//! Weight commitment cache for model-static matrices.
+//! # Weight Commitment Cache
 //!
-//! Weight matrices are fixed per model — their restricted MLEs and Poseidon
-//! commitments are deterministic given the same padded dimensions. This module
-//! caches those results so they're computed once and reused across inferences.
+//! Caches Poseidon Merkle roots and restricted-MLE results for model weight matrices.
+//! Weight matrices are immutable per model — their commitments are deterministic
+//! given the same padded dimensions.
 //!
-//! For Qwen3-14B (160 matmuls): skips 160 × `restrict_cols` GPU dispatches +
+//! ## Performance Impact
+//!
+//! - **First inference**: full computation (~500s for Qwen3-14B, 160 matmuls)
+//! - **Subsequent inferences**: cache hit (<1ms) — skips GPU restrict + Merkle
+//! - **Estimated speedup**: 30-50% of total proving time
+//!
+//! For Qwen3-14B: skips 160 × `restrict_cols` GPU dispatches +
 //! 160 × `commit_mle_root_only` Merkle root computations per inference.
-//! Estimated 30-50% per-inference speedup.
+//!
+//! ## Binary Format (v4)
+//!
+//! ```text
+//! [SWCF magic 4B][version u32][model_id len + UTF-8][fingerprint 32B]
+//! [entry_count u32]
+//! [CacheKey: node_id, m_pad, k_pad, n_pad]
+//! [CachedWeight: f_b, b_commitment, r_j, root, tree_path]
+//! ```
+//!
+//! File extension: `.stwo_weight_cache.swcf`
+//!
+//! ## Content Fingerprinting
+//!
+//! 8 M31 samples per matrix, Poseidon-hashed. Detects fine-tuning / weight swaps.
+//! On load, the fingerprint is verified against the current weights — mismatches
+//! invalidate the entire cache.
+//!
+//! ## Integration
+//!
+//! ```rust,no_run
+//! # use stwo_ml::weight_cache::{shared_cache_for_model, save_shared_cache};
+//! let cache = shared_cache_for_model("/path/to/model");
+//! // ... pass cache to prove_model_pure_gkr_auto_with_cache ...
+//! save_shared_cache(&cache, "/path/to/model");
+//! ```
+//!
+//! ## Pre-warming
+//!
+//! `prewarm_weight_roots()` runs in a background thread during forward pass.
+//! GPU variant (`prewarm_weight_roots_gpu_exclusive`) uses pipelined double-buffering.
+//!
+//! ## Multi-GPU
+//!
+//! With `multi-gpu` feature, `apply_aggregated_oracle_sumcheck()` partitions
+//! weight commitments across GPUs via greedy bin-packing. Each GPU computes
+//! its partition's Merkle roots independently, and results are merged.
 
 use std::collections::HashMap;
 use std::io::{self, Read as IoRead, Write as IoWrite};
@@ -524,7 +566,7 @@ pub fn save_shared_cache(
 
 /// Compute a 32-byte fingerprint of weight matrices by sampling elements.
 ///
-/// Samples [`FINGERPRINT_SAMPLES_PER_MATRIX`] elements from each weight matrix
+/// Samples `FINGERPRINT_SAMPLES_PER_MATRIX` (8) elements from each weight matrix
 /// at deterministic positions (spread evenly across the data). The sampled
 /// values are mixed into a running hash using FNV-1a-like mixing.
 ///

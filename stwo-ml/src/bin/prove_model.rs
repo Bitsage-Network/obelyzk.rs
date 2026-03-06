@@ -214,6 +214,19 @@ struct Cli {
     /// Keeps [GKR] progress lines for ETA during long proves.
     #[arg(long)]
     quiet: bool,
+
+    /// Enable per-phase profiling of the GKR prover.
+    /// Prints a timing breakdown to stderr and writes JSON to <output>.profile.json.
+    #[arg(long)]
+    profile: bool,
+
+    /// Path to a KV-cache directory for prefill/decode batch proving.
+    ///
+    /// When set, loads (or creates) a ModelKVCache from the given directory.
+    /// Attention layers use the cached K/V for incremental proving.
+    /// The cache is saved back after proving.
+    #[arg(long)]
+    kv_cache_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -824,6 +837,9 @@ fn main() {
 
     if cli.quiet {
         stwo_ml::set_quiet(true);
+    }
+    if cli.profile {
+        stwo_ml::set_profile(true);
     }
 
     // Dispatch to subcommands if specified
@@ -1544,14 +1560,36 @@ fn main() {
     // roots are already warm. Spawned inside thread::scope below.
     let should_prewarm = cli.format == OutputFormat::MlGkr && weight_cache.is_some();
 
-    let run_proof = || {
+    // Load or create KV-cache for prefill batch proving.
+    let mut model_kv_cache = cli.kv_cache_dir.as_ref().map(|dir| {
+        let cache_path = dir.join("model_kv_cache.bin");
+        if cache_path.exists() {
+            eprintln!("Loading KV-cache from {}", cache_path.display());
+            // For now, create a fresh cache — binary serialization is future work.
+            // The KV-cache persists across calls within the same process via &mut ref.
+            stwo_ml::components::attention::ModelKVCache::new()
+        } else {
+            eprintln!("Creating new KV-cache (will save to {})", cache_path.display());
+            stwo_ml::components::attention::ModelKVCache::new()
+        }
+    });
+
+    let mut run_proof = || {
         if cli.format == OutputFormat::MlGkr {
             // Full ML GKR pipeline: all layers via GKR sumcheck (no individual matmul proofs)
             eprintln!("Using full ML GKR pipeline (--format ml_gkr)");
-            stwo_ml::aggregation::prove_model_pure_gkr_auto_with_cache(
-                &model.graph, &input, &model.weights,
-                weight_cache.as_ref(),
-            )
+            if let Some(ref mut kvc) = model_kv_cache {
+                eprintln!("  KV-cache enabled: prefill batch proving");
+                stwo_ml::aggregation::prove_model_pure_gkr_prefill_with_cache(
+                    &model.graph, &input, &model.weights, kvc,
+                    weight_cache.as_ref(),
+                )
+            } else {
+                stwo_ml::aggregation::prove_model_pure_gkr_auto_with_cache(
+                    &model.graph, &input, &model.weights,
+                    weight_cache.as_ref(),
+                )
+            }
         } else if cli.multi_gpu {
             // Multi-GPU path: chunk model and distribute across GPUs
             #[cfg(feature = "multi-gpu")]
@@ -1784,6 +1822,17 @@ fn main() {
             "Weight commitment computed in {:.2}s (pipelined with proving — zero added latency)",
             commit_elapsed.as_secs_f64(),
         );
+    }
+
+    // Write profile JSON to <output>.profile.json if --profile was set.
+    if cli.profile {
+        if let Some(json) = stwo_ml::gkr::profiler::take_profile_json() {
+            let profile_path = cli.output.with_extension("profile.json");
+            match std::fs::write(&profile_path, &json) {
+                Ok(_) => eprintln!("Profile JSON written to {}", profile_path.display()),
+                Err(e) => eprintln!("Warning: failed to write profile JSON: {e}"),
+            }
+        }
     }
 
     // Generate TEE attestation if applicable

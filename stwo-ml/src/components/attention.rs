@@ -246,6 +246,26 @@ pub struct AttentionIntermediates {
 }
 
 // ===== KV-Cache for Incremental Decoding =====
+//
+// Architecture overview:
+//
+// The KV-cache enables two proving modes:
+// 1. **Prefill** (seq_len > 1): Process a batch of tokens, populate the cache.
+// 2. **Decode** (seq_len = 1): Generate one token, append to the cache.
+//
+// During forward pass:
+// - Q is projected from new tokens only: (new_tokens, d_model) × W_q
+// - K_new/V_new are projected from new tokens and appended to the cache
+// - Scores use Q_new × K_full^T where K_full is the entire cached K
+// - Context uses softmax × V_full where V_full is the entire cached V
+//
+// For proving, `prove_attention_cached()` verifies only the new projections.
+// The GKR prover uses `prove_model_pure_gkr_prefill()` which wires the cache
+// through the forward pass loop in `prove_model_pure_gkr_inner()`.
+//
+// Multi-layer: `ModelKVCache` wraps a HashMap<layer_id, KVCache>, one per
+// attention layer. `get_or_create()` lazily initializes caches as layers
+// are encountered during the forward pass.
 
 /// Per-layer KV cache storing accumulated key/value projections.
 ///
@@ -1042,6 +1062,141 @@ pub fn prove_attention_onchain(
         })?;
 
     // Batched softmax exp STARK proof (all heads in one proof, Blake2s channel)
+    let table = PrecomputedTable::build_parallel(
+        softmax_exp,
+        ActivationType::Softmax.production_log_size(),
+    );
+    let pcs_config = PcsConfig::default();
+    let (component, softmax_exp_proof) =
+        prove_activation_layer::<SimdBackend, Blake2sMerkleChannel>(
+            &all_softmax_inputs,
+            &all_softmax_outputs,
+            &table,
+            pcs_config,
+        )
+        .map_err(|e| AttentionError::Activation(format!("softmax exp STARK: {e}")))?;
+    let softmax_log_size = table.log_size.max(4);
+
+    Ok(AttentionProofOnChain {
+        q_proof,
+        k_proof,
+        v_proof,
+        score_proofs,
+        attn_v_proofs,
+        output_proof,
+        softmax_exp_proof,
+        softmax_claimed_sum: component.claimed_sum(),
+        softmax_log_size,
+        intermediates,
+    })
+}
+
+/// Prove multi-head attention with KV-cache support for prefill batch proving.
+///
+/// Uses `attention_forward_cached()` to run the forward pass with KV-cache,
+/// then proves each matmul and the softmax STARK exactly like `prove_attention_onchain()`.
+///
+/// Key differences from `prove_attention_onchain()`:
+/// - Takes `&mut KVCache` — cache is updated with new K/V projections.
+/// - Q/K/V projections prove only new token rows (not full cached sequence).
+/// - Score matmul: Q_new × K_full^T → (new_tokens, total_len) using full cached K.
+/// - Context: softmax × V_full → (new_tokens, d_k) using full cached V.
+///
+/// This enables prefill batch proving (seq_len > 1) and incremental decode proving.
+pub fn prove_attention_cached(
+    input: &M31Matrix,
+    weights: &AttentionWeights,
+    config: &MultiHeadAttentionConfig,
+    cache: &mut KVCache,
+    causal: bool,
+) -> Result<AttentionProofOnChain, AttentionError> {
+    let intermediates = attention_forward_cached(input, weights, config, cache, causal);
+
+    // Q/K/V projection proofs verify only the NEW token projections:
+    //   input (new_tokens × d_model) × W_k = k_new (new_tokens × d_k_total)
+    // intermediates.k/v contain the FULL cached K/V (total_len rows), which we
+    // use for score/context matmuls but NOT for projection proofs.
+    let k_new = matmul_m31_auto(&pad_to_pow2(input), &pad_to_pow2(&weights.w_k));
+    let v_new = matmul_m31_auto(&pad_to_pow2(input), &pad_to_pow2(&weights.w_v));
+
+    let input_p = pad_to_pow2(input);
+    let wq_p = pad_to_pow2(&weights.w_q);
+    let wk_p = pad_to_pow2(&weights.w_k);
+    let wv_p = pad_to_pow2(&weights.w_v);
+    let wo_p = pad_to_pow2(&weights.w_o);
+    let q_p = pad_to_pow2(&intermediates.q);
+
+    let q_proof = prove_matmul_sumcheck_onchain_auto(&input_p, &wq_p, &q_p).map_err(|e| {
+        AttentionError::MatMul {
+            stage: "Q_projection".into(),
+            source: e,
+        }
+    })?;
+    let k_proof = prove_matmul_sumcheck_onchain_auto(&input_p, &wk_p, &k_new).map_err(|e| {
+        AttentionError::MatMul {
+            stage: "K_projection".into(),
+            source: e,
+        }
+    })?;
+    let v_proof = prove_matmul_sumcheck_onchain_auto(&input_p, &wv_p, &v_new).map_err(|e| {
+        AttentionError::MatMul {
+            stage: "V_projection".into(),
+            source: e,
+        }
+    })?;
+
+    let q_heads = split_heads(&intermediates.q, config.num_heads);
+    let kv_heads_k = split_heads(&intermediates.k, config.num_kv_heads);
+    let kv_heads_v = split_heads(&intermediates.v, config.num_kv_heads);
+    let group_size = config.group_size();
+
+    let mut score_proofs = Vec::with_capacity(config.num_heads);
+    let mut attn_v_proofs = Vec::with_capacity(config.num_heads);
+    let mut all_softmax_inputs = Vec::new();
+    let mut all_softmax_outputs = Vec::new();
+
+    for h in 0..config.num_heads {
+        let kv_idx = h / group_size;
+        let k_t = transpose_m31(&kv_heads_k[kv_idx]);
+        let q_h_p = pad_to_pow2(&q_heads[h]);
+        let k_t_p = pad_to_pow2(&k_t);
+        let scores_p = matmul_m31_auto(&q_h_p, &k_t_p);
+        let sp = prove_matmul_sumcheck_onchain_auto(&q_h_p, &k_t_p, &scores_p).map_err(|e| {
+            AttentionError::MatMul {
+                stage: format!("score_head_{h}"),
+                source: e,
+            }
+        })?;
+        score_proofs.push(sp);
+
+        let score_mat = &intermediates.score_matrices[h];
+        for val in &score_mat.data {
+            all_softmax_inputs.push(*val);
+            all_softmax_outputs.push(softmax_exp(*val));
+        }
+
+        let soft_p = pad_to_pow2(&intermediates.softmax_outputs[h]);
+        let v_h_p = pad_to_pow2(&kv_heads_v[kv_idx]);
+        let context_p = matmul_m31_auto(&soft_p, &v_h_p);
+        let avp = prove_matmul_sumcheck_onchain_auto(&soft_p, &v_h_p, &context_p).map_err(|e| {
+            AttentionError::MatMul {
+                stage: format!("attn_v_head_{h}"),
+                source: e,
+            }
+        })?;
+        attn_v_proofs.push(avp);
+    }
+
+    let concat_p = pad_to_pow2(&intermediates.concat);
+    let out_p = pad_to_pow2(&intermediates.final_output);
+    let output_proof =
+        prove_matmul_sumcheck_onchain_auto(&concat_p, &wo_p, &out_p).map_err(|e| {
+            AttentionError::MatMul {
+                stage: "output_projection".into(),
+                source: e,
+            }
+        })?;
+
     let table = PrecomputedTable::build_parallel(
         softmax_exp,
         ActivationType::Softmax.production_log_size(),

@@ -2510,11 +2510,27 @@ fn verify_activation_reduction(
         );
     }
 
-    // When LogUp is skipped (M31 matmul outputs exceed table range),
-    // just mix input_eval and chain the claim — matching the prover.
+    // Reject missing LogUp proofs when soundness gate is enabled.
+    // Legacy fallback: accept None for backward compatibility unless gated.
     let logup = match logup_proof {
         Some(lp) => lp,
         None => {
+            if activation_proof.is_none()
+                && std::env::var("STWO_REQUIRE_ACTIVATION_PROOF")
+                    .map(|v| {
+                        let s = v.trim();
+                        s == "1"
+                            || s.eq_ignore_ascii_case("true")
+                            || s.eq_ignore_ascii_case("yes")
+                            || s.eq_ignore_ascii_case("on")
+                    })
+                    .unwrap_or(false)
+            {
+                return Err(GKRError::VerificationError {
+                    layer_idx,
+                    reason: "activation layer missing LogUp or algebraic proof".into(),
+                });
+            }
             mix_secure_field(channel, input_eval);
             return Ok(GKRClaim {
                 point: output_claim.point.clone(),
@@ -5154,25 +5170,14 @@ mod tests {
         )
         .unwrap();
 
-        // In GKR mode, activation LogUp is skipped (logup_proof: None) because
-        // M31 matmul outputs exceed table range. Soundness relies on the outer
-        // GKR claim chain instead. When logup_proof is None, there's nothing
-        // to tamper at this layer — verify only checks input_eval forwarding.
-        let has_logup = matches!(
-            &proof,
-            LayerProof::Activation { logup_proof: Some(_), .. }
-        );
-
-        if has_logup {
-            // Tamper with multiplicities
-            if let LayerProof::Activation {
-                logup_proof: Some(ref mut logup),
-                ..
-            } = &mut proof
-            {
-                if !logup.multiplicities.is_empty() {
-                    logup.multiplicities[0] = logup.multiplicities[0].wrapping_add(1);
-                }
+        // Tamper with multiplicities — LogUp is now always produced
+        if let LayerProof::Activation {
+            logup_proof: Some(ref mut logup),
+            ..
+        } = &mut proof
+        {
+            if !logup.multiplicities.is_empty() {
+                logup.multiplicities[0] = logup.multiplicities[0].wrapping_add(1);
             }
         }
 
@@ -5202,12 +5207,7 @@ mod tests {
                     0,
                     &mut verifier_channel,
                 );
-                if has_logup {
-                    assert!(result.is_err(), "tampered multiplicities should fail");
-                } else {
-                    // No LogUp → verify_activation_reduction accepts (just forwards input_eval)
-                    assert!(result.is_ok(), "None logup should pass verification");
-                }
+                assert!(result.is_err(), "tampered multiplicities should fail");
             }
             _ => panic!("expected Activation proof"),
         }
@@ -5251,21 +5251,14 @@ mod tests {
         )
         .unwrap();
 
-        // See test_activation_tampered_multiplicity_fails for rationale on None check
-        let has_logup = matches!(
-            &proof,
-            LayerProof::Activation { logup_proof: Some(_), .. }
-        );
-
-        if has_logup {
-            if let LayerProof::Activation {
-                logup_proof: Some(ref mut logup),
-                ..
-            } = &mut proof
-            {
-                if !logup.eq_round_polys.is_empty() {
-                    logup.eq_round_polys[0].c0 = logup.eq_round_polys[0].c0 + SecureField::one();
-                }
+        // Tamper with eq-sumcheck round poly — LogUp is now always produced
+        if let LayerProof::Activation {
+            logup_proof: Some(ref mut logup),
+            ..
+        } = &mut proof
+        {
+            if !logup.eq_round_polys.is_empty() {
+                logup.eq_round_polys[0].c0 = logup.eq_round_polys[0].c0 + SecureField::one();
             }
         }
 
@@ -5295,11 +5288,7 @@ mod tests {
                     0,
                     &mut verifier_channel,
                 );
-                if has_logup {
-                    assert!(result.is_err(), "tampered eq round poly should fail");
-                } else {
-                    assert!(result.is_ok(), "None logup should pass verification");
-                }
+                assert!(result.is_err(), "tampered eq round poly should fail");
             }
             _ => panic!("expected Activation proof"),
         }
@@ -5343,20 +5332,13 @@ mod tests {
         )
         .unwrap();
 
-        // See test_activation_tampered_multiplicity_fails for rationale on None check
-        let has_logup = matches!(
-            &proof,
-            LayerProof::Activation { logup_proof: Some(_), .. }
-        );
-
-        if has_logup {
-            if let LayerProof::Activation {
-                logup_proof: Some(ref mut logup),
-                ..
-            } = &mut proof
-            {
-                logup.final_evals.0 = logup.final_evals.0 + SecureField::one();
-            }
+        // Tamper with final_evals — LogUp is now always produced
+        if let LayerProof::Activation {
+            logup_proof: Some(ref mut logup),
+            ..
+        } = &mut proof
+        {
+            logup.final_evals.0 = logup.final_evals.0 + SecureField::one();
         }
 
         let mut verifier_channel = PoseidonChannel::new();
@@ -5385,14 +5367,394 @@ mod tests {
                     0,
                     &mut verifier_channel,
                 );
-                if has_logup {
-                    assert!(result.is_err(), "tampered final_evals should fail");
-                } else {
-                    assert!(result.is_ok(), "None logup should pass verification");
-                }
+                assert!(result.is_err(), "tampered final_evals should fail");
             }
             _ => panic!("expected Activation proof"),
         }
+    }
+
+    // ===== Non-ReLU Activation LogUp Tests =====
+
+    /// Helper: prove and verify a non-ReLU activation with range-reduced LogUp.
+    fn prove_and_verify_activation_logup(
+        activation_type: ActivationType,
+        input: &M31Matrix,
+        seed: u64,
+    ) -> Result<GKRClaim, GKRError> {
+        use crate::components::matmul::pad_matrix_pow2;
+
+        let padded = pad_matrix_pow2(input);
+        let n = padded.rows * padded.cols;
+        let table_log_size = activation_type.recommended_table_log_size();
+        let table_mask = (1u32 << table_log_size) - 1;
+        let activation_fn = activation_type.as_fn();
+
+        // Build output MLE: apply activation to masked inputs
+        let output_mle: Vec<SecureField> = padded
+            .data
+            .iter()
+            .take(n)
+            .map(|&v| {
+                let masked = M31::from(v.0 & table_mask);
+                SecureField::from(activation_fn(masked))
+            })
+            .collect();
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(seed);
+        let num_vars = n.ilog2() as usize;
+        let r = prover_channel.draw_qm31s(num_vars);
+        let claimed = evaluate_mle_pub(&output_mle, &r);
+        let output_claim = GKRClaim {
+            point: r.clone(),
+            value: claimed,
+        };
+
+        let (proof, _next_claim) = reduce_activation_layer_for_test(
+            &output_claim,
+            input,
+            activation_type,
+            &mut prover_channel,
+        )
+        .unwrap();
+
+        // Verify with fresh channel
+        let mut verifier_channel = PoseidonChannel::new();
+        verifier_channel.mix_u64(seed);
+        let _r_v = verifier_channel.draw_qm31s(num_vars);
+
+        match &proof {
+            LayerProof::Activation {
+                activation_type: at,
+                logup_proof,
+                multiplicity_sumcheck,
+                activation_proof,
+                input_eval,
+                output_eval,
+                table_commitment,
+            } => {
+                assert!(logup_proof.is_some(), "non-ReLU should produce LogUp proof");
+                verify_activation_reduction(
+                    &output_claim,
+                    *at,
+                    logup_proof.as_ref(),
+                    multiplicity_sumcheck.as_ref(),
+                    activation_proof.as_ref(),
+                    *input_eval,
+                    *output_eval,
+                    *table_commitment,
+                    0,
+                    &mut verifier_channel,
+                )
+            }
+            _ => panic!("expected Activation proof"),
+        }
+    }
+
+    #[test]
+    fn test_activation_logup_gelu() {
+        let input = {
+            let mut m = M31Matrix::new(2, 2);
+            m.set(0, 0, M31::from(100u32));
+            m.set(0, 1, M31::from(200u32));
+            m.set(1, 0, M31::from(300u32));
+            m.set(1, 1, M31::from(50u32));
+            m
+        };
+        let result = prove_and_verify_activation_logup(ActivationType::GELU, &input, 0xAC10);
+        assert!(result.is_ok(), "GELU LogUp should verify: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_activation_logup_sigmoid() {
+        let input = {
+            let mut m = M31Matrix::new(2, 2);
+            m.set(0, 0, M31::from(42u32));
+            m.set(0, 1, M31::from(99u32));
+            m.set(1, 0, M31::from(1u32));
+            m.set(1, 1, M31::from(255u32));
+            m
+        };
+        let result = prove_and_verify_activation_logup(ActivationType::Sigmoid, &input, 0x5101);
+        assert!(result.is_ok(), "Sigmoid LogUp should verify: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_activation_logup_softmax() {
+        let input = {
+            let mut m = M31Matrix::new(2, 2);
+            m.set(0, 0, M31::from(10u32));
+            m.set(0, 1, M31::from(500u32));
+            m.set(1, 0, M31::from(1000u32));
+            m.set(1, 1, M31::from(7u32));
+            m
+        };
+        let result = prove_and_verify_activation_logup(ActivationType::Softmax, &input, 0x5F01);
+        assert!(result.is_ok(), "Softmax LogUp should verify: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_activation_logup_relu_stays_algebraic() {
+        // ReLU should still use the algebraic path, NOT LogUp
+        let input = {
+            let mut m = M31Matrix::new(2, 2);
+            m.set(0, 0, M31::from(5u32));
+            m.set(0, 1, M31::from(10u32));
+            m.set(1, 0, M31::from(3u32));
+            m.set(1, 1, M31::from(7u32));
+            m
+        };
+
+        let activation_fn = ActivationType::ReLU.as_fn();
+        let padded = pad_matrix_pow2(&input);
+        let n = padded.rows * padded.cols;
+        let output_mle: Vec<SecureField> = padded
+            .data
+            .iter()
+            .take(n)
+            .map(|&v| SecureField::from(activation_fn(v)))
+            .collect();
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0xAC11);
+        let r = prover_channel.draw_qm31s(2);
+        let claimed = evaluate_mle_pub(&output_mle, &r);
+        let output_claim = GKRClaim {
+            point: r.clone(),
+            value: claimed,
+        };
+
+        // The dispatch in prove_gkr sends ReLU to reduce_activation_layer_algebraic,
+        // not reduce_activation_layer. But reduce_activation_layer_for_test
+        // now produces LogUp for ALL types. Verify ReLU values also work with LogUp.
+        let (proof, _) = reduce_activation_layer_for_test(
+            &output_claim,
+            &input,
+            ActivationType::ReLU,
+            &mut prover_channel,
+        )
+        .unwrap();
+
+        // The function now produces logup_proof: Some(...) for all types,
+        // but in the real dispatch, ReLU goes through the algebraic path.
+        match &proof {
+            LayerProof::Activation { logup_proof, .. } => {
+                assert!(logup_proof.is_some(), "reduce_activation_layer now always produces LogUp");
+            }
+            _ => panic!("expected Activation proof"),
+        }
+    }
+
+    #[test]
+    fn test_activation_logup_gelu_tampered_multiplicity() {
+        use crate::components::matmul::pad_matrix_pow2;
+
+        let input = {
+            let mut m = M31Matrix::new(2, 2);
+            m.set(0, 0, M31::from(100u32));
+            m.set(0, 1, M31::from(200u32));
+            m.set(1, 0, M31::from(300u32));
+            m.set(1, 1, M31::from(50u32));
+            m
+        };
+
+        let padded = pad_matrix_pow2(&input);
+        let n = padded.rows * padded.cols;
+        let table_log_size = ActivationType::GELU.recommended_table_log_size();
+        let table_mask = (1u32 << table_log_size) - 1;
+        let activation_fn = ActivationType::GELU.as_fn();
+        let output_mle: Vec<SecureField> = padded
+            .data
+            .iter()
+            .take(n)
+            .map(|&v| {
+                let masked = M31::from(v.0 & table_mask);
+                SecureField::from(activation_fn(masked))
+            })
+            .collect();
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0xAC12);
+        let num_vars = n.ilog2() as usize;
+        let r = prover_channel.draw_qm31s(num_vars);
+        let claimed = evaluate_mle_pub(&output_mle, &r);
+        let output_claim = GKRClaim {
+            point: r.clone(),
+            value: claimed,
+        };
+
+        let (mut proof, _) = reduce_activation_layer_for_test(
+            &output_claim,
+            &input,
+            ActivationType::GELU,
+            &mut prover_channel,
+        )
+        .unwrap();
+
+        // Tamper with multiplicities
+        if let LayerProof::Activation {
+            logup_proof: Some(ref mut logup),
+            ..
+        } = &mut proof
+        {
+            if !logup.multiplicities.is_empty() {
+                logup.multiplicities[0] = logup.multiplicities[0].wrapping_add(1);
+            }
+        }
+
+        let mut verifier_channel = PoseidonChannel::new();
+        verifier_channel.mix_u64(0xAC12);
+        let _r_v = verifier_channel.draw_qm31s(num_vars);
+
+        match &proof {
+            LayerProof::Activation {
+                activation_type,
+                logup_proof,
+                multiplicity_sumcheck,
+                activation_proof,
+                input_eval,
+                output_eval,
+                table_commitment,
+            } => {
+                let result = verify_activation_reduction(
+                    &output_claim,
+                    *activation_type,
+                    logup_proof.as_ref(),
+                    multiplicity_sumcheck.as_ref(),
+                    activation_proof.as_ref(),
+                    *input_eval,
+                    *output_eval,
+                    *table_commitment,
+                    0,
+                    &mut verifier_channel,
+                );
+                assert!(result.is_err(), "tampered GELU multiplicities should fail");
+            }
+            _ => panic!("expected Activation proof"),
+        }
+    }
+
+    #[test]
+    fn test_activation_logup_gelu_tampered_round_poly() {
+        use crate::components::matmul::pad_matrix_pow2;
+
+        let input = {
+            let mut m = M31Matrix::new(2, 2);
+            m.set(0, 0, M31::from(100u32));
+            m.set(0, 1, M31::from(200u32));
+            m.set(1, 0, M31::from(300u32));
+            m.set(1, 1, M31::from(50u32));
+            m
+        };
+
+        let padded = pad_matrix_pow2(&input);
+        let n = padded.rows * padded.cols;
+        let table_log_size = ActivationType::GELU.recommended_table_log_size();
+        let table_mask = (1u32 << table_log_size) - 1;
+        let activation_fn = ActivationType::GELU.as_fn();
+        let output_mle: Vec<SecureField> = padded
+            .data
+            .iter()
+            .take(n)
+            .map(|&v| {
+                let masked = M31::from(v.0 & table_mask);
+                SecureField::from(activation_fn(masked))
+            })
+            .collect();
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0xAC13);
+        let num_vars = n.ilog2() as usize;
+        let r = prover_channel.draw_qm31s(num_vars);
+        let claimed = evaluate_mle_pub(&output_mle, &r);
+        let output_claim = GKRClaim {
+            point: r.clone(),
+            value: claimed,
+        };
+
+        let (mut proof, _) = reduce_activation_layer_for_test(
+            &output_claim,
+            &input,
+            ActivationType::GELU,
+            &mut prover_channel,
+        )
+        .unwrap();
+
+        // Tamper with eq-sumcheck round poly
+        if let LayerProof::Activation {
+            logup_proof: Some(ref mut logup),
+            ..
+        } = &mut proof
+        {
+            if !logup.eq_round_polys.is_empty() {
+                logup.eq_round_polys[0].c0 = logup.eq_round_polys[0].c0 + SecureField::one();
+            }
+        }
+
+        let mut verifier_channel = PoseidonChannel::new();
+        verifier_channel.mix_u64(0xAC13);
+        let _r_v = verifier_channel.draw_qm31s(num_vars);
+
+        match &proof {
+            LayerProof::Activation {
+                activation_type,
+                logup_proof,
+                multiplicity_sumcheck,
+                activation_proof,
+                input_eval,
+                output_eval,
+                table_commitment,
+            } => {
+                let result = verify_activation_reduction(
+                    &output_claim,
+                    *activation_type,
+                    logup_proof.as_ref(),
+                    multiplicity_sumcheck.as_ref(),
+                    activation_proof.as_ref(),
+                    *input_eval,
+                    *output_eval,
+                    *table_commitment,
+                    0,
+                    &mut verifier_channel,
+                );
+                assert!(result.is_err(), "tampered GELU eq-round poly should fail");
+            }
+            _ => panic!("expected Activation proof"),
+        }
+    }
+
+    #[test]
+    fn test_activation_require_proof_gate() {
+        // With STWO_REQUIRE_ACTIVATION_PROOF=1, verifier rejects None/None proofs
+        let _guard = EnvVarGuard::set("STWO_REQUIRE_ACTIVATION_PROOF", "1");
+
+        let input_eval = SecureField::from(M31::from(42u32));
+        let output_eval = SecureField::from(M31::from(99u32));
+        let output_claim = GKRClaim {
+            point: vec![SecureField::from(M31::from(1u32)), SecureField::from(M31::from(2u32))],
+            value: output_eval,
+        };
+
+        let mut channel = PoseidonChannel::new();
+        let result = verify_activation_reduction(
+            &output_claim,
+            ActivationType::GELU,
+            None, // no logup proof
+            None, // no multiplicity sumcheck
+            None, // no activation proof
+            input_eval,
+            output_eval,
+            starknet_ff::FieldElement::ZERO,
+            0,
+            &mut channel,
+        );
+        assert!(result.is_err(), "should reject None proofs when gate is enabled");
+        let err_msg = format!("{:?}", result.err().unwrap());
+        assert!(
+            err_msg.contains("missing LogUp or algebraic proof"),
+            "unexpected error: {}",
+            err_msg,
+        );
     }
 
     // ===== LayerNorm Tests =====

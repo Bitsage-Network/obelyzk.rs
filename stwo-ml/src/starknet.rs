@@ -2686,14 +2686,17 @@ fn build_verify_model_gkr_calldata_inner(
     }
 
     // 6. proof_data: Array<felt252> — tag-dispatched per-layer GKR proofs
+    let _t_serialize = std::time::Instant::now();
     let mut proof_data = Vec::new();
     if packed {
         serialize_gkr_proof_data_only_packed(proof, &mut proof_data);
     } else {
         serialize_gkr_proof_data_only(proof, &mut proof_data);
     }
+    let _serialize_elapsed = _t_serialize.elapsed();
 
     // Self-verify against serialized proof data (same as chunked path).
+    let _t_self_verify = std::time::Instant::now();
     replay_verify_serialized_proof(
         &proof_data,
         raw_io_data,
@@ -2704,6 +2707,15 @@ fn build_verify_model_gkr_calldata_inner(
     ).map_err(|e| StarknetModelError::SoundnessGate(
         format!("self-verification failed: {e}")
     ))?;
+    let _self_verify_elapsed = _t_self_verify.elapsed();
+
+    // Emit serialization profiling if enabled
+    crate::gkr::profiler::print_serialization_timing(
+        &crate::gkr::profiler::SerializationTimings {
+            serialize: _serialize_elapsed,
+            self_verify: _self_verify_elapsed,
+        },
+    );
 
     parts.push(format!("{}", proof_data.len()));
     for f in &proof_data {
