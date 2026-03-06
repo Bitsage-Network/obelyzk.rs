@@ -128,9 +128,11 @@
     The on-chain Cairo verifier ({\raise.17ex\hbox{$\scriptstyle\sim$}}14\,K
     lines) accepts proofs via 18 streaming transactions and is
     deployed on Starknet Sepolia.
-    We provide formal soundness analysis showing the system
-    achieves $2^{-130}$ security against forgery when the MLE
-    opening query count is set to $q=10$.
+    We provide formal soundness analysis: at the recommended
+    operational setting of $q=10$ MLE spot-check queries,
+    the end-to-end forgery probability for the linear trace
+    is bounded by $2^{-111}$ (conservatively; the MLE opening
+    component alone achieves $2^{-130}$).
     \textbf{Scope:} The deployed verifier constrains
     only linear operations; nonlinear activations (ReLU, GELU,
     Softmax) are executed by the prover but not independently
@@ -900,10 +902,8 @@ Assumptions:
   as a conservative per-fold bound (worst case at the final fold
   where the table has only 2 entries).
 
-  Over $n$ folds, assuming the adversary must cheat at every
-  fold to produce a consistent forgery (each fold's challenge
-  depends on the previous round's transcript via Fiat-Shamir),
-  the total evasion probability is bounded by:
+  The total evasion probability over $n$ folds is then
+  conservatively bounded by:
   \begin{equation}\label{eq:mle-sound}
     \varepsilon_{\text{mle}} \le 2^{-qn}.
   \end{equation}
@@ -913,6 +913,9 @@ Assumptions:
     \item $q=5$ (current default): $\varepsilon_{\text{mle}} = 2^{-65}$.
     \item $q=10$ (recommended): $\varepsilon_{\text{mle}} = 2^{-130}$.
   \end{itemize}
+  This is a conservative upper bound under the random oracle
+  model; the true soundness error is strictly smaller at
+  earlier folds.
 \end{theorem}
 
 \begin{proof}
@@ -927,30 +930,42 @@ Assumptions:
   At the last non-trivial fold ($i=n-1$, table size~2), this is
   $(1/2)^q = 2^{-q}$, the worst case.
 
-  The Fiat-Shamir transcript binds each fold's challenges to
-  all prior rounds, so an adaptive adversary cannot
-  retroactively change earlier folds after seeing later
-  challenges.
-  The adversary must commit to the full folded-table Merkle tree
-  before learning the query positions for that fold.
-  By the random oracle assumption on Fiat-Shamir, the query
-  positions at each fold are independent of the adversary's
-  strategy for that fold, yielding the multiplicative bound
-  $\prod_{i=0}^{n-1} 2^{-q} = 2^{-qn}$.
+  \textbf{Conditioning across folds.}
+  The adversary must commit to the Merkle root of each folded
+  table \emph{before} the Fiat-Shamir oracle reveals that fold's
+  query positions.
+  Under the random oracle model, these query positions are
+  independent of the adversary's committed table.
+  We condition on each fold sequentially:
+  let $E_i$ be the event that the adversary evades detection at
+  fold~$i$.
+  Then $\Pr[E_0 \cap \cdots \cap E_{n-1}] =
+  \prod_i \Pr[E_i \mid E_0 \cap \cdots \cap E_{i-1}]$.
+  Since the adversary commits fold~$i$'s table before seeing
+  fold~$i$'s queries, $\Pr[E_i \mid \cdot] \le 2^{-q}$
+  regardless of prior events.
+  Thus $\varepsilon_{\text{mle}} \le \prod_{i=0}^{n-1} 2^{-q} = 2^{-qn}$.
 
-  \emph{Note:} This bound is conservative. At earlier folds
-  (larger tables), the per-fold evasion probability is strictly
-  less than $2^{-q}$, so the true soundness error is smaller
+  \emph{Note:} This uses the worst-case per-fold bound
+  $(1/2)^q$ from the final fold (table size~2).
+  At earlier folds (larger tables), evasion probability is
+  strictly less than $2^{-q}$, so the true error is smaller
   than $2^{-qn}$.
+  We use $2^{-qn}$ as a clean, conservative bound.
 \end{proof}
 
-\textbf{Recommendation.} We recommend $q=10$ for production
-deployments, providing 130-bit opening security.
-The calldata overhead is $2\times$ (10 vs.\ 5 Merkle paths per fold),
-adding $\sim$4{,}000 felts to the 86{,}723 total---a 4.6\% increase
-for 65 additional bits of security.
+\textbf{Operational default.}
+The intended production configuration is $q=10$, providing
+130-bit MLE opening security that matches the field's 124-bit
+algebraic security margin.
+The current Cairo default of $q=5$ is a development
+convenience; all soundness bounds in this paper are stated
+parametrically in~$q$ so that either setting can be evaluated.
+The calldata overhead of $q=10$ vs.\ $q=5$ is $2\times$ Merkle
+paths per fold, adding $\sim$4{,}000 felts to the 86{,}723
+total---a 4.6\% increase for 65 additional bits of security.
 The query count is a runtime parameter read from the proof
-structure; increasing $q$ requires no code changes.
+structure; changing $q$ requires no code modifications.
 
 \subsection{Theorem 3: Aggregated Weight Binding Soundness}
 
@@ -966,8 +981,17 @@ structure; increasing $q$ requires no code changes.
     \frac{M + k_{\text{sc}}
     \cdot d_{\text{sc}}}{|\QM|}
   \end{equation}
-  where $k_{\text{sc}}$ is the number of sumcheck rounds in the
-  mismatch protocol and $d_{\text{sc}}=2$ is the per-round degree.
+  where $k_{\text{sc}}$ is the number of sumcheck rounds
+  (equal to the number of variables in the global oracle,
+  $\lceil\log_2 M\rceil + \max_i \lceil\log_2 |W_i|\rceil$,
+  since the sumcheck ranges over the full selector + data
+  dimensions of $W_{\text{global}}$)
+  and $d_{\text{sc}}=2$ is the per-round polynomial degree
+  (the product $\eq(\mathbf{g}_i,\mathbf{s}) \cdot
+  W_{\text{global}}(\mathbf{s},\mathbf{e}_i)$ is degree~1 in
+  each variable of $\mathbf{s}$, and the batching multiplier
+  $\rho^i$ is a constant with respect to $\mathbf{s}$,
+  giving total degree~2 per round after the mismatch term).
   For $M=160$ and $k_{\text{sc}} = \lceil\log_2 N_{\text{global}}\rceil
   \le 28$:
   \[
@@ -1239,6 +1263,11 @@ soundness.
 \end{table*}
 
 \Cref{tab:comparison} positions ObelyZK relative to existing systems.
+Entries marked $\ddagger$ reflect systems for which specific
+benchmarks or parameter counts were not available in public
+documentation as of March 2026; we report only what is
+publicly verifiable and encourage the respective teams to
+publish comparable measurements.
 Key differentiators:
 \begin{itemize}[nosep,leftmargin=1.2em]
   \item \textbf{Scale + deployment}: to our knowledge, the first
