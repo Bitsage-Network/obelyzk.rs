@@ -446,7 +446,24 @@ fn verify_gkr_inner(
                     ),
                 })?;
                 // Cross-check dims against circuit's skip layer
-                let skip_idx = deferred_skip_layer_indices[i];
+                let skip_idx = *deferred_skip_layer_indices.get(i).ok_or_else(|| {
+                    GKRError::VerificationError {
+                        layer_idx: 0,
+                        reason: format!(
+                            "deferred proof index {i} out of bounds (only {} skip indices)",
+                            deferred_skip_layer_indices.len()
+                        ),
+                    }
+                })?;
+                if skip_idx >= circuit.layers.len() {
+                    return Err(GKRError::VerificationError {
+                        layer_idx: skip_idx,
+                        reason: format!(
+                            "skip_idx {skip_idx} out of bounds (circuit has {} layers)",
+                            circuit.layers.len()
+                        ),
+                    });
+                }
                 if let LayerType::MatMul {
                     m: cm,
                     k: ck,
@@ -1086,6 +1103,9 @@ fn evaluate_weight_claim_against_matrix(
     eval_point: &[SecureField],
 ) -> Result<SecureField, String> {
     let b_mle = matrix_to_mle_col_major_padded(weight);
+    if b_mle.is_empty() {
+        return Err("weight MLE is empty".to_string());
+    }
     let expected_vars = b_mle.len().ilog2() as usize;
     if eval_point.len() != expected_vars {
         return Err(format!(
@@ -1114,6 +1134,12 @@ pub fn verify_gkr_with_execution(
     if let Some(input_matrix) = execution.intermediates.get(&0) {
         let input_padded = pad_matrix_pow2(input_matrix);
         let input_mle = matrix_to_mle(&input_padded);
+        if input_mle.is_empty() {
+            return Err(GKRError::VerificationError {
+                layer_idx: 0,
+                reason: "input MLE is empty".to_string(),
+            });
+        }
 
         let num_vars = input_mle.len().ilog2() as usize;
         if input_claim.point.len() != num_vars {
@@ -1194,6 +1220,12 @@ fn verify_gkr_simd_inner(
 
     // Reconstruct output claim from combined output MLE
     let n_out = combined_output.len();
+    if n_out == 0 {
+        return Err(GKRError::VerificationError {
+            layer_idx: 0,
+            reason: "combined output MLE is empty".to_string(),
+        });
+    }
     let log_out = n_out.ilog2() as usize;
     let r_out = channel.draw_qm31s(log_out);
     let output_value = crate::components::matmul::evaluate_mle_pub(combined_output, &r_out);
@@ -1542,7 +1574,24 @@ fn verify_gkr_simd_inner(
                     ),
                 })?;
                 // Cross-check dims against circuit's skip layer
-                let skip_idx = deferred_skip_layer_indices[i];
+                let skip_idx = *deferred_skip_layer_indices.get(i).ok_or_else(|| {
+                    GKRError::VerificationError {
+                        layer_idx: 0,
+                        reason: format!(
+                            "SIMD deferred proof index {i} out of bounds (only {} skip indices)",
+                            deferred_skip_layer_indices.len()
+                        ),
+                    }
+                })?;
+                if skip_idx >= circuit.layers.len() {
+                    return Err(GKRError::VerificationError {
+                        layer_idx: skip_idx,
+                        reason: format!(
+                            "skip_idx {skip_idx} out of bounds (circuit has {} layers)",
+                            circuit.layers.len()
+                        ),
+                    });
+                }
                 if let LayerType::MatMul {
                     m: cm,
                     k: ck,
@@ -2510,13 +2559,17 @@ fn verify_activation_reduction(
         );
     }
 
-    // Reject missing LogUp proofs when soundness gate is enabled.
-    // Legacy fallback: accept None for backward compatibility unless gated.
+    // Reject missing LogUp proofs by default.
+    // Opt-out: STWO_ALLOW_MISSING_ACTIVATION_PROOF=1 for legacy SIMD paths.
+    // Legacy opt-in: STWO_REQUIRE_ACTIVATION_PROOF=1 still works (no-op, always required now).
     let logup = match logup_proof {
         Some(lp) => lp,
         None => {
-            if activation_proof.is_none()
-                && std::env::var("STWO_REQUIRE_ACTIVATION_PROOF")
+            if activation_proof.is_none() {
+                // Default: reject missing proofs (hardened).
+                // Allow opt-out only for SIMD block-combination path where
+                // combined SecureField MLEs can't be range-masked.
+                let allow_missing = std::env::var("STWO_ALLOW_MISSING_ACTIVATION_PROOF")
                     .map(|v| {
                         let s = v.trim();
                         s == "1"
@@ -2524,12 +2577,14 @@ fn verify_activation_reduction(
                             || s.eq_ignore_ascii_case("yes")
                             || s.eq_ignore_ascii_case("on")
                     })
-                    .unwrap_or(false)
-            {
-                return Err(GKRError::VerificationError {
-                    layer_idx,
-                    reason: "activation layer missing LogUp or algebraic proof".into(),
-                });
+                    .unwrap_or(false);
+                if !allow_missing {
+                    return Err(GKRError::VerificationError {
+                        layer_idx,
+                        reason: "activation layer missing LogUp or algebraic proof"
+                            .into(),
+                    });
+                }
             }
             mix_secure_field(channel, input_eval);
             return Ok(GKRClaim {
@@ -5724,10 +5779,8 @@ mod tests {
     }
 
     #[test]
-    fn test_activation_require_proof_gate() {
-        // With STWO_REQUIRE_ACTIVATION_PROOF=1, verifier rejects None/None proofs
-        let _guard = EnvVarGuard::set("STWO_REQUIRE_ACTIVATION_PROOF", "1");
-
+    fn test_activation_require_proof_default_on() {
+        // Verifier now REJECTS None/None proofs by default (no env var needed)
         let input_eval = SecureField::from(M31::from(42u32));
         let output_eval = SecureField::from(M31::from(99u32));
         let output_claim = GKRClaim {
@@ -5748,13 +5801,41 @@ mod tests {
             0,
             &mut channel,
         );
-        assert!(result.is_err(), "should reject None proofs when gate is enabled");
+        assert!(result.is_err(), "should reject None proofs by default");
         let err_msg = format!("{:?}", result.err().unwrap());
         assert!(
             err_msg.contains("missing LogUp or algebraic proof"),
             "unexpected error: {}",
             err_msg,
         );
+    }
+
+    #[test]
+    fn test_activation_allow_missing_opt_out() {
+        // STWO_ALLOW_MISSING_ACTIVATION_PROOF=1 opts out of the default requirement
+        let _guard = EnvVarGuard::set("STWO_ALLOW_MISSING_ACTIVATION_PROOF", "1");
+
+        let input_eval = SecureField::from(M31::from(42u32));
+        let output_eval = SecureField::from(M31::from(99u32));
+        let output_claim = GKRClaim {
+            point: vec![SecureField::from(M31::from(1u32)), SecureField::from(M31::from(2u32))],
+            value: output_eval,
+        };
+
+        let mut channel = PoseidonChannel::new();
+        let result = verify_activation_reduction(
+            &output_claim,
+            ActivationType::GELU,
+            None,
+            None,
+            None,
+            input_eval,
+            output_eval,
+            starknet_ff::FieldElement::ZERO,
+            0,
+            &mut channel,
+        );
+        assert!(result.is_ok(), "should accept None proofs when opt-out is set");
     }
 
     // ===== LayerNorm Tests =====

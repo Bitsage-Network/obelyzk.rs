@@ -298,20 +298,30 @@ struct GraphWeightSource<'a> {
 
 impl<'a> WeightSource for GraphWeightSource<'a> {
     fn get_mle(&self, claim_index: usize) -> Vec<SecureField> {
+        assert!(
+            claim_index < self.claim_node_ids.len(),
+            "claim_index {claim_index} out of bounds (have {} claims)",
+            self.claim_node_ids.len()
+        );
         let node_id = self.claim_node_ids[claim_index];
         let matrix = self
             .weights
             .get_weight(node_id)
-            .unwrap_or_else(|| panic!("weight not found for node_id {node_id}"));
+            .unwrap_or_else(|| panic!("weight not found for node_id {node_id} (claim_index {claim_index})"));
         matrix_to_mle_col_major_padded(matrix)
     }
 
     fn get_mle_u32(&self, claim_index: usize) -> Vec<u32> {
+        assert!(
+            claim_index < self.claim_node_ids.len(),
+            "claim_index {claim_index} out of bounds (have {} claims)",
+            self.claim_node_ids.len()
+        );
         let node_id = self.claim_node_ids[claim_index];
         let matrix = self
             .weights
             .get_weight(node_id)
-            .unwrap_or_else(|| panic!("weight not found for node_id {node_id}"));
+            .unwrap_or_else(|| panic!("weight not found for node_id {node_id} (claim_index {claim_index})"));
         #[cfg(feature = "cuda-runtime")]
         {
             matrix_to_mle_col_major_u32_padded(matrix)
@@ -3499,12 +3509,22 @@ pub fn prove_gkr_simd_gpu_with_cache(
             LayerType::Activation {
                 activation_type, ..
             } => {
-                // SIMD block-combination path: algebraic activation sumcheck
-                // cannot run on combined MLEs because block weights are
-                // SecureField, destroying M31 sign structure needed for
-                // indicator computation. GPU path (prove_gkr_gpu) handles
-                // ReLU algebraic sumcheck per-execution; this SIMD path is
-                // legacy and uses the passthrough evaluation.
+                // SIMD block-combination path: activation LogUp cannot run on
+                // combined MLEs because block weights are SecureField, destroying
+                // M31 structure needed for range masking. Produces logup_proof: None.
+                //
+                // SOUNDNESS NOTE: This path is NOT used in production proving.
+                // Production uses per-execution GPU/CPU paths (prove_gkr_gpu /
+                // prove_gkr) which produce full activation LogUp proofs.
+                // The verifier rejects proofs from this path by default —
+                // set STWO_ALLOW_MISSING_ACTIVATION_PROOF=1 to accept.
+                if !matches!(activation_type, crate::components::activation::ActivationType::ReLU) {
+                    eprintln!(
+                        "  WARNING: SIMD activation at layer {} ({:?}) — LogUp skipped \
+                        (combined MLEs, not production path)",
+                        layer_idx, activation_type,
+                    );
+                }
                 let combined_mle = get_combined_intermediate_mle(
                     block_executions,
                     layer_idx,
@@ -3919,21 +3939,14 @@ fn reduce_matmul_layer_simd_gpu(
     n: usize,
     channel: &mut PoseidonChannel,
 ) -> Result<(LayerProof, GKRClaim), GKRError> {
-    debug_assert!(
-        m <= (1 << 30),
-        "matmul m={} exceeds 2^30, next_power_of_two would overflow",
-        m
-    );
-    debug_assert!(
-        k <= (1 << 30),
-        "matmul k={} exceeds 2^30, next_power_of_two would overflow",
-        k
-    );
-    debug_assert!(
-        n <= (1 << 30),
-        "matmul n={} exceeds 2^30, next_power_of_two would overflow",
-        n
-    );
+    if m > (1 << 30) || k > (1 << 30) || n > (1 << 30) {
+        return Err(GKRError::ReductionError {
+            layer_idx: 0,
+            reason: format!(
+                "matmul dims ({m},{k},{n}) exceed 2^30, next_power_of_two would overflow"
+            ),
+        });
+    }
 
     let pm = m.next_power_of_two();
     let pk = k.next_power_of_two();
@@ -7045,19 +7058,19 @@ fn compute_mul_eq_sum_at_t(
     mid: usize,
     t: SecureField,
 ) -> SecureField {
-    debug_assert!(
+    assert!(
         eq.len() >= 2 * mid,
         "eq array too small: {} < {}",
         eq.len(),
         2 * mid
     );
-    debug_assert!(
+    assert!(
         a.len() >= 2 * mid,
         "a array too small: {} < {}",
         a.len(),
         2 * mid
     );
-    debug_assert!(
+    assert!(
         b.len() >= 2 * mid,
         "b array too small: {} < {}",
         b.len(),

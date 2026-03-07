@@ -2850,21 +2850,20 @@ fn submit_gkr_onchain(
     // Step 3: Submit verification
     eprintln!("  Submitting {}...", verify_entrypoint);
 
-    // For large calldatas, read from file to avoid shell arg limit
-    let verify_result = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "sncast --account '{}' invoke \
-             --network '{}' \
-             --contract-address '{}' \
-             --function {} \
-             --calldata $(cat '{}')",
-            cli.account,
-            cli.network,
-            cli.contract,
-            verify_entrypoint,
-            calldata_path.display(),
-        ))
+    // Read calldata from file and pass as argument (no shell interpolation).
+    let calldata_contents = std::fs::read_to_string(&calldata_path).unwrap_or_else(|e| {
+        eprintln!("  Error: could not read calldata file {}: {e}", calldata_path.display());
+        process::exit(1);
+    });
+    let verify_result = std::process::Command::new("sncast")
+        .args(&[
+            "--account", &cli.account,
+            "invoke",
+            "--network", &cli.network,
+            "--contract-address", &cli.contract,
+            "--function", &verify_entrypoint,
+            "--calldata", calldata_contents.trim(),
+        ])
         .output();
 
     match verify_result {
@@ -3456,7 +3455,10 @@ fn run_withdraw_command(cmd: &WithdrawCmd) {
         process::exit(1);
     });
 
-    let note = note_entry.note.to_note();
+    let note = note_entry.note.to_note().unwrap_or_else(|e| {
+        eprintln!("Error: corrupt note data: {e}");
+        process::exit(1);
+    });
     let commitment = note.commitment();
     #[cfg(feature = "audit-http")]
     let leaf_index = note_entry.merkle_index;
@@ -3663,8 +3665,14 @@ fn run_transfer_command(cmd: &TransferCmd) {
         process::exit(1);
     }
 
-    let note1 = selected[0].note.to_note();
-    let note2 = selected[1].note.to_note();
+    let note1 = selected[0].note.to_note().unwrap_or_else(|e| {
+        eprintln!("Error: corrupt note data (note 1): {e}");
+        process::exit(1);
+    });
+    let note2 = selected[1].note.to_note().unwrap_or_else(|e| {
+        eprintln!("Error: corrupt note data (note 2): {e}");
+        process::exit(1);
+    });
     #[cfg(feature = "audit-http")]
     let idx1 = selected[0].merkle_index;
     #[cfg(feature = "audit-http")]
@@ -4993,6 +5001,10 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
         let priv_key = cmd
             .private_key
             .clone()
+            .map(|k| {
+                eprintln!("  WARNING: --private-key via CLI is insecure (visible in process listings). Use STARKNET_PRIVATE_KEY env var instead.");
+                k
+            })
             .or_else(|| std::env::var("STARKNET_PRIVATE_KEY").ok())
             .unwrap_or_default();
 
