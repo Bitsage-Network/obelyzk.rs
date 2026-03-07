@@ -3295,6 +3295,35 @@ pub fn replay_verify_serialized_proof(
                 off += 1; // commitment
                 let _simd = read_u32_from(proof_data, &mut off);
 
+                // === Part 0: RMS² verification plain sumcheck ===
+                // Must be replayed BEFORE "RN" tag to match prover's channel mixing order.
+                let has_p0 = read_u32_from(proof_data, &mut off);
+                if has_p0 == 1 {
+                    let two_p0 = SecureField::from(M31::from(2u32));
+                    let p0_n_active = read_u32_from(proof_data, &mut off) as u64;
+                    let p0_sq_sum = read_qm31_from(proof_data, &mut off);
+                    ch.mix_u64(0x5251_u64); // "RQ" tag
+                    ch.mix_u64(p0_n_active);
+                    mix_secure_field(&mut ch, p0_sq_sum);
+                    let p0_nr = read_u32_from(proof_data, &mut off) as usize;
+                    let mut p0_sum = p0_sq_sum;
+                    for _ in 0..p0_nr {
+                        let c0 = read_qm31_from(proof_data, &mut off);
+                        let c2 = read_qm31_from(proof_data, &mut off);
+                        let c3 = read_qm31_from(proof_data, &mut off);
+                        // Degree-2 polynomial: c3=0, c1 reconstructed from current_sum
+                        let c1 = p0_sum - two_p0 * c0 - c2;
+                        ch.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                        let r = ch.draw_qm31();
+                        p0_sum = c0 + c1 * r + c2 * r * r + c3 * r * r * r;
+                    }
+                    let p0_input_final = read_qm31_from(proof_data, &mut off);
+                    mix_secure_field(&mut ch, p0_input_final);
+                    if trace {
+                        eprintln!("[VERIFIER RMSNorm] ch after Part 0 (RMS² sumcheck): {:?}", ch.digest());
+                    }
+                }
+
                 if trace {
                     eprintln!("[VERIFIER RMSNorm] ch BEFORE RN: {:?}", ch.digest());
                     eprintln!("[VERIFIER RMSNorm] rms_sq={:?}", rms_sq);
@@ -3500,12 +3529,52 @@ pub fn replay_verify_serialized_proof(
                     }
                     current_claim_value = act_input_eval;
                 } else {
-                    // Mix final evals (legacy path)
+                    // No algebraic product proof — will check piecewise below
+                }
+                // Piecewise algebraic proof (always serialized after act_proof)
+                let has_pw = read_u32_from(proof_data, &mut off);
+                if has_pw == 1 {
+                    // Full piecewise channel replay (GELU/Sigmoid/Softmax)
+                    ch.mix_u64(0x50575F414354_u64); // "PW_ACT"
+                    ch.mix_u64(_act_type as u64);
+                    let pw_nr = read_u32_from(proof_data, &mut off) as usize;
+                    ch.mix_u64(pw_nr as u64); // num_vars
+                    mix_secure_field(&mut ch, current_claim_value);
+                    let _eta = ch.draw_qm31();
+                    let two_pw = SecureField::from(M31::from(2u32));
+                    let mut pw_sum = current_claim_value;
+                    for _ in 0..pw_nr {
+                        let c0 = read_qm31_from(proof_data, &mut off);
+                        let c2 = read_qm31_from(proof_data, &mut off);
+                        let c3 = read_qm31_from(proof_data, &mut off);
+                        let c1 = pw_sum - two_pw * c0 - c2 - c3;
+                        ch.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                        let challenge = ch.draw_qm31();
+                        pw_sum = c0 + c1 * challenge + c2 * challenge * challenge
+                            + c3 * challenge * challenge * challenge;
+                    }
+                    let pw_input_eval = read_qm31_from(proof_data, &mut off);
+                    let pw_output_eval = read_qm31_from(proof_data, &mut off);
+                    mix_secure_field(&mut ch, pw_input_eval);
+                    mix_secure_field(&mut ch, pw_output_eval);
+                    for _ in 0..16usize {
+                        let ie = read_qm31_from(proof_data, &mut off);
+                        mix_secure_field(&mut ch, ie);
+                    }
+                    let has_sbe = read_u32_from(proof_data, &mut off);
+                    if has_sbe == 1 {
+                        for _ in 0..4usize {
+                            let sb = read_qm31_from(proof_data, &mut off);
+                            mix_secure_field(&mut ch, sb);
+                        }
+                    }
+                    current_claim_value = pw_input_eval;
+                } else if has_act_proof == 0 {
+                    // Legacy: no act_proof, no piecewise (SIMD/no-proof path)
                     if has_logup == 1 {
                         mix_secure_field(&mut ch, input_eval);
                         mix_secure_field(&mut ch, _output_eval);
                     } else {
-                        // No-LogUp path: just mix input_eval (matches SIMD prover)
                         mix_secure_field(&mut ch, input_eval);
                     }
                     current_claim_value = input_eval;
@@ -3520,6 +3589,130 @@ pub fn replay_verify_serialized_proof(
                 mix_secure_field(&mut ch, rhs);
                 let _alpha = ch.draw_qm31();
                 current_claim_value = if trunk_idx == 0 { lhs } else { rhs };
+            }
+            4 => {
+                // LayerNorm
+                let input_eval = read_qm31_from(proof_data, &mut off);
+                let output_eval = read_qm31_from(proof_data, &mut off);
+                let mean = read_qm31_from(proof_data, &mut off);
+                let rsqrt_var = read_qm31_from(proof_data, &mut off);
+                off += 1; // commitment
+                let _simd = read_u32_from(proof_data, &mut off);
+
+                // Part 0: Mean-Variance plain sumcheck
+                let has_mv = read_u32_from(proof_data, &mut off);
+                if has_mv == 1 {
+                    let mv_n_active = read_u32_from(proof_data, &mut off) as u64;
+                    let total_input_sum = read_qm31_from(proof_data, &mut off);
+                    let total_centered_sq_sum = read_qm31_from(proof_data, &mut off);
+                    ch.mix_u64(0x4D56); // "MV"
+                    ch.mix_u64(mv_n_active);
+                    mix_secure_field(&mut ch, total_input_sum);
+                    mix_secure_field(&mut ch, total_centered_sq_sum);
+                    let eta0 = ch.draw_qm31();
+                    let mv_nr = read_u32_from(proof_data, &mut off) as usize;
+                    let two_mv = SecureField::from(M31::from(2u32));
+                    let mut mv_sum = eta0 * total_input_sum + eta0 * eta0 * total_centered_sq_sum;
+                    for _ in 0..mv_nr {
+                        let c0 = read_qm31_from(proof_data, &mut off);
+                        let c2 = read_qm31_from(proof_data, &mut off);
+                        let c3 = read_qm31_from(proof_data, &mut off);
+                        // Degree-2 poly: c3=0, c1 reconstructed from current_sum
+                        let c1 = mv_sum - two_mv * c0 - c2;
+                        ch.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                        let r = ch.draw_qm31();
+                        mv_sum = c0 + c1 * r + c2 * r * r + c3 * r * r * r;
+                    }
+                    let mv_input_final = read_qm31_from(proof_data, &mut off);
+                    let mv_mean_final = read_qm31_from(proof_data, &mut off);
+                    mix_secure_field(&mut ch, mv_input_final);
+                    mix_secure_field(&mut ch, mv_mean_final);
+                }
+
+                // Part 1: Linear eq-sumcheck
+                ch.mix_u64(0x4C4E); // "LN"
+                mix_secure_field(&mut ch, mean);
+                mix_secure_field(&mut ch, rsqrt_var);
+                mix_secure_field(&mut ch, current_claim_value);
+                let ln_nr = read_u32_from(proof_data, &mut off) as usize;
+                let two_ln = SecureField::from(M31::from(2u32));
+                let mut ln_sum = current_claim_value;
+                for _ in 0..ln_nr {
+                    let c0 = read_qm31_from(proof_data, &mut off);
+                    let c2 = read_qm31_from(proof_data, &mut off);
+                    let c3 = read_qm31_from(proof_data, &mut off);
+                    let c1 = ln_sum - two_ln * c0 - c2 - c3;
+                    ch.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                    let challenge = ch.draw_qm31();
+                    ln_sum = c0 + c1 * challenge + c2 * challenge * challenge
+                        + c3 * challenge * challenge * challenge;
+                }
+                let centered_final = read_qm31_from(proof_data, &mut off);
+                let rsqrt_final = read_qm31_from(proof_data, &mut off);
+                mix_secure_field(&mut ch, centered_final);
+                mix_secure_field(&mut ch, rsqrt_final);
+                // Centered binding evals only present in CPU path (has_mv == 1)
+                if has_mv == 1 {
+                    let cb_input = read_qm31_from(proof_data, &mut off);
+                    let cb_mean = read_qm31_from(proof_data, &mut off);
+                    mix_secure_field(&mut ch, cb_input);
+                    mix_secure_field(&mut ch, cb_mean);
+                }
+
+                // Part 2: rsqrt LogUp
+                let has_logup = read_u32_from(proof_data, &mut off);
+                if has_logup == 1 {
+                    ch.mix_u64(0x4C4F47); // "LOG"
+                    ch.mix_u64(0x5253);   // "RS"
+                    let _gamma = ch.draw_qm31();
+                    let _beta = ch.draw_qm31();
+                    let claimed_sum = read_qm31_from(proof_data, &mut off);
+                    mix_secure_field(&mut ch, claimed_sum);
+                    let eq_rounds = read_u32_from(proof_data, &mut off) as usize;
+                    let two_logup = SecureField::from(M31::from(2u32));
+                    let mut logup_sum = SecureField::from(M31::from(1u32));
+                    for _ in 0..eq_rounds {
+                        let c0 = read_qm31_from(proof_data, &mut off);
+                        let c2 = read_qm31_from(proof_data, &mut off);
+                        let c3 = read_qm31_from(proof_data, &mut off);
+                        let c1 = logup_sum - two_logup * c0 - c2 - c3;
+                        ch.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                        let challenge = ch.draw_qm31();
+                        logup_sum = c0 + c1 * challenge + c2 * challenge * challenge
+                            + c3 * challenge * challenge * challenge;
+                    }
+                    let _w = read_qm31_from(proof_data, &mut off);
+                    let _in_e = read_qm31_from(proof_data, &mut off);
+                    let _out_e = read_qm31_from(proof_data, &mut off);
+                    let num_mults = read_u32_from(proof_data, &mut off) as usize;
+                    for _ in 0..num_mults {
+                        let _ = read_u32_from(proof_data, &mut off);
+                    }
+                }
+
+                // Multiplicity sumcheck
+                let has_ms = read_u32_from(proof_data, &mut off);
+                if has_ms == 1 {
+                    let ms_n_rounds = read_u32_from(proof_data, &mut off) as usize;
+                    for _ in 0..ms_n_rounds {
+                        let c0 = read_qm31_from(proof_data, &mut off);
+                        let c1 = read_qm31_from(proof_data, &mut off);
+                        mix_secure_field(&mut ch, c0);
+                        mix_secure_field(&mut ch, c1);
+                        let _r = ch.draw_qm31();
+                    }
+                    let _final_eval = read_qm31_from(proof_data, &mut off);
+                    let _claimed_sum = read_qm31_from(proof_data, &mut off);
+                }
+
+                // var_eval (read, not mixed) — only present in CPU path
+                if has_mv == 1 {
+                    let _var_eval = read_qm31_from(proof_data, &mut off);
+                }
+
+                mix_secure_field(&mut ch, input_eval);
+                mix_secure_field(&mut ch, output_eval);
+                current_claim_value = input_eval;
             }
             _ => return Err(format!("Unknown tag {} at layer {}", tag, layer)),
         }
@@ -6499,6 +6692,32 @@ mod tests {
                     let _rsqrt_commitment = { off += 1; }; // felt252
                     let _simd_combined = read_u32_from(&mut off); // u32
 
+                    // === Part 0: RMS² verification plain sumcheck ===
+                    // Must be replayed BEFORE "RN" tag to match prover's channel mixing order.
+                    let has_p0 = read_u32_from(&mut off);
+                    if has_p0 == 1 {
+                        let p0_n_active = read_u32_from(&mut off) as u64;
+                        let p0_sq_sum = read_qm31_from(&mut off);
+                        ch.mix_u64(0x5251_u64); // "RQ" tag
+                        ch.mix_u64(p0_n_active);
+                        mix_secure_field(&mut ch, p0_sq_sum);
+                        let p0_nr = read_u32_from(&mut off) as usize;
+                        let mut p0_sum = p0_sq_sum;
+                        for _ in 0..p0_nr {
+                            let c0 = read_qm31_from(&mut off);
+                            let c2 = read_qm31_from(&mut off);
+                            let c3 = read_qm31_from(&mut off);
+                            // Degree-2 polynomial: c3=0, c1 reconstructed from current_sum
+                            let c1 = p0_sum - two * c0 - c2;
+                            ch.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                            let r = ch.draw_qm31();
+                            p0_sum = c0 + c1 * r + c2 * r * r + c3 * r * r * r;
+                        }
+                        let p0_input_final = read_qm31_from(&mut off);
+                        mix_secure_field(&mut ch, p0_input_final);
+                        println!("  Part 0 (RMS² sumcheck) replayed, n_active={}", p0_n_active);
+                    }
+
                     // "RN" tag
                     ch.mix_u64(0x524E); // 'R'=0x52, 'N'=0x4E → 0x524E
                     mix_secure_field(&mut ch, rms_sq);
@@ -6984,6 +7203,7 @@ mod tests {
                     let rsqrt_eval = read_qm31_from(&mut off);
                     off += 1; // rsqrt_table_commitment
                     let _simd = read_u32_from(&mut off);
+                    let two_rn = SecureField::from(M31::from(2u32));
 
                     println!("  [off at start of RMSNorm fields: {}]", off);
                     println!("  input_eval: {:?}", input_eval);
@@ -6991,6 +7211,33 @@ mod tests {
                     println!("  rms_sq: {:?}", rms_sq);
                     println!("  rsqrt_eval: {:?}", rsqrt_eval);
                     println!("  current_claim: {:?}", current_claim_value);
+
+                    // === Part 0: RMS² verification plain sumcheck ===
+                    // Must be replayed BEFORE "RN" tag to match prover's channel mixing order.
+                    let has_p0 = read_u32_from(&mut off);
+                    if has_p0 == 1 {
+                        let p0_n_active = read_u32_from(&mut off) as u64;
+                        let p0_sq_sum = read_qm31_from(&mut off);
+                        ch.mix_u64(0x5251_u64); // "RQ" tag
+                        ch.mix_u64(p0_n_active);
+                        mix_secure_field(&mut ch, p0_sq_sum);
+                        println!("  ch after Part 0 RQ+n_active+sq_sum: {:?}", ch.digest());
+                        let p0_nr = read_u32_from(&mut off) as usize;
+                        let mut p0_sum = p0_sq_sum;
+                        for _ in 0..p0_nr {
+                            let c0 = read_qm31_from(&mut off);
+                            let c2 = read_qm31_from(&mut off);
+                            let c3 = read_qm31_from(&mut off);
+                            // Degree-2 polynomial: c3=0, c1 reconstructed from current_sum
+                            let c1 = p0_sum - two_rn * c0 - c2;
+                            ch.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                            let r = ch.draw_qm31();
+                            p0_sum = c0 + c1 * r + c2 * r * r + c3 * r * r * r;
+                        }
+                        let p0_input_final = read_qm31_from(&mut off);
+                        mix_secure_field(&mut ch, p0_input_final);
+                        println!("  ch after Part 0 (RMS² sumcheck): {:?}", ch.digest());
+                    }
                     println!("  ch BEFORE RN: {:?}", ch.digest());
 
                     ch.mix_u64(0x524E); // "RN"
@@ -7386,6 +7633,31 @@ mod tests {
                     off += 1; // commitment
                     let _simd = read_u32_from(&mut off);
 
+                    // === Part 0: RMS² verification plain sumcheck ===
+                    // Must be replayed BEFORE "RN" tag to match prover's channel mixing order.
+                    let has_p0 = read_u32_from(&mut off);
+                    if has_p0 == 1 {
+                        let p0_n_active = read_u32_from(&mut off) as u64;
+                        let p0_sq_sum = read_qm31_from(&mut off);
+                        ch.mix_u64(0x5251_u64); // "RQ" tag
+                        ch.mix_u64(p0_n_active);
+                        mix_secure_field(&mut ch, p0_sq_sum);
+                        let p0_nr = read_u32_from(&mut off) as usize;
+                        let mut p0_sum = p0_sq_sum;
+                        for _ in 0..p0_nr {
+                            let c0 = read_qm31_from(&mut off);
+                            let c2 = read_qm31_from(&mut off);
+                            let c3 = read_qm31_from(&mut off);
+                            // Degree-2 polynomial: c3=0, c1 reconstructed from current_sum
+                            let c1 = p0_sum - two * c0 - c2;
+                            ch.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                            let r = ch.draw_qm31();
+                            p0_sum = c0 + c1 * r + c2 * r * r + c3 * r * r * r;
+                        }
+                        let p0_input_final = read_qm31_from(&mut off);
+                        mix_secure_field(&mut ch, p0_input_final);
+                    }
+
                     ch.mix_u64(0x524E);
                     mix_secure_field(&mut ch, rms_sq);
                     mix_secure_field(&mut ch, rsqrt_eval);
@@ -7626,6 +7898,30 @@ mod tests {
                     let rsq = p_read_qm31(&mut poff);
                     poff += 1; // commitment
                     let _simd = p_read_u32(&mut poff);
+                    // === Part 0: RMS² verification plain sumcheck ===
+                    // Must be replayed BEFORE "RN" tag to match prover's channel mixing order.
+                    let has_p0 = p_read_u32(&mut poff);
+                    if has_p0 == 1 {
+                        let p0_n_active = p_read_u32(&mut poff) as u64;
+                        let p0_sq = p_read_qm31(&mut poff);
+                        ch2.mix_u64(0x5251_u64); // "RQ" tag
+                        ch2.mix_u64(p0_n_active);
+                        mix_secure_field(&mut ch2, p0_sq);
+                        let p0_nr = p_read_u32(&mut poff) as usize;
+                        let mut p0_s = p0_sq;
+                        let two_p0 = SecureField::from(M31::from(2u32));
+                        for _ in 0..p0_nr {
+                            let c0 = p_read_qm31(&mut poff);
+                            let c2 = p_read_qm31(&mut poff);
+                            let c3 = p_read_qm31(&mut poff);
+                            let c1 = p0_s - two_p0 * c0 - c2;
+                            ch2.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+                            let r = ch2.draw_qm31();
+                            p0_s = c0 + c1 * r + c2 * r * r + c3 * r * r * r;
+                        }
+                        let p0_inf = p_read_qm31(&mut poff);
+                        mix_secure_field(&mut ch2, p0_inf);
+                    }
                     ch2.mix_u64(0x524E);
                     mix_secure_field(&mut ch2, rms);
                     mix_secure_field(&mut ch2, rsq);
@@ -7747,6 +8043,78 @@ mod tests {
         let pd2 = p_read_u32(&mut poff);
         assert_eq!(packed_proof_felts.len() - poff, 0, "Packed: remaining felts");
         println!("PACKED roundtrip also passes! (deferred={})", pd2);
+    }
+
+    #[test]
+    fn test_layernorm_piecewise_replay_roundtrip() {
+        // Exercises Tag 4 (LayerNorm) and piecewise activation (GELU) in
+        // replay_verify_serialized_proof to verify Round 4 fixes.
+        use crate::aggregation::prove_model_pure_gkr;
+        use crate::components::activation::ActivationType;
+        use crate::cairo_serde::{serialize_gkr_proof_data_only, serialize_raw_io};
+        let _guard = EnvVarGuard::unset("STWO_WEIGHT_BINDING");
+
+        let dim = 16;
+        let hidden = 32;
+        let mut builder = GraphBuilder::new((1, dim));
+        builder.layer_norm();                        // Tag 4 (LayerNorm)
+        builder.linear(hidden);                      // Tag 0 (MatMul)
+        builder.activation(ActivationType::GELU);    // Tag 3 (piecewise)
+        builder.linear(dim);                         // Tag 0 (MatMul)
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, dim);
+        for j in 0..dim {
+            input.set(0, j, M31::from((j * 7 + 3) as u32 % 127));
+        }
+
+        let mut weights = GraphWeights::new();
+        // Node 0 = layer_norm, 1 = linear(hidden), 2 = activation, 3 = linear(dim)
+        let linear_nodes = [(1usize, dim, hidden), (3, hidden, dim)];
+        for &(node_id, wr, wc) in &linear_nodes {
+            let mut w = M31Matrix::new(wr, wc);
+            for r in 0..wr {
+                for c in 0..wc {
+                    w.set(r, c, M31::from(((r * wc + c + node_id * 37) * 13 + 5) as u32 % 251));
+                }
+            }
+            weights.add_weight(node_id, w);
+        }
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit");
+        let agg_proof =
+            prove_model_pure_gkr(&graph, &input, &weights).expect("GKR proving should succeed");
+        let gkr = agg_proof.gkr_proof.as_ref().expect("GKR proof");
+        let raw_io = serialize_raw_io(&input, &agg_proof.execution.output);
+        let matmul_dims = extract_matmul_dims(&circuit);
+
+        // Unpacked replay
+        let mut proof_data = Vec::new();
+        serialize_gkr_proof_data_only(gkr, &mut proof_data);
+        let result = super::replay_verify_serialized_proof(
+            &proof_data,
+            &raw_io,
+            &matmul_dims,
+            circuit.layers.len() as u32,
+            gkr.layer_proofs.len() as u32,
+            false,
+        );
+        assert!(result.is_ok(), "Unpacked replay failed: {:?}", result.err());
+        println!("LayerNorm+Piecewise unpacked replay OK ({} felts)", proof_data.len());
+
+        // Packed replay
+        let mut packed_data = Vec::new();
+        crate::cairo_serde::serialize_gkr_proof_data_only_packed(gkr, &mut packed_data);
+        let result2 = super::replay_verify_serialized_proof(
+            &packed_data,
+            &raw_io,
+            &matmul_dims,
+            circuit.layers.len() as u32,
+            gkr.layer_proofs.len() as u32,
+            true,
+        );
+        assert!(result2.is_ok(), "Packed replay failed: {:?}", result2.err());
+        println!("LayerNorm+Piecewise packed replay OK ({} felts)", packed_data.len());
     }
 
     #[test]

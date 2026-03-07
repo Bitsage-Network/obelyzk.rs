@@ -1234,6 +1234,70 @@ fn serialize_activation_product_proof(
     }
 }
 
+/// Serialize a piecewise-linear algebraic activation proof.
+///
+/// Layout:
+///   has_proof (u32: 0 or 1)
+///   if has_proof:
+///     num_rounds (u32)
+///     [c0, c2, c3] × num_rounds  (compressed: c1 reconstructed by verifier)
+///     input_eval (QM31: 4 felts)
+///     output_eval (QM31: 4 felts)
+///     [indicator_eval] × 16 (QM31: 4 felts each)
+///
+/// Total: ~60 felts per activation layer (vs ~336 for LogUp).
+fn serialize_piecewise_proof(
+    proof: &Option<crate::gkr::types::PiecewiseAlgebraicProof>,
+    output: &mut Vec<FieldElement>,
+    packed: bool,
+) {
+    match proof {
+        Some(p) => {
+            serialize_u32(1, output);
+            serialize_u32(p.round_polys.len() as u32, output);
+            for rp in &p.round_polys {
+                if packed {
+                    serialize_qm31_packed(rp.c0, output);
+                    serialize_qm31_packed(rp.c2, output);
+                    serialize_qm31_packed(rp.c3, output);
+                } else {
+                    serialize_qm31(rp.c0, output);
+                    serialize_qm31(rp.c2, output);
+                    serialize_qm31(rp.c3, output);
+                }
+            }
+            if packed {
+                serialize_qm31_packed(p.input_eval, output);
+                serialize_qm31_packed(p.output_eval, output);
+                for &ie in &p.indicator_evals {
+                    serialize_qm31_packed(ie, output);
+                }
+            } else {
+                serialize_qm31(p.input_eval, output);
+                serialize_qm31(p.output_eval, output);
+                for &ie in &p.indicator_evals {
+                    serialize_qm31(ie, output);
+                }
+            }
+            // Segment-input binding: 4 segment bit evals
+            match &p.seg_bit_evals {
+                Some(sbe) => {
+                    serialize_u32(1, output);
+                    for &sb in sbe {
+                        if packed {
+                            serialize_qm31_packed(sb, output);
+                        } else {
+                            serialize_qm31(sb, output);
+                        }
+                    }
+                }
+                None => serialize_u32(0, output),
+            }
+        }
+        None => serialize_u32(0, output),
+    }
+}
+
 /// Serialize a complete GKR model proof for on-chain verification.
 ///
 /// Layout: `num_layers, [layer_proof]×num_layers, input_claim, weight_commitments, io_commitment`
@@ -1290,11 +1354,12 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
             LayerProof::Activation {
                 activation_type,
                 logup_proof,
-                multiplicity_sumcheck: _,
                 activation_proof,
+                piecewise_proof: _piecewise_proof,
                 input_eval,
                 output_eval,
                 table_commitment,
+                ..
             } => {
                 serialize_u32(3, output); // tag: Activation
                                           // CRITICAL: use type_tag(), NOT enum discriminant — prover mixes type_tag()
@@ -1313,10 +1378,12 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 }
                 // Activation product proof (Phase A soundness)
                 serialize_activation_product_proof(activation_proof, output, false);
+                // Piecewise-linear algebraic proof (GELU/Sigmoid/Softmax)
+                serialize_piecewise_proof(&_piecewise_proof, output, false);
             }
             LayerProof::LayerNorm {
                 logup_proof,
-                multiplicity_sumcheck: _,
+                multiplicity_sumcheck,
                 linear_round_polys,
                 linear_final_evals,
                 input_eval,
@@ -1325,6 +1392,13 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 rsqrt_var,
                 rsqrt_table_commitment,
                 simd_combined,
+                mean_var_round_polys,
+                mean_var_final_evals,
+                var_eval,
+                centered_binding_evals,
+                mv_claimed_sums,
+                n_active,
+                ..
             } => {
                 serialize_u32(4, output); // tag: LayerNorm
                 serialize_qm31(*input_eval, output);
@@ -1334,9 +1408,31 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 output.push(*rsqrt_table_commitment);
                 // simd_combined flag: 1 = SIMD path (LogUp optional), 0 = standard (LogUp required)
                 serialize_u32(if *simd_combined { 1 } else { 0 }, output);
+                // Part 0: Mean-variance plain sumcheck (must come BEFORE Part 1 for channel order)
+                match mean_var_round_polys {
+                    Some(polys) => {
+                        serialize_u32(1, output); // has_mv = 1
+                        serialize_u32(n_active.unwrap_or(0) as u32, output);
+                        if let Some((is, cs)) = mv_claimed_sums {
+                            serialize_qm31(*is, output);
+                            serialize_qm31(*cs, output);
+                        }
+                        serialize_u32(polys.len() as u32, output);
+                        for rp in polys {
+                            serialize_qm31(rp.c0, output);
+                            serialize_qm31(rp.c2, output);
+                            serialize_qm31(rp.c3, output);
+                        }
+                        if let Some((inp, mn)) = mean_var_final_evals {
+                            serialize_qm31(*inp, output);
+                            serialize_qm31(*mn, output);
+                        }
+                    }
+                    None => serialize_u32(0, output), // has_mv = 0
+                }
+                // Part 1: Linear eq-sumcheck
                 serialize_u32(linear_round_polys.len() as u32, output);
                 for rp in linear_round_polys {
-                    // Compressed: omit c1 (verifier reconstructs from current_sum)
                     serialize_qm31(rp.c0, output);
                     serialize_qm31(rp.c2, output);
                     serialize_qm31(rp.c3, output);
@@ -1344,6 +1440,11 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 let (centered_eval, rsqrt_eval) = *linear_final_evals;
                 serialize_qm31(centered_eval, output);
                 serialize_qm31(rsqrt_eval, output);
+                if let Some((cb_in, cb_mn)) = centered_binding_evals {
+                    serialize_qm31(*cb_in, output);
+                    serialize_qm31(*cb_mn, output);
+                }
+                // Part 2: rsqrt LogUp
                 match logup_proof {
                     Some(lup) => {
                         serialize_u32(1, output);
@@ -1353,6 +1454,10 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                         serialize_u32(0, output);
                     }
                 }
+                // Multiplicity sumcheck
+                serialize_multiplicity_sumcheck(multiplicity_sumcheck, output);
+                // var_eval (for verifier, not channel-mixed)
+                if let Some(ve) = var_eval { serialize_qm31(*ve, output); }
             }
             LayerProof::Attention {
                 sub_proofs,
@@ -1494,6 +1599,11 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 rsqrt_eval,
                 rsqrt_table_commitment,
                 simd_combined,
+                rms_sq_round_polys,
+                rms_sq_input_final,
+                rms_sq_claimed_sq_sum,
+                rms_sq_n_active,
+                ..
             } => {
                 serialize_u32(8, output); // tag: RMSNorm
                 serialize_qm31(*input_eval, output);
@@ -1502,6 +1612,30 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 serialize_qm31(*rsqrt_eval, output);
                 output.push(*rsqrt_table_commitment);
                 serialize_u32(if *simd_combined { 1 } else { 0 }, output);
+                // === Part 0: RMS² verification proof (BEFORE linear — matches prover channel order) ===
+                // Serialization order: n_active, sq_sum, then rounds, then input_final
+                match rms_sq_round_polys {
+                    Some(polys) => {
+                        serialize_u32(1, output);
+                        // n_active first (needed to replay mix_u64(n_active) before sq_sum)
+                        serialize_u32(rms_sq_n_active.unwrap_or(0) as u32, output);
+                        // sq_sum before rounds so replay can mix it before drawing round challenges
+                        if let Some(sq_sum) = rms_sq_claimed_sq_sum {
+                            serialize_qm31(*sq_sum, output);
+                        }
+                        serialize_u32(polys.len() as u32, output);
+                        for rp in polys {
+                            serialize_qm31(rp.c0, output);
+                            serialize_qm31(rp.c2, output);
+                            serialize_qm31(rp.c3, output);
+                        }
+                        if let Some(final_eval) = rms_sq_input_final {
+                            serialize_qm31(*final_eval, output);
+                        }
+                    }
+                    None => serialize_u32(0, output),
+                }
+                // === Part 1: Linear eq-sumcheck round polys ===
                 serialize_u32(linear_round_polys.len() as u32, output);
                 for rp in linear_round_polys {
                     // Compressed: omit c1 (verifier reconstructs from current_sum)
@@ -1512,6 +1646,7 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 let (input_final, rsqrt_final) = *linear_final_evals;
                 serialize_qm31(input_final, output);
                 serialize_qm31(rsqrt_final, output);
+                // === Part 2: LogUp ===
                 match logup_proof {
                     Some(lup) => {
                         serialize_u32(1, output);
@@ -1613,9 +1748,11 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 logup_proof,
                 multiplicity_sumcheck,
                 activation_proof,
+                piecewise_proof: _piecewise_proof,
                 input_eval,
                 output_eval,
                 table_commitment,
+                ..
             } => {
                 serialize_u32(3, output);
                 // CRITICAL: use type_tag(), NOT enum discriminant — prover mixes type_tag()
@@ -1633,6 +1770,7 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 }
                 serialize_multiplicity_sumcheck(multiplicity_sumcheck, output);
                 serialize_activation_product_proof(activation_proof, output, false);
+                serialize_piecewise_proof(&_piecewise_proof, output, false);
             }
             LayerProof::LayerNorm {
                 logup_proof,
@@ -1645,6 +1783,13 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 rsqrt_var,
                 rsqrt_table_commitment,
                 simd_combined,
+                mean_var_round_polys,
+                mean_var_final_evals,
+                var_eval,
+                centered_binding_evals,
+                mv_claimed_sums,
+                n_active,
+                ..
             } => {
                 serialize_u32(4, output);
                 serialize_qm31(*input_eval, output);
@@ -1653,9 +1798,31 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 serialize_qm31(*rsqrt_var, output);
                 output.push(*rsqrt_table_commitment);
                 serialize_u32(if *simd_combined { 1 } else { 0 }, output);
+                // Part 0: Mean-variance plain sumcheck
+                match mean_var_round_polys {
+                    Some(polys) => {
+                        serialize_u32(1, output);
+                        serialize_u32(n_active.unwrap_or(0) as u32, output);
+                        if let Some((is, cs)) = mv_claimed_sums {
+                            serialize_qm31(*is, output);
+                            serialize_qm31(*cs, output);
+                        }
+                        serialize_u32(polys.len() as u32, output);
+                        for rp in polys {
+                            serialize_qm31(rp.c0, output);
+                            serialize_qm31(rp.c2, output);
+                            serialize_qm31(rp.c3, output);
+                        }
+                        if let Some((inp, mn)) = mean_var_final_evals {
+                            serialize_qm31(*inp, output);
+                            serialize_qm31(*mn, output);
+                        }
+                    }
+                    None => serialize_u32(0, output),
+                }
+                // Part 1: Linear eq-sumcheck
                 serialize_u32(linear_round_polys.len() as u32, output);
                 for rp in linear_round_polys {
-                    // Compressed: omit c1 (verifier reconstructs from current_sum)
                     serialize_qm31(rp.c0, output);
                     serialize_qm31(rp.c2, output);
                     serialize_qm31(rp.c3, output);
@@ -1663,6 +1830,11 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 let (centered_eval, rsqrt_eval) = *linear_final_evals;
                 serialize_qm31(centered_eval, output);
                 serialize_qm31(rsqrt_eval, output);
+                if let Some((cb_in, cb_mn)) = centered_binding_evals {
+                    serialize_qm31(*cb_in, output);
+                    serialize_qm31(*cb_mn, output);
+                }
+                // Part 2: rsqrt LogUp
                 match logup_proof {
                     Some(lup) => {
                         serialize_u32(1, output);
@@ -1671,6 +1843,8 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                     None => serialize_u32(0, output),
                 }
                 serialize_multiplicity_sumcheck(multiplicity_sumcheck, output);
+                // var_eval (for verifier, not channel-mixed)
+                if let Some(ve) = var_eval { serialize_qm31(*ve, output); }
             }
             LayerProof::Attention {
                 sub_proofs,
@@ -1808,6 +1982,11 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 rsqrt_eval,
                 rsqrt_table_commitment,
                 simd_combined,
+                rms_sq_round_polys,
+                rms_sq_input_final,
+                rms_sq_claimed_sq_sum,
+                rms_sq_n_active,
+                ..
             } => {
                 serialize_u32(8, output);
                 serialize_qm31(*input_eval, output);
@@ -1816,6 +1995,29 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 serialize_qm31(*rsqrt_eval, output);
                 output.push(*rsqrt_table_commitment);
                 serialize_u32(if *simd_combined { 1 } else { 0 }, output);
+                // === Part 0: RMS² verification proof (BEFORE linear — matches prover channel order) ===
+                match rms_sq_round_polys {
+                    Some(polys) => {
+                        serialize_u32(1, output);
+                        // n_active first (needed to replay mix_u64(n_active) before sq_sum)
+                        serialize_u32(rms_sq_n_active.unwrap_or(0) as u32, output);
+                        // sq_sum before rounds so replay can mix it before drawing round challenges
+                        if let Some(sq_sum) = rms_sq_claimed_sq_sum {
+                            serialize_qm31(*sq_sum, output);
+                        }
+                        serialize_u32(polys.len() as u32, output);
+                        for rp in polys {
+                            serialize_qm31(rp.c0, output);
+                            serialize_qm31(rp.c2, output);
+                            serialize_qm31(rp.c3, output);
+                        }
+                        if let Some(final_eval) = rms_sq_input_final {
+                            serialize_qm31(*final_eval, output);
+                        }
+                    }
+                    None => serialize_u32(0, output),
+                }
+                // === Part 1: Linear eq-sumcheck round polys ===
                 serialize_u32(linear_round_polys.len() as u32, output);
                 for rp in linear_round_polys {
                     // Compressed: omit c1 (verifier reconstructs from current_sum)
@@ -1826,6 +2028,7 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 let (input_final, rsqrt_final) = *linear_final_evals;
                 serialize_qm31(input_final, output);
                 serialize_qm31(rsqrt_final, output);
+                // === Part 2: LogUp ===
                 match logup_proof {
                     Some(lup) => {
                         serialize_u32(1, output);
@@ -1928,9 +2131,11 @@ fn serialize_layer_proof_packed_inner(
             logup_proof,
             multiplicity_sumcheck,
             activation_proof,
+            piecewise_proof: _piecewise_proof,
             input_eval,
             output_eval,
             table_commitment,
+            ..
         } => {
             serialize_u32(3, output);
             serialize_u32(activation_type.type_tag(), output);
@@ -1946,6 +2151,7 @@ fn serialize_layer_proof_packed_inner(
             }
             serialize_multiplicity_sumcheck_packed(multiplicity_sumcheck, output);
             serialize_activation_product_proof(activation_proof, output, true);
+            serialize_piecewise_proof(&_piecewise_proof, output, true);
         }
         LayerProof::LayerNorm {
             logup_proof,
@@ -1958,6 +2164,13 @@ fn serialize_layer_proof_packed_inner(
             rsqrt_var,
             rsqrt_table_commitment,
             simd_combined,
+            mean_var_round_polys,
+            mean_var_final_evals,
+            var_eval,
+            centered_binding_evals,
+            mv_claimed_sums,
+            n_active,
+            ..
         } => {
             serialize_u32(4, output);
             serialize_qm31_packed(*input_eval, output);
@@ -1966,6 +2179,29 @@ fn serialize_layer_proof_packed_inner(
             serialize_qm31_packed(*rsqrt_var, output);
             output.push(*rsqrt_table_commitment);
             serialize_u32(if *simd_combined { 1 } else { 0 }, output);
+            // Part 0: Mean-variance plain sumcheck
+            match mean_var_round_polys {
+                Some(polys) => {
+                    serialize_u32(1, output);
+                    serialize_u32(n_active.unwrap_or(0) as u32, output);
+                    if let Some((is, cs)) = mv_claimed_sums {
+                        serialize_qm31_packed(*is, output);
+                        serialize_qm31_packed(*cs, output);
+                    }
+                    serialize_u32(polys.len() as u32, output);
+                    for rp in polys {
+                        serialize_qm31_packed(rp.c0, output);
+                        serialize_qm31_packed(rp.c2, output);
+                        serialize_qm31_packed(rp.c3, output);
+                    }
+                    if let Some((inp, mn)) = mean_var_final_evals {
+                        serialize_qm31_packed(*inp, output);
+                        serialize_qm31_packed(*mn, output);
+                    }
+                }
+                None => serialize_u32(0, output),
+            }
+            // Part 1: Linear eq-sumcheck
             serialize_u32(linear_round_polys.len() as u32, output);
             for rp in linear_round_polys {
                 serialize_qm31_packed(rp.c0, output);
@@ -1975,6 +2211,11 @@ fn serialize_layer_proof_packed_inner(
             let (centered_eval, rsqrt_eval) = *linear_final_evals;
             serialize_qm31_packed(centered_eval, output);
             serialize_qm31_packed(rsqrt_eval, output);
+            if let Some((cb_in, cb_mn)) = centered_binding_evals {
+                serialize_qm31_packed(*cb_in, output);
+                serialize_qm31_packed(*cb_mn, output);
+            }
+            // Part 2: rsqrt LogUp
             match logup_proof {
                 Some(lup) => {
                     serialize_u32(1, output);
@@ -1983,6 +2224,8 @@ fn serialize_layer_proof_packed_inner(
                 None => serialize_u32(0, output),
             }
             serialize_multiplicity_sumcheck_packed(multiplicity_sumcheck, output);
+            // var_eval (for verifier, not channel-mixed)
+            if let Some(ve) = var_eval { serialize_qm31_packed(*ve, output); }
         }
         LayerProof::Attention {
             sub_proofs,
@@ -2063,6 +2306,11 @@ fn serialize_layer_proof_packed_inner(
             rsqrt_eval,
             rsqrt_table_commitment,
             simd_combined,
+            rms_sq_round_polys,
+            rms_sq_input_final,
+            rms_sq_claimed_sq_sum,
+            rms_sq_n_active,
+            ..
         } => {
             serialize_u32(8, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2071,6 +2319,29 @@ fn serialize_layer_proof_packed_inner(
             serialize_qm31_packed(*rsqrt_eval, output);
             output.push(*rsqrt_table_commitment);
             serialize_u32(if *simd_combined { 1 } else { 0 }, output);
+            // === Part 0: RMS² verification proof (BEFORE linear — matches prover channel order) ===
+            match rms_sq_round_polys {
+                Some(polys) => {
+                    serialize_u32(1, output);
+                    // n_active first (needed to replay mix_u64(n_active) before sq_sum)
+                    serialize_u32(rms_sq_n_active.unwrap_or(0) as u32, output);
+                    // sq_sum before rounds so replay can mix it before drawing round challenges
+                    if let Some(sq_sum) = rms_sq_claimed_sq_sum {
+                        serialize_qm31_packed(*sq_sum, output);
+                    }
+                    serialize_u32(polys.len() as u32, output);
+                    for rp in polys {
+                        serialize_qm31_packed(rp.c0, output);
+                        serialize_qm31_packed(rp.c2, output);
+                        serialize_qm31_packed(rp.c3, output);
+                    }
+                    if let Some(final_eval) = rms_sq_input_final {
+                        serialize_qm31_packed(*final_eval, output);
+                    }
+                }
+                None => serialize_u32(0, output),
+            }
+            // === Part 1: Linear eq-sumcheck round polys ===
             serialize_u32(linear_round_polys.len() as u32, output);
             for rp in linear_round_polys {
                 serialize_qm31_packed(rp.c0, output);
@@ -2080,6 +2351,7 @@ fn serialize_layer_proof_packed_inner(
             let (input_final, rsqrt_final) = *linear_final_evals;
             serialize_qm31_packed(input_final, output);
             serialize_qm31_packed(rsqrt_final, output);
+            // === Part 2: LogUp ===
             match logup_proof {
                 Some(lup) => {
                     serialize_u32(1, output);
@@ -2272,9 +2544,11 @@ fn serialize_layer_proof_double_packed_inner(
             logup_proof,
             multiplicity_sumcheck,
             activation_proof,
+            piecewise_proof: _piecewise_proof,
             input_eval,
             output_eval,
             table_commitment,
+            ..
         } => {
             serialize_u32(3, output);
             serialize_u32(activation_type.type_tag(), output);
@@ -2290,6 +2564,7 @@ fn serialize_layer_proof_double_packed_inner(
             }
             serialize_multiplicity_sumcheck_packed(multiplicity_sumcheck, output);
             serialize_activation_product_proof(activation_proof, output, true);
+            serialize_piecewise_proof(&_piecewise_proof, output, true);
         }
         LayerProof::LayerNorm {
             logup_proof,
@@ -2302,6 +2577,13 @@ fn serialize_layer_proof_double_packed_inner(
             rsqrt_var,
             rsqrt_table_commitment,
             simd_combined,
+            mean_var_round_polys,
+            mean_var_final_evals,
+            var_eval,
+            centered_binding_evals,
+            mv_claimed_sums,
+            n_active,
+            ..
         } => {
             serialize_u32(4, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2310,6 +2592,29 @@ fn serialize_layer_proof_double_packed_inner(
             serialize_qm31_packed(*rsqrt_var, output);
             output.push(*rsqrt_table_commitment);
             serialize_u32(if *simd_combined { 1 } else { 0 }, output);
+            // Part 0: Mean-variance plain sumcheck
+            match mean_var_round_polys {
+                Some(polys) => {
+                    serialize_u32(1, output);
+                    serialize_u32(n_active.unwrap_or(0) as u32, output);
+                    if let Some((is, cs)) = mv_claimed_sums {
+                        serialize_qm31_packed(*is, output);
+                        serialize_qm31_packed(*cs, output);
+                    }
+                    serialize_u32(polys.len() as u32, output);
+                    for rp in polys {
+                        serialize_qm31_packed(rp.c0, output);
+                        serialize_qm31_packed(rp.c2, output);
+                        serialize_qm31_packed(rp.c3, output);
+                    }
+                    if let Some((inp, mn)) = mean_var_final_evals {
+                        serialize_qm31_packed(*inp, output);
+                        serialize_qm31_packed(*mn, output);
+                    }
+                }
+                None => serialize_u32(0, output),
+            }
+            // Part 1: Linear eq-sumcheck
             serialize_u32(linear_round_polys.len() as u32, output);
             for rp in linear_round_polys {
                 // Double-packed: (c0, c2) as pair, c3 as single
@@ -2319,6 +2624,11 @@ fn serialize_layer_proof_double_packed_inner(
             let (centered_eval, rsqrt_eval) = *linear_final_evals;
             serialize_qm31_packed(centered_eval, output);
             serialize_qm31_packed(rsqrt_eval, output);
+            if let Some((cb_in, cb_mn)) = centered_binding_evals {
+                serialize_qm31_packed(*cb_in, output);
+                serialize_qm31_packed(*cb_mn, output);
+            }
+            // Part 2: rsqrt LogUp
             match logup_proof {
                 Some(lup) => {
                     serialize_u32(1, output);
@@ -2327,6 +2637,8 @@ fn serialize_layer_proof_double_packed_inner(
                 None => serialize_u32(0, output),
             }
             serialize_multiplicity_sumcheck_packed(multiplicity_sumcheck, output);
+            // var_eval (for verifier, not channel-mixed)
+            if let Some(ve) = var_eval { serialize_qm31_packed(*ve, output); }
         }
         LayerProof::Attention {
             sub_proofs,
@@ -2407,6 +2719,11 @@ fn serialize_layer_proof_double_packed_inner(
             rsqrt_eval,
             rsqrt_table_commitment,
             simd_combined,
+            rms_sq_round_polys,
+            rms_sq_input_final,
+            rms_sq_claimed_sq_sum,
+            rms_sq_n_active,
+            ..
         } => {
             serialize_u32(8, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2415,6 +2732,29 @@ fn serialize_layer_proof_double_packed_inner(
             serialize_qm31_packed(*rsqrt_eval, output);
             output.push(*rsqrt_table_commitment);
             serialize_u32(if *simd_combined { 1 } else { 0 }, output);
+            // === Part 0: RMS² verification proof (BEFORE linear — matches prover channel order) ===
+            match rms_sq_round_polys {
+                Some(polys) => {
+                    serialize_u32(1, output);
+                    // n_active first (needed to replay mix_u64(n_active) before sq_sum)
+                    serialize_u32(rms_sq_n_active.unwrap_or(0) as u32, output);
+                    // sq_sum before rounds so replay can mix it before drawing round challenges
+                    if let Some(sq_sum) = rms_sq_claimed_sq_sum {
+                        serialize_qm31_packed(*sq_sum, output);
+                    }
+                    serialize_u32(polys.len() as u32, output);
+                    for rp in polys {
+                        serialize_qm31_packed(rp.c0, output);
+                        serialize_qm31_packed(rp.c2, output);
+                        serialize_qm31_packed(rp.c3, output);
+                    }
+                    if let Some(final_eval) = rms_sq_input_final {
+                        serialize_qm31_packed(*final_eval, output);
+                    }
+                }
+                None => serialize_u32(0, output),
+            }
+            // === Part 1: Linear eq-sumcheck round polys ===
             serialize_u32(linear_round_polys.len() as u32, output);
             for rp in linear_round_polys {
                 // Double-packed: (c0, c2) as pair, c3 as single
@@ -2424,6 +2764,7 @@ fn serialize_layer_proof_double_packed_inner(
             let (input_final, rsqrt_final) = *linear_final_evals;
             serialize_qm31_packed(input_final, output);
             serialize_qm31_packed(rsqrt_final, output);
+            // === Part 2: LogUp ===
             match logup_proof {
                 Some(lup) => {
                     serialize_u32(1, output);
