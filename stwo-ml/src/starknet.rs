@@ -1523,6 +1523,7 @@ pub fn build_chunked_gkr_calldata(
             circuit_depth,
             num_layers,
             use_packed,
+            None,
         ).map_err(|e| StarknetModelError::SoundnessGate(
             format!("self-verification failed: {e}")
         ))?;
@@ -1815,6 +1816,7 @@ pub fn build_streaming_gkr_calldata(
         circuit.layers.len() as u32,
         proof.layer_proofs.len() as u32,
         true, // packed
+        None,
     ).map_err(|e| StarknetModelError::SoundnessGate(
         format!("streaming self-verification failed: {e}")
     ))?;
@@ -2704,6 +2706,7 @@ fn build_verify_model_gkr_calldata_inner(
         circuit_depth,
         num_layers,
         packed,
+        None,
     ).map_err(|e| StarknetModelError::SoundnessGate(
         format!("self-verification failed: {e}")
     ))?;
@@ -3120,6 +3123,7 @@ pub fn replay_verify_serialized_proof(
     circuit_depth: u32,
     num_layers: u32,
     packed: bool,
+    expected_io_commitment: Option<FieldElement>,
 ) -> Result<(), String> {
     use crate::crypto::poseidon_channel::PoseidonChannel;
     use crate::gkr::prover::mix_secure_field;
@@ -3174,6 +3178,21 @@ pub fn replay_verify_serialized_proof(
         return Err(format!(
             "output dimension mismatch: {output_rows} * {output_cols} != {output_len}"
         ));
+    }
+
+    // IO commitment check: verify poseidon_hash(packed(raw_io)) matches expected commitment.
+    if let Some(expected) = expected_io_commitment {
+        let packed_io = pack_m31_io_data(raw_io);
+        let mut hash_inputs = Vec::with_capacity(1 + packed_io.len());
+        hash_inputs.push(FieldElement::from(raw_io.len() as u64));
+        hash_inputs.extend_from_slice(&packed_io);
+        let computed = starknet_crypto::poseidon_hash_many(&hash_inputs);
+        if computed != expected {
+            return Err(format!(
+                "IO commitment mismatch: expected {:?}, computed {:?}",
+                expected, computed
+            ));
+        }
     }
 
     let padded_rows = output_rows.next_power_of_two();
@@ -3751,16 +3770,61 @@ pub fn replay_verify_serialized_proof(
         }
     }
 
-    // Deferred proofs (Add skip-connection branches) are serialized after layer proofs
-    // in single-TX format but handled separately in streaming format.
-    // Only try to read them if there's data remaining.
+    // Deferred proofs (Add skip-connection branches) are serialized after layer proofs.
+    // Replay the MatMul sumcheck for each deferred proof to validate serialized data
+    // and prevent arbitrary data appending after layer proofs.
     if off < proof_data.len() {
-        let _num_deferred = read_u32_from(proof_data, &mut off);
-        // Skip deferred proof data (each has: claim_value, m, k, n, num_rounds, round_polys, finals)
-        // We don't verify deferred proofs here — just consume them to check trailing data.
-        while off < proof_data.len() {
-            off += 1;
+        let num_deferred = read_u32_from(proof_data, &mut off);
+        let two = SecureField::from(M31::from(2u32));
+        for di in 0..num_deferred as usize {
+            let claim_value = read_qm31_from(proof_data, &mut off);
+            let m = read_u32_from(proof_data, &mut off) as usize;
+            let k = read_u32_from(proof_data, &mut off) as usize;
+            let n = read_u32_from(proof_data, &mut off) as usize;
+
+            // Fiat-Shamir mixing order matches prover.rs + verifier.rs:
+            // 1. mix deferred claim (prover.rs:1753 / verifier.rs:459)
+            // 2. mix dims + claim again (inside verify_matmul_reduction)
+            mix_secure_field(&mut ch, claim_value);
+            ch.mix_u64(m as u64);
+            ch.mix_u64(k as u64);
+            ch.mix_u64(n as u64);
+            mix_secure_field(&mut ch, claim_value);
+
+            let num_rounds = read_u32_from(proof_data, &mut off) as usize;
+            let mut current_sum = claim_value;
+            for round in 0..num_rounds {
+                let c0 = read_qm31_from(proof_data, &mut off);
+                let c2 = read_qm31_from(proof_data, &mut off);
+                let c1 = current_sum - two * c0 - c2;
+                ch.mix_poly_coeffs(c0, c1, c2);
+                let challenge = ch.draw_qm31();
+                current_sum = c0 + c1 * challenge + c2 * challenge * challenge;
+                if trace && round < 3 {
+                    eprintln!("[VERIFIER DEFERRED {}] round {} c0={:?} c2={:?} challenge={:?}",
+                        di, round, c0, c2, challenge);
+                }
+            }
+            let final_a = read_qm31_from(proof_data, &mut off);
+            let final_b = read_qm31_from(proof_data, &mut off);
+            if current_sum != final_a * final_b {
+                return Err(format!(
+                    "DEFERRED_MATMUL_FINAL_MISMATCH at deferred[{}]: sum={:?} != a*b={:?}",
+                    di, current_sum, final_a * final_b
+                ));
+            }
+            mix_secure_field(&mut ch, final_a);
+            mix_secure_field(&mut ch, final_b);
+            off += 1; // weight commitment (consumed, verified by GKR verifier)
         }
+    }
+
+    // Reject trailing data after all proofs
+    if off != proof_data.len() {
+        return Err(format!(
+            "trailing data after deferred proofs: consumed {} of {} felts",
+            off, proof_data.len()
+        ));
     }
 
     Ok(())
@@ -7020,6 +7084,7 @@ mod tests {
             circuit_depth,
             num_layers,
             false,
+            None,
         );
         assert!(result.is_ok(), "replay_verify failed: {:?}", result.err());
         println!("SUCCESS: replay_verify_serialized_proof passed");
@@ -8173,6 +8238,7 @@ mod tests {
             circuit.layers.len() as u32,
             gkr.layer_proofs.len() as u32,
             false,
+            None,
         );
         assert!(result.is_ok(), "Unpacked replay failed: {:?}", result.err());
         println!("LayerNorm+Piecewise unpacked replay OK ({} felts)", proof_data.len());
@@ -8187,6 +8253,7 @@ mod tests {
             circuit.layers.len() as u32,
             gkr.layer_proofs.len() as u32,
             true,
+            None,
         );
         assert!(result2.is_ok(), "Packed replay failed: {:?}", result2.err());
         println!("LayerNorm+Piecewise packed replay OK ({} felts)", packed_data.len());
@@ -8425,5 +8492,199 @@ mod tests {
         let report = verify_proof_fast_ml_gkr(&gkr_calldata, &[], &[], 2);
         let wc_check = report.checks.iter().find(|c| c.name == "weight_commitments").unwrap();
         assert!(!wc_check.passed, "empty weights should fail");
+    }
+
+    // =========================================================================
+    // Round 6: Deferred proof replay + trailing data rejection tests
+    // =========================================================================
+
+    #[test]
+    fn test_replay_deferred_proof_roundtrip() {
+        // Build a model with a residual Add (skip connection) → produces deferred proofs.
+        use crate::aggregation::prove_model_pure_gkr;
+        use crate::cairo_serde::{serialize_gkr_proof_data_only, serialize_gkr_proof_data_only_packed, serialize_raw_io};
+        use crate::components::activation::ActivationType;
+        let _guard = EnvVarGuard::unset("STWO_WEIGHT_BINDING");
+
+        let mut builder = GraphBuilder::new((1, 8));
+        builder.linear(8);             // node 0 (MatMul)
+        let branch = builder.fork();
+        builder.activation(ActivationType::ReLU); // node 1 (activation)
+        builder.linear(8);             // node 2 (MatMul)
+        builder.add_from(branch);      // node 3 (Add — produces deferred proof for skip branch)
+        builder.linear(4);             // node 4 (MatMul)
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, 8);
+        for j in 0..8 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
+
+        let mut weights = GraphWeights::new();
+        for &(node_id, wr, wc) in &[(0usize, 8, 8), (2, 8, 8), (4, 8, 4)] {
+            let mut w = M31Matrix::new(wr, wc);
+            for r in 0..wr {
+                for c in 0..wc {
+                    w.set(r, c, M31::from(((r * wc + c + node_id * 37) * 13 + 5) as u32 % 251));
+                }
+            }
+            weights.add_weight(node_id, w);
+        }
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit");
+        let agg_proof =
+            prove_model_pure_gkr(&graph, &input, &weights).expect("GKR proving should succeed");
+        let gkr = agg_proof.gkr_proof.as_ref().expect("GKR proof");
+        assert!(
+            !gkr.deferred_proofs.is_empty(),
+            "model with Add should produce deferred proofs"
+        );
+        let raw_io = serialize_raw_io(&input, &agg_proof.execution.output);
+        let matmul_dims = extract_matmul_dims(&circuit);
+
+        // Unpacked replay
+        let mut proof_data = Vec::new();
+        serialize_gkr_proof_data_only(gkr, &mut proof_data);
+        let result = super::replay_verify_serialized_proof(
+            &proof_data, &raw_io, &matmul_dims,
+            circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
+            false, None,
+        );
+        assert!(result.is_ok(), "Unpacked deferred replay failed: {:?}", result.err());
+
+        // Packed replay
+        let mut packed_data = Vec::new();
+        serialize_gkr_proof_data_only_packed(gkr, &mut packed_data);
+        let result2 = super::replay_verify_serialized_proof(
+            &packed_data, &raw_io, &matmul_dims,
+            circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
+            true, None,
+        );
+        assert!(result2.is_ok(), "Packed deferred replay failed: {:?}", result2.err());
+        println!("Deferred proof replay roundtrip OK (unpacked={}, packed={} felts, {} deferred)",
+            proof_data.len(), packed_data.len(), gkr.deferred_proofs.len());
+    }
+
+    #[test]
+    fn test_replay_tampered_deferred_rejected() {
+        // Tamper with the deferred proof data and verify the replay rejects it.
+        use crate::aggregation::prove_model_pure_gkr;
+        use crate::cairo_serde::{serialize_gkr_proof_data_only_packed, serialize_raw_io};
+        use crate::components::activation::ActivationType;
+        let _guard = EnvVarGuard::unset("STWO_WEIGHT_BINDING");
+
+        let mut builder = GraphBuilder::new((1, 8));
+        builder.linear(8);
+        let branch = builder.fork();
+        builder.activation(ActivationType::ReLU);
+        builder.linear(8);
+        builder.add_from(branch);
+        builder.linear(4);
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, 8);
+        for j in 0..8 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
+
+        let mut weights = GraphWeights::new();
+        for &(node_id, wr, wc) in &[(0usize, 8, 8), (2, 8, 8), (4, 8, 4)] {
+            let mut w = M31Matrix::new(wr, wc);
+            for r in 0..wr {
+                for c in 0..wc {
+                    w.set(r, c, M31::from(((r * wc + c + node_id * 37) * 13 + 5) as u32 % 251));
+                }
+            }
+            weights.add_weight(node_id, w);
+        }
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit");
+        let agg_proof =
+            prove_model_pure_gkr(&graph, &input, &weights).expect("GKR proving should succeed");
+        let gkr = agg_proof.gkr_proof.as_ref().expect("GKR proof");
+        let raw_io = serialize_raw_io(&input, &agg_proof.execution.output);
+        let matmul_dims = extract_matmul_dims(&circuit);
+
+        let mut packed_data = Vec::new();
+        serialize_gkr_proof_data_only_packed(gkr, &mut packed_data);
+
+        // Tamper: flip the last non-commitment felt in deferred proof section
+        // (final_b value, 2 felts before the weight commitment at the end)
+        let tamper_idx = packed_data.len() - 2;
+        packed_data[tamper_idx] = packed_data[tamper_idx] + FieldElement::ONE;
+
+        let result = super::replay_verify_serialized_proof(
+            &packed_data, &raw_io, &matmul_dims,
+            circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
+            true, None,
+        );
+        assert!(result.is_err(), "Tampered deferred proof should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("DEFERRED_MATMUL_FINAL_MISMATCH"),
+            "Error should mention DEFERRED_MATMUL_FINAL_MISMATCH, got: {err}"
+        );
+        println!("Tampered deferred proof correctly rejected: {err}");
+    }
+
+    #[test]
+    fn test_replay_trailing_data_rejected() {
+        // Append extra data after valid proof and verify it's rejected.
+        use crate::aggregation::prove_model_pure_gkr;
+        use crate::cairo_serde::{serialize_gkr_proof_data_only_packed, serialize_raw_io};
+        let _guard = EnvVarGuard::unset("STWO_WEIGHT_BINDING");
+
+        let mut builder = GraphBuilder::new((1, 4));
+        builder.linear(2);
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, 4);
+        for j in 0..4 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
+
+        let mut weights = GraphWeights::new();
+        let mut w = M31Matrix::new(4, 2);
+        for i in 0..4 {
+            for j in 0..2 {
+                w.set(i, j, M31::from((i * 2 + j + 1) as u32));
+            }
+        }
+        weights.add_weight(0, w);
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit");
+        let agg_proof =
+            prove_model_pure_gkr(&graph, &input, &weights).expect("GKR proving should succeed");
+        let gkr = agg_proof.gkr_proof.as_ref().expect("GKR proof");
+        let raw_io = serialize_raw_io(&input, &agg_proof.execution.output);
+        let matmul_dims = extract_matmul_dims(&circuit);
+
+        let mut packed_data = Vec::new();
+        serialize_gkr_proof_data_only_packed(gkr, &mut packed_data);
+
+        // Valid data should pass first
+        let result = super::replay_verify_serialized_proof(
+            &packed_data, &raw_io, &matmul_dims,
+            circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
+            true, None,
+        );
+        assert!(result.is_ok(), "Clean data should pass: {:?}", result.err());
+
+        // Append trailing felt
+        let mut with_trailing = packed_data.clone();
+        with_trailing.push(FieldElement::from(42u64));
+
+        let result2 = super::replay_verify_serialized_proof(
+            &with_trailing, &raw_io, &matmul_dims,
+            circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
+            true, None,
+        );
+        assert!(result2.is_err(), "Trailing data should be rejected");
+        let err = result2.unwrap_err();
+        assert!(
+            err.contains("trailing data"),
+            "Error should mention trailing data, got: {err}"
+        );
+        println!("Trailing data correctly rejected: {err}");
     }
 }
