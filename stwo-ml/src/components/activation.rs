@@ -358,14 +358,19 @@ pub fn piecewise_linear_eval(coeffs: &PiecewiseLinearCoeffs, val: M31) -> M31 {
     coeffs.slopes[seg_idx] * val + coeffs.intercepts[seg_idx]
 }
 
-/// Check whether piecewise activation mode is enabled via environment variable.
+/// Check whether piecewise activation mode is enabled (default: ON).
+///
+/// Piecewise-linear algebraic activation proves correctness over the full M31 domain
+/// via a 16-segment eq-sumcheck with no lookup tables. Opt-out for legacy LogUp path:
+/// `STWO_PIECEWISE_ACTIVATION=0` (or `false`/`no`).
 pub fn piecewise_activation_enabled() -> bool {
     std::env::var("STWO_PIECEWISE_ACTIVATION")
         .map(|v| {
             let s = v.trim();
-            s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+            // Opt-out: 0 / false / no / off → disable piecewise
+            !(s == "0" || s.eq_ignore_ascii_case("false") || s.eq_ignore_ascii_case("no") || s.eq_ignore_ascii_case("off"))
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Error type for activation proving.

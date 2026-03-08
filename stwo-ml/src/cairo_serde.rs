@@ -1354,6 +1354,7 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
             LayerProof::Activation {
                 activation_type,
                 logup_proof,
+                multiplicity_sumcheck,
                 activation_proof,
                 piecewise_proof: _piecewise_proof,
                 input_eval,
@@ -1376,6 +1377,8 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                         serialize_u32(0, output);
                     }
                 }
+                // Multiplicity sumcheck (must match replay's has_ms read)
+                serialize_multiplicity_sumcheck(multiplicity_sumcheck, output);
                 // Activation product proof (Phase A soundness)
                 serialize_activation_product_proof(activation_proof, output, false);
                 // Piecewise-linear algebraic proof (GELU/Sigmoid/Softmax)

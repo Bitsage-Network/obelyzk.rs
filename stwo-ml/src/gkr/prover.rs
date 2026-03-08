@@ -2320,6 +2320,14 @@ pub fn prove_gkr_gpu_with_cache(
                         *activation_type,
                         channel,
                     )?
+                } else if crate::components::activation::piecewise_activation_enabled() {
+                    // Piecewise-linear algebraic proof (full M31 domain, no lookup tables)
+                    reduce_activation_layer_piecewise(
+                        &current_claim,
+                        input_matrix,
+                        *activation_type,
+                        channel,
+                    )?
                 } else {
                     reduce_activation_layer_gpu(
                         &gpu,
@@ -3132,14 +3140,6 @@ fn reduce_activation_layer_gpu(
     use crate::gadgets::lookup_table::PrecomputedTable;
     use stwo::core::fields::FieldExpOps;
 
-    if crate::components::activation::piecewise_activation_enabled()
-        && activation_type != crate::components::activation::ActivationType::ReLU
-    {
-        eprintln!(
-            "WARNING: Piecewise activation requested but GPU path not yet supported, falling back to LogUp"
-        );
-    }
-
     // Pad input matrix and build MLE
     let input_padded = pad_matrix_pow2(input_matrix);
     let n = input_padded.rows * input_padded.cols;
@@ -3535,18 +3535,9 @@ pub fn prove_gkr_simd_gpu_with_cache(
                 // prove_gkr) which produce full activation LogUp proofs.
                 // The verifier accepts proofs from this SIMD path only when
                 // simd_combined=true (set above).
-                if crate::components::activation::piecewise_activation_enabled()
-                    && !matches!(activation_type, crate::components::activation::ActivationType::ReLU)
-                {
-                    eprintln!(
-                        "WARNING: Piecewise activation requested but SIMD path not yet supported, \
-                        falling back to LogUp at layer {} ({:?})",
-                        layer_idx, activation_type,
-                    );
-                }
                 if !matches!(activation_type, crate::components::activation::ActivationType::ReLU) {
                     eprintln!(
-                        "  WARNING: SIMD activation at layer {} ({:?}) — LogUp skipped \
+                        "  WARNING: SIMD activation at layer {} ({:?}) — piecewise/LogUp skipped \
                         (combined MLEs, not production path)",
                         layer_idx, activation_type,
                     );
@@ -10722,7 +10713,7 @@ mod tests {
     #[test]
     fn test_piecewise_gelu_roundtrip() {
         use crate::components::activation::ActivationType;
-        let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "1");
+        // Piecewise is now the default — no env var needed
 
         let mut input = M31Matrix::new(2, 2);
         input.set(0, 0, M31::from(100u32));
@@ -10794,7 +10785,7 @@ mod tests {
     #[test]
     fn test_piecewise_sigmoid_roundtrip() {
         use crate::components::activation::ActivationType;
-        let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "1");
+        // Piecewise is now the default — no env var needed
 
         let mut input = M31Matrix::new(2, 2);
         input.set(0, 0, M31::from(200u32));
@@ -10853,7 +10844,7 @@ mod tests {
     #[test]
     fn test_piecewise_softmax_roundtrip() {
         use crate::components::activation::ActivationType;
-        let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "1");
+        // Piecewise is now the default — no env var needed
 
         let mut input = M31Matrix::new(2, 2);
         input.set(0, 0, M31::from(300u32));
@@ -10912,7 +10903,7 @@ mod tests {
     #[test]
     fn test_piecewise_tamper_output() {
         use crate::components::activation::ActivationType;
-        let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "1");
+        // Piecewise is now the default — no env var needed
 
         let mut input = M31Matrix::new(2, 2);
         input.set(0, 0, M31::from(100u32));
@@ -10976,7 +10967,7 @@ mod tests {
     #[test]
     fn test_piecewise_tamper_indicator() {
         use crate::components::activation::ActivationType;
-        let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "1");
+        // Piecewise is now the default — no env var needed
 
         let mut input = M31Matrix::new(2, 2);
         input.set(0, 0, M31::from(100u32));
@@ -11097,21 +11088,42 @@ mod tests {
     fn test_piecewise_env_gate() {
         use crate::components::activation::ActivationType;
 
-        // Without env var: piecewise should NOT be enabled
+        // Default (no env var): piecewise should be enabled
+        {
+            let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "1");
+            assert!(crate::components::activation::piecewise_activation_enabled(),
+                "should be enabled with '1' (default)");
+        }
+
+        // Opt-out: "0" disables piecewise
         {
             let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "0");
             assert!(!crate::components::activation::piecewise_activation_enabled(),
                 "should be disabled with '0'");
         }
 
-        // With env var: piecewise should be enabled
+        // Opt-out: "false" disables piecewise
         {
-            let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "1");
-            assert!(crate::components::activation::piecewise_activation_enabled(),
-                "should be enabled with '1'");
+            let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "false");
+            assert!(!crate::components::activation::piecewise_activation_enabled(),
+                "should be disabled with 'false'");
         }
 
-        // With env var true: should be enabled
+        // Opt-out: "no" disables piecewise
+        {
+            let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "no");
+            assert!(!crate::components::activation::piecewise_activation_enabled(),
+                "should be disabled with 'no'");
+        }
+
+        // Opt-out: "off" disables piecewise
+        {
+            let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "off");
+            assert!(!crate::components::activation::piecewise_activation_enabled(),
+                "should be disabled with 'off'");
+        }
+
+        // Explicit "true" keeps piecewise enabled
         {
             let _guard = EnvVarGuard::set("STWO_PIECEWISE_ACTIVATION", "true");
             assert!(crate::components::activation::piecewise_activation_enabled(),

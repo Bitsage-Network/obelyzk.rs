@@ -248,7 +248,7 @@ pub enum LayerProof {
         /// `None` for non-ReLU activations and legacy proofs.
         activation_proof: Option<ActivationProductProof>,
         /// Piecewise-linear algebraic proof (GELU/Sigmoid/Softmax).
-        /// Present when `STWO_PIECEWISE_ACTIVATION=1`. Eliminates lookup tables.
+        /// Default for non-ReLU activations. Opt-out: `STWO_PIECEWISE_ACTIVATION=0`.
         piecewise_proof: Option<PiecewiseAlgebraicProof>,
         input_eval: SecureField,
         output_eval: SecureField,

@@ -2668,6 +2668,31 @@ fn verify_activation_reduction(
         }
     };
 
+    // Soundness gate: non-ReLU activations should use piecewise proof (full M31 domain).
+    // LogUp-only verifies lower 16-20 bits via range masking — reject unless opted in.
+    if !simd_combined
+        && !matches!(activation_type, ActivationType::ReLU)
+        && piecewise_proof.is_none()
+    {
+        let allow_logup = std::env::var("STWO_ALLOW_LOGUP_ACTIVATION")
+            .map(|v| {
+                let s = v.trim();
+                s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+            })
+            .unwrap_or(false);
+        if !allow_logup {
+            return Err(GKRError::VerificationError {
+                layer_idx,
+                reason: format!(
+                    "activation {:?} has LogUp proof but no piecewise proof — \
+                     LogUp only verifies lower bits. Set STWO_ALLOW_LOGUP_ACTIVATION=1 \
+                     to accept LogUp-only proofs.",
+                    activation_type,
+                ),
+            });
+        }
+    }
+
     let num_vars = logup.eq_round_polys.len();
     if num_vars == 0 {
         return Err(GKRError::VerificationError {
@@ -6266,6 +6291,8 @@ mod tests {
 
     #[test]
     fn test_activation_logup_gelu() {
+        // LogUp path is legacy — allow it via env var for backward-compat testing
+        let _guard = EnvVarGuard::set("STWO_ALLOW_LOGUP_ACTIVATION", "1");
         let input = {
             let mut m = M31Matrix::new(2, 2);
             m.set(0, 0, M31::from(100u32));
@@ -6280,6 +6307,7 @@ mod tests {
 
     #[test]
     fn test_activation_logup_sigmoid() {
+        let _guard = EnvVarGuard::set("STWO_ALLOW_LOGUP_ACTIVATION", "1");
         let input = {
             let mut m = M31Matrix::new(2, 2);
             m.set(0, 0, M31::from(42u32));
@@ -6294,6 +6322,7 @@ mod tests {
 
     #[test]
     fn test_activation_logup_softmax() {
+        let _guard = EnvVarGuard::set("STWO_ALLOW_LOGUP_ACTIVATION", "1");
         let input = {
             let mut m = M31Matrix::new(2, 2);
             m.set(0, 0, M31::from(10u32));

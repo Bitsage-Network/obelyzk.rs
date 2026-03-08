@@ -3590,7 +3590,8 @@ pub fn replay_verify_serialized_proof(
                     mix_secure_field(&mut ch, current_claim_value);
                     let _eta = ch.draw_qm31();
                     let two_pw = SecureField::from(M31::from(2u32));
-                    let mut pw_sum = current_claim_value;
+                    // All piecewise constraints vanish for honest prover → claimed sum = 0
+                    let mut pw_sum = SecureField::zero();
                     for _ in 0..pw_nr {
                         let c0 = read_qm31_from(proof_data, &mut off);
                         let c2 = read_qm31_from(proof_data, &mut off);
