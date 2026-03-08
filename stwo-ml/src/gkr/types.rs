@@ -253,6 +253,10 @@ pub enum LayerProof {
         input_eval: SecureField,
         output_eval: SecureField,
         table_commitment: starknet_ff::FieldElement,
+        /// True when this activation was proved via SIMD block-combination.
+        /// SIMD combined activations operate on combined SecureField MLEs and
+        /// cannot produce individual LogUp/algebraic/piecewise proofs.
+        simd_combined: bool,
     },
 
     /// Layer normalization reduction.
@@ -295,6 +299,10 @@ pub enum LayerProof {
         /// Number of active columns (for Part 0 channel mixing: mix_u64(n_active)).
         /// Serialized into Part 0 so the verifier can replay `mix_u64(n_active)`.
         n_active: Option<usize>,
+        /// Per-row mean values for multi-row binding verification.
+        /// When rows > 1, the verifier uses these to reconstruct mean(s₀)
+        /// from the Part 0 sumcheck challenge, preventing fake per-row means.
+        row_means: Option<Vec<M31>>,
     },
 
     /// RMS normalization reduction.
@@ -331,6 +339,10 @@ pub enum LayerProof {
         /// Number of active (un-padded) columns for the RMS² sumcheck.
         /// Serialized into Part 0 so the verifier can replay `mix_u64(n_active)`.
         rms_sq_n_active: Option<usize>,
+        /// Per-row rms² values for multi-row binding verification.
+        /// When rows > 1, the verifier uses these to reconstruct rms_sq(s₀)
+        /// from the Part 0 sumcheck challenge, preventing fake per-row rms².
+        row_rms_sq: Option<Vec<M31>>,
     },
 
     /// LogUp proof for dequantization (quantized → dequantized lookup).

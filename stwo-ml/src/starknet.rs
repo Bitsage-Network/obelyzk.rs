@@ -3293,11 +3293,18 @@ pub fn replay_verify_serialized_proof(
                 let rms_sq = read_qm31_from(proof_data, &mut off);
                 let rsqrt_eval = read_qm31_from(proof_data, &mut off);
                 off += 1; // commitment
-                let _simd = read_u32_from(proof_data, &mut off);
+                let simd_combined = read_u32_from(proof_data, &mut off);
 
                 // === Part 0: RMS² verification plain sumcheck ===
                 // Must be replayed BEFORE "RN" tag to match prover's channel mixing order.
                 let has_p0 = read_u32_from(proof_data, &mut off);
+                // SIMD consistency gate: non-SIMD must have Part 0, SIMD must not
+                if simd_combined == 0 && has_p0 != 1 {
+                    return Err(format!("layer {}: non-SIMD RMSNorm requires Part 0 (has_p0={})", layer, has_p0));
+                }
+                if simd_combined == 1 && has_p0 != 0 {
+                    return Err(format!("layer {}: SIMD RMSNorm must not have Part 0 (has_p0={})", layer, has_p0));
+                }
                 if has_p0 == 1 {
                     let two_p0 = SecureField::from(M31::from(2u32));
                     let p0_n_active = read_u32_from(proof_data, &mut off) as u64;
@@ -3433,6 +3440,16 @@ pub fn replay_verify_serialized_proof(
                 if trace {
                     eprintln!("[VERIFIER RMSNorm] ch after mult sumcheck: {:?}", ch.digest());
                 }
+
+                // Per-row rms_sq for multi-row binding (not channel-mixed, just consume)
+                let has_row_rms_sq = read_u32_from(proof_data, &mut off);
+                if has_row_rms_sq == 1 {
+                    let num_rows = read_u32_from(proof_data, &mut off) as usize;
+                    for _ in 0..num_rows {
+                        let _ = read_u32_from(proof_data, &mut off);
+                    }
+                }
+
                 mix_secure_field(&mut ch, input_eval);
                 mix_secure_field(&mut ch, output_eval);
                 if trace {
@@ -3597,10 +3614,17 @@ pub fn replay_verify_serialized_proof(
                 let mean = read_qm31_from(proof_data, &mut off);
                 let rsqrt_var = read_qm31_from(proof_data, &mut off);
                 off += 1; // commitment
-                let _simd = read_u32_from(proof_data, &mut off);
+                let simd_combined = read_u32_from(proof_data, &mut off);
 
                 // Part 0: Mean-Variance plain sumcheck
                 let has_mv = read_u32_from(proof_data, &mut off);
+                // SIMD consistency gate: non-SIMD must have Part 0, SIMD must not
+                if simd_combined == 0 && has_mv != 1 {
+                    return Err(format!("layer {}: non-SIMD LayerNorm requires Part 0 (has_mv={})", layer, has_mv));
+                }
+                if simd_combined == 1 && has_mv != 0 {
+                    return Err(format!("layer {}: SIMD LayerNorm must not have Part 0 (has_mv={})", layer, has_mv));
+                }
                 if has_mv == 1 {
                     let mv_n_active = read_u32_from(proof_data, &mut off) as u64;
                     let total_input_sum = read_qm31_from(proof_data, &mut off);
@@ -3708,6 +3732,15 @@ pub fn replay_verify_serialized_proof(
                 // var_eval (read, not mixed) — only present in CPU path
                 if has_mv == 1 {
                     let _var_eval = read_qm31_from(proof_data, &mut off);
+                }
+
+                // Per-row means for multi-row binding (not channel-mixed, just consume)
+                let has_row_means = read_u32_from(proof_data, &mut off);
+                if has_row_means == 1 {
+                    let num_rows = read_u32_from(proof_data, &mut off) as usize;
+                    for _ in 0..num_rows {
+                        let _ = read_u32_from(proof_data, &mut off);
+                    }
                 }
 
                 mix_secure_field(&mut ch, input_eval);
@@ -6793,6 +6826,15 @@ mod tests {
                         let _claimed_sum = read_qm31_from(&mut off);
                     }
 
+                    // Per-row rms_sq for multi-row binding (consume)
+                    let has_row_rms_sq = read_u32_from(&mut off);
+                    if has_row_rms_sq == 1 {
+                        let num_rows = read_u32_from(&mut off) as usize;
+                        for _ in 0..num_rows {
+                            let _ = read_u32_from(&mut off);
+                        }
+                    }
+
                     // Mix input/output evals (matching Rust verifier lines 3494-3495)
                     mix_secure_field(&mut ch, input_eval);
                     mix_secure_field(&mut ch, output_eval);
@@ -7352,6 +7394,15 @@ mod tests {
                         let _claimed_sum = read_qm31_from(&mut off);
                     }
 
+                    // Per-row rms_sq for multi-row binding (consume)
+                    let has_row_rms_sq = read_u32_from(&mut off);
+                    if has_row_rms_sq == 1 {
+                        let num_rows = read_u32_from(&mut off) as usize;
+                        for _ in 0..num_rows {
+                            let _ = read_u32_from(&mut off);
+                        }
+                    }
+
                     println!("  [off after RMSNorm: {}]", off);
                     mix_secure_field(&mut ch, input_eval);
                     mix_secure_field(&mut ch, output_eval);
@@ -7631,11 +7682,16 @@ mod tests {
                     let rms_sq = read_qm31_from(&mut off);
                     let rsqrt_eval = read_qm31_from(&mut off);
                     off += 1; // commitment
-                    let _simd = read_u32_from(&mut off);
+                    let simd_combined = read_u32_from(&mut off);
 
                     // === Part 0: RMS² verification plain sumcheck ===
                     // Must be replayed BEFORE "RN" tag to match prover's channel mixing order.
                     let has_p0 = read_u32_from(&mut off);
+                    // SIMD consistency gate
+                    assert!(simd_combined == 0 || has_p0 == 0,
+                        "layer {}: SIMD RMSNorm must not have Part 0", layer);
+                    assert!(simd_combined == 1 || has_p0 == 1,
+                        "layer {}: non-SIMD RMSNorm requires Part 0", layer);
                     if has_p0 == 1 {
                         let p0_n_active = read_u32_from(&mut off) as u64;
                         let p0_sq_sum = read_qm31_from(&mut off);
@@ -7665,7 +7721,7 @@ mod tests {
 
                     let nrounds = read_u32_from(&mut off) as usize;
                     let mut rms_sum = current_claim_value;
-                    for round in 0..nrounds {
+                    for _round in 0..nrounds {
                         let c0 = read_qm31_from(&mut off);
                         // Compressed: c1 omitted, reconstruct from rms_sum
                         let c2 = read_qm31_from(&mut off);
@@ -7723,6 +7779,14 @@ mod tests {
                         }
                         let _final_eval = read_qm31_from(&mut off);
                         let _claimed_sum = read_qm31_from(&mut off);
+                    }
+                    // Per-row rms_sq for multi-row binding (consume)
+                    let has_row_rms_sq = read_u32_from(&mut off);
+                    if has_row_rms_sq == 1 {
+                        let num_rows = read_u32_from(&mut off) as usize;
+                        for _ in 0..num_rows {
+                            let _ = read_u32_from(&mut off);
+                        }
                     }
                     mix_secure_field(&mut ch, input_eval);
                     mix_secure_field(&mut ch, output_eval);
@@ -7877,7 +7941,7 @@ mod tests {
                     mix_secure_field(&mut ch2, claim2);
                     let nr = p_read_u32(&mut poff) as usize;
                     let mut s = claim2;
-                    for round in 0..nr {
+                    for _round in 0..nr {
                         let c0 = p_read_qm31(&mut poff);
                         let c2 = p_read_qm31(&mut poff);
                         let c1 = s - c0 - c0 - c2; // reconstruct from current_sum
@@ -7897,10 +7961,15 @@ mod tests {
                     let rms = p_read_qm31(&mut poff);
                     let rsq = p_read_qm31(&mut poff);
                     poff += 1; // commitment
-                    let _simd = p_read_u32(&mut poff);
+                    let simd_combined = p_read_u32(&mut poff);
                     // === Part 0: RMS² verification plain sumcheck ===
                     // Must be replayed BEFORE "RN" tag to match prover's channel mixing order.
                     let has_p0 = p_read_u32(&mut poff);
+                    // SIMD consistency gate
+                    assert!(simd_combined == 0 || has_p0 == 0,
+                        "packed layer {}: SIMD RMSNorm must not have Part 0", layer);
+                    assert!(simd_combined == 1 || has_p0 == 1,
+                        "packed layer {}: non-SIMD RMSNorm requires Part 0", layer);
                     if has_p0 == 1 {
                         let p0_n_active = p_read_u32(&mut poff) as u64;
                         let p0_sq = p_read_qm31(&mut poff);
@@ -7928,7 +7997,7 @@ mod tests {
                     mix_secure_field(&mut ch2, claim2);
                     let nr = p_read_u32(&mut poff) as usize;
                     let mut s = claim2;
-                    for round in 0..nr {
+                    for _round in 0..nr {
                         let c0 = p_read_qm31(&mut poff);
                         let c2 = p_read_qm31(&mut poff); let c3 = p_read_qm31(&mut poff);
                         let c1 = s - c0 - c0 - c2 - c3; // reconstruct from current_sum
@@ -7946,7 +8015,7 @@ mod tests {
                         mix_secure_field(&mut ch2, cs);
                         let er = p_read_u32(&mut poff) as usize;
                         let mut ls = SecureField::from(M31::from(1u32));
-                        for round in 0..er {
+                        for _round in 0..er {
                             let c0 = p_read_qm31(&mut poff);
                             let c2 = p_read_qm31(&mut poff); let c3 = p_read_qm31(&mut poff);
                             let c1 = ls - c0 - c0 - c2 - c3; // reconstruct from current_sum
@@ -7968,6 +8037,12 @@ mod tests {
                             let _ = ch2.draw_qm31();
                         }
                         let _ = p_read_qm31(&mut poff); let _ = p_read_qm31(&mut poff);
+                    }
+                    // Per-row rms_sq for multi-row binding (consume)
+                    let hrr = p_read_u32(&mut poff);
+                    if hrr == 1 {
+                        let nr = p_read_u32(&mut poff) as usize;
+                        for _ in 0..nr { let _ = p_read_u32(&mut poff); }
                     }
                     mix_secure_field(&mut ch2, ie); mix_secure_field(&mut ch2, oe);
                     claim2 = ie;

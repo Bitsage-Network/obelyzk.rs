@@ -214,6 +214,7 @@ fn verify_gkr_inner(
                     input_eval,
                     output_eval,
                     table_commitment,
+                    simd_combined,
                 },
             ) => {
                 // Verify activation type in proof matches circuit
@@ -240,6 +241,7 @@ fn verify_gkr_inner(
                     *circuit_size,
                     layer_idx,
                     channel,
+                    *simd_combined,
                 )?
             }
 
@@ -261,6 +263,7 @@ fn verify_gkr_inner(
                     var_eval,
                     centered_binding_evals,
                     mv_claimed_sums,
+                    row_means,
                     ..
                 },
             ) => verify_layernorm_reduction(
@@ -283,6 +286,7 @@ fn verify_gkr_inner(
                 *var_eval,
                 *centered_binding_evals,
                 *mv_claimed_sums,
+                row_means.as_ref(),
             )?,
 
             (
@@ -368,6 +372,7 @@ fn verify_gkr_inner(
                     rms_sq_round_polys,
                     rms_sq_input_final,
                     rms_sq_claimed_sq_sum,
+                    row_rms_sq,
                     ..
                 },
             ) => verify_rmsnorm_reduction(
@@ -388,6 +393,7 @@ fn verify_gkr_inner(
                 rms_sq_round_polys.as_ref(),
                 *rms_sq_input_final,
                 *rms_sq_claimed_sq_sum,
+                row_rms_sq.as_ref(),
             )?,
 
             (
@@ -1369,6 +1375,7 @@ fn verify_gkr_simd_inner(
                     input_eval,
                     output_eval,
                     table_commitment,
+                    simd_combined,
                 },
             ) => {
                 if circuit_act_type != proof_act_type {
@@ -1393,6 +1400,7 @@ fn verify_gkr_simd_inner(
                     *circuit_size,
                     layer_idx,
                     channel,
+                    *simd_combined,
                 )?
             }
 
@@ -1414,6 +1422,7 @@ fn verify_gkr_simd_inner(
                     var_eval,
                     centered_binding_evals,
                     mv_claimed_sums,
+                    row_means,
                     ..
                 },
             ) => verify_layernorm_reduction(
@@ -1436,6 +1445,7 @@ fn verify_gkr_simd_inner(
                 *var_eval,
                 *centered_binding_evals,
                 *mv_claimed_sums,
+                row_means.as_ref(),
             )?,
 
             (
@@ -1537,6 +1547,7 @@ fn verify_gkr_simd_inner(
                     rms_sq_round_polys,
                     rms_sq_input_final,
                     rms_sq_claimed_sq_sum,
+                    row_rms_sq,
                     ..
                 },
             ) => verify_rmsnorm_reduction(
@@ -1557,6 +1568,7 @@ fn verify_gkr_simd_inner(
                 rms_sq_round_polys.as_ref(),
                 *rms_sq_input_final,
                 *rms_sq_claimed_sq_sum,
+                row_rms_sq.as_ref(),
             )?,
 
             (layer_type, layer_proof) => {
@@ -2591,6 +2603,7 @@ fn verify_activation_reduction(
     expected_size: usize,
     layer_idx: usize,
     channel: &mut PoseidonChannel,
+    simd_combined: bool,
 ) -> Result<GKRClaim, GKRError> {
     // Piecewise-linear algebraic activation verification (GELU/Sigmoid/Softmax)
     if let Some(pw_proof) = piecewise_proof {
@@ -2616,33 +2629,21 @@ fn verify_activation_reduction(
         );
     }
 
-    // Reject missing LogUp proofs by default.
-    // Opt-out: STWO_ALLOW_MISSING_ACTIVATION_PROOF=1 for legacy SIMD paths.
-    // Legacy opt-in: STWO_REQUIRE_ACTIVATION_PROOF=1 still works (no-op, always required now).
+    // When all proofs are None, only SIMD combined-product path is allowed.
+    // Non-SIMD activations MUST have a LogUp, algebraic, or piecewise proof.
     let logup = match logup_proof {
         Some(lp) => lp,
         None => {
-            if activation_proof.is_none() {
-                // Default: reject missing proofs (hardened).
-                // Allow opt-out only for SIMD block-combination path where
-                // combined SecureField MLEs can't be range-masked.
-                let allow_missing = std::env::var("STWO_ALLOW_MISSING_ACTIVATION_PROOF")
-                    .map(|v| {
-                        let s = v.trim();
-                        s == "1"
-                            || s.eq_ignore_ascii_case("true")
-                            || s.eq_ignore_ascii_case("yes")
-                            || s.eq_ignore_ascii_case("on")
-                    })
-                    .unwrap_or(false);
-                if !allow_missing {
-                    return Err(GKRError::VerificationError {
-                        layer_idx,
-                        reason: "activation layer missing LogUp or algebraic proof"
-                            .into(),
-                    });
-                }
+            if !simd_combined {
+                return Err(GKRError::VerificationError {
+                    layer_idx,
+                    reason: "activation layer missing LogUp or algebraic proof \
+                             (simd_combined=false)"
+                        .into(),
+                });
             }
+            // SIMD block-combination path: combined SecureField MLEs can't produce
+            // individual activation proofs. Accept input_eval directly.
             mix_secure_field(channel, input_eval);
             return Ok(GKRClaim {
                 point: output_claim.point.clone(),
@@ -3679,6 +3680,7 @@ fn verify_layernorm_reduction(
     var_eval: Option<SecureField>,
     centered_binding_evals: Option<(SecureField, SecureField)>,
     mv_claimed_sums: Option<(SecureField, SecureField)>,
+    row_means: Option<&Vec<M31>>,
 ) -> Result<GKRClaim, GKRError> {
     let num_vars = linear_round_polys.len();
     if num_vars == 0 {
@@ -3754,6 +3756,7 @@ fn verify_layernorm_reduction(
         let eta0 = channel.draw_qm31();
         let eta1 = eta0 * eta0;
         let mut current_sum = eta0 * total_input_sum + eta1 * total_centered_sq_sum;
+        let mut mv_challenges = Vec::with_capacity(num_vars);
         for (round, poly) in mv_polys.iter().enumerate() {
             let p0 = poly.c0;
             let p1 = poly.c0 + poly.c1 + poly.c2 + poly.c3;
@@ -3768,6 +3771,7 @@ fn verify_layernorm_reduction(
             }
             channel.mix_poly_coeffs_deg3(poly.c0, poly.c1, poly.c2, poly.c3);
             let ch = channel.draw_qm31();
+            mv_challenges.push(ch);
             current_sum = poly.eval(ch);
         }
         let (mv_input_final, mv_mean_final) = mean_var_final_evals.ok_or_else(|| {
@@ -3791,11 +3795,12 @@ fn verify_layernorm_reduction(
                 ),
             });
         }
-        // For single-row: verify mean derivation from total_input_sum
+        // Verify mean derivation binding
         let cols_padded = dim.next_power_of_two();
         let n_total = 1usize << num_vars;
         let rows = n_total / cols_padded;
         if rows == 1 {
+            // Single-row: direct derivation from total_input_sum
             let input_sum_m31 = M31::from(total_input_sum.0 .0 .0);
             let inv_n = {
                 let p: u64 = (1u64 << 31) - 1;
@@ -3822,6 +3827,78 @@ fn verify_layernorm_reduction(
                     ),
                 });
             }
+        } else if let Some(rm) = row_means {
+            // Multi-row binding: verify per-row means reconstruct mv_mean_final
+            if rm.len() != rows {
+                return Err(GKRError::VerificationError {
+                    layer_idx,
+                    reason: format!(
+                        "layernorm row_means length {} != rows {}",
+                        rm.len(), rows,
+                    ),
+                });
+            }
+            // Reconstruct mean(s₀) from per-row means.
+            // mean_mle is constant per row: mean(s) = Σ_r mean_r * eq(s[log_cols..], binary(r))
+            // Column variables contribute 1 (product of (1-s_i)(1-0)+s_i*0 = 1-s_i for bit=0,
+            // but since mean is constant across all cols, the col-part collapses).
+            // Actually: mean_mle[r,c] = mean_r for all c.
+            // So mean_mle evaluated at challenge s = (s_col..., s_row...) is:
+            //   Σ_{r,c} mean_r * eq(s_col, c) * eq(s_row, r)
+            // = Σ_r mean_r * eq(s_row, r) * Σ_c eq(s_col, c)
+            // = Σ_r mean_r * eq(s_row, r) * 1  (since Σ_c eq(s_col, c) = 1 for any s_col)
+            // Wait, that's not true. Σ_c eq(s, c) = 1 only when s is boolean.
+            // For random challenges, Σ_c eq(s_col, c) is NOT 1.
+            //
+            // Actually the mean MLE in the sumcheck is expanded as:
+            //   mean(x) = Σ_r mean_r * eq_row(x_row_bits, r)
+            //             * Π_{col_bit j} [(1 - x_j)*1 + x_j*1]  -- NO, this is wrong
+            //
+            // The MLE of a function f(r,c) = mean_r is:
+            //   f̃(s) = Σ_{r,c} mean_r * Π_i [(1-s_i)(1-b_i) + s_i*b_i]
+            //   where (b_0..b_{log_cols-1}, b_{log_cols}..b_{log_cols+log_rows-1}) = (c, r)
+            //
+            // But since mean_r doesn't depend on c:
+            //   f̃(s) = Σ_r mean_r * eq(s_row, r) * Σ_c eq(s_col, c)
+            // And Σ_c eq(s_col, c) = Σ_c Π_j [(1-s_j)(1-c_j)+s_j*c_j]
+            // For s_col ∈ F^{log_cols}: this sum = Π_j [(1-s_j)+s_j] = 1.
+            // Wait YES this IS 1! Because for each bit position j:
+            //   Σ_{c_j ∈ {0,1}} [(1-s_j)(1-c_j) + s_j*c_j]
+            //   = (1-s_j)*1 + s_j*0 + (1-s_j)*0 + s_j*1 = 1
+            // So the column variables sum to 1, and:
+            //   mean(s) = Σ_r mean_r * eq(s_row, r)
+            let log_cols = cols_padded.ilog2() as usize;
+            let log_rows = num_vars - log_cols;
+            // fold_mle fixes MSB first, so mv_challenges[0..log_rows] are the row
+            // variables (high bits of the array index), and mv_challenges[k]
+            // corresponds to row bit (log_rows - 1 - k).
+            let expected_mean: SecureField = (0..rows).map(|r| {
+                let mut eq_val = SecureField::one();
+                for k in 0..log_rows {
+                    let s_bit = mv_challenges[k];
+                    let row_bit = (r >> (log_rows - 1 - k)) & 1;
+                    if row_bit == 1 {
+                        eq_val = eq_val * s_bit;
+                    } else {
+                        eq_val = eq_val * (SecureField::one() - s_bit);
+                    }
+                }
+                eq_val * SecureField::from(rm[r])
+            }).sum();
+            if mv_mean_final != expected_mean {
+                return Err(GKRError::VerificationError {
+                    layer_idx,
+                    reason: format!(
+                        "layernorm multi-row mean binding failed: mv_mean_final={:?} != expected={:?}",
+                        mv_mean_final, expected_mean,
+                    ),
+                });
+            }
+        } else if !simd_combined {
+            return Err(GKRError::VerificationError {
+                layer_idx,
+                reason: "multi-row LayerNorm missing row_means for binding verification".into(),
+            });
         }
     } else if !simd_combined {
         let allow_missing = std::env::var("STWO_ALLOW_MISSING_NORM_PROOF")
@@ -4058,6 +4135,7 @@ fn verify_rmsnorm_reduction(
     rms_sq_round_polys: Option<&Vec<RoundPolyDeg3>>,
     rms_sq_input_final: Option<SecureField>,
     rms_sq_claimed_sq_sum: Option<SecureField>,
+    row_rms_sq: Option<&Vec<M31>>,
 ) -> Result<GKRClaim, GKRError> {
     let num_vars = linear_round_polys.len();
     if num_vars == 0 {
@@ -4153,16 +4231,14 @@ fn verify_rmsnorm_reduction(
                 ),
             });
         }
-        // Verify rms_sq derivation from total_sq_sum (single-row binding)
+        // Verify rms_sq derivation binding
         let cols_padded = dim.next_power_of_two();
         let n_total = 1usize << num_vars;
         let rows = n_total / cols_padded;
         if rows == 1 {
-            // rms_sq = (total_sq_sum * inv_n) & mask
-            // total_sq_sum is pure M31 (real part only) since input values are M31
+            // Single-row: direct derivation from total_sq_sum
             let sq_sum_m31 = M31::from(total_sq_sum.0 .0 .0);
             let inv_n = {
-                // Fermat's little theorem: n^(p-2) mod p
                 let p: u64 = (1u64 << 31) - 1;
                 let mut result: u64 = 1;
                 let mut base = (n_active as u64) % p;
@@ -4180,7 +4256,6 @@ fn verify_rmsnorm_reduction(
             let rsqrt_table_log_size = 16u32; // deterministic from RMSNormConfig
             let mask = (1u32 << rsqrt_table_log_size) - 1;
             let rms_sq_expected = M31::from(rms_sq_raw.0 & mask);
-            // For single-row constant MLE: rms_sq_eval = SecureField::from(rms_sq_m31)
             let rms_sq_actual = M31::from(rms_sq_eval.0 .0 .0);
             if rms_sq_expected != rms_sq_actual {
                 return Err(GKRError::VerificationError {
@@ -4191,6 +4266,51 @@ fn verify_rmsnorm_reduction(
                     ),
                 });
             }
+        } else if let Some(rr) = row_rms_sq {
+            // Multi-row binding: verify per-row rms_sq reconstructs rms_sq_eval
+            if rr.len() != rows {
+                return Err(GKRError::VerificationError {
+                    layer_idx,
+                    reason: format!(
+                        "rmsnorm row_rms_sq length {} != rows {}",
+                        rr.len(), rows,
+                    ),
+                });
+            }
+            // rms_sq_mle is constant per row: rms_sq(s) = Σ_r rms_sq_r * eq(s_row, r)
+            // (column variables sum to 1 for constant-per-row MLE)
+            // Bind at the claim point (output_claim.point), which is random.
+            // fold_mle fixes MSB first, so output_claim.point[0..log_rows] are the
+            // row variables, with point[k] corresponding to row bit (log_rows-1-k).
+            let log_cols = cols_padded.ilog2() as usize;
+            let log_rows = num_vars - log_cols;
+            let expected_rms_sq: SecureField = (0..rows).map(|r| {
+                let mut eq_val = SecureField::one();
+                for k in 0..log_rows {
+                    let s_bit = output_claim.point[k];
+                    let row_bit = (r >> (log_rows - 1 - k)) & 1;
+                    if row_bit == 1 {
+                        eq_val = eq_val * s_bit;
+                    } else {
+                        eq_val = eq_val * (SecureField::one() - s_bit);
+                    }
+                }
+                eq_val * SecureField::from(rr[r])
+            }).sum();
+            if rms_sq_eval != expected_rms_sq {
+                return Err(GKRError::VerificationError {
+                    layer_idx,
+                    reason: format!(
+                        "rmsnorm multi-row rms_sq binding failed: rms_sq_eval={:?} != expected={:?}",
+                        rms_sq_eval, expected_rms_sq,
+                    ),
+                });
+            }
+        } else if !simd_combined {
+            return Err(GKRError::VerificationError {
+                layer_idx,
+                reason: "multi-row RMSNorm missing row_rms_sq for binding verification".into(),
+            });
         }
     } else if !simd_combined {
         // Soundness gate: reject missing RMS² proof unless SIMD combined path.
@@ -4670,6 +4790,7 @@ pub fn verify_activation_reduction_for_test(
         0, // expected_size: not applicable for non-piecewise
         layer_idx,
         channel,
+        false, // simd_combined
     )
 }
 
@@ -4794,7 +4915,7 @@ mod tests {
     use crate::gkr::prover::{
         prove_gkr, reduce_activation_layer_for_test, reduce_embedding_layer_for_test,
         reduce_layernorm_layer_for_test, reduce_layernorm_simd_for_test, reduce_mul_layer_for_test,
-        reduce_quantize_layer_for_test,
+        reduce_quantize_layer_for_test, reduce_rmsnorm_layer_for_test,
     };
     use num_traits::Zero;
     use stwo::core::fields::m31::M31;
@@ -5722,6 +5843,7 @@ mod tests {
                     0, // expected_size: not applicable for non-piecewise tests
                     0,
                     &mut verifier_channel,
+                    false, // simd_combined
                 );
                 assert!(
                     result.is_ok(),
@@ -5810,6 +5932,7 @@ mod tests {
                     0, // expected_size: not applicable for non-piecewise tests
                     0,
                     &mut verifier_channel,
+                    false, // simd_combined
                 );
                 assert!(result.is_err(), "tampered multiplicities should fail");
             }
@@ -5894,6 +6017,7 @@ mod tests {
                     0, // expected_size: not applicable for non-piecewise tests
                     0,
                     &mut verifier_channel,
+                    false, // simd_combined
                 );
                 assert!(result.is_err(), "tampered eq round poly should fail");
             }
@@ -5976,6 +6100,7 @@ mod tests {
                     0, // expected_size: not applicable for non-piecewise tests
                     0,
                     &mut verifier_channel,
+                    false, // simd_combined
                 );
                 assert!(result.is_err(), "tampered final_evals should fail");
             }
@@ -6058,6 +6183,7 @@ mod tests {
                     0, // expected_size: not applicable for non-piecewise tests
                     0,
                     &mut verifier_channel,
+                    false, // simd_combined
                 )
             }
             _ => panic!("expected Activation proof"),
@@ -6243,6 +6369,7 @@ mod tests {
                     0, // expected_size: not applicable for non-piecewise tests
                     0,
                     &mut verifier_channel,
+                    false, // simd_combined
                 );
                 assert!(result.is_err(), "tampered GELU multiplicities should fail");
             }
@@ -6335,6 +6462,7 @@ mod tests {
                     0, // expected_size: not applicable for non-piecewise tests
                     0,
                     &mut verifier_channel,
+                    false, // simd_combined
                 );
                 assert!(result.is_err(), "tampered GELU eq-round poly should fail");
             }
@@ -6366,6 +6494,7 @@ mod tests {
             0, // expected_size
             0,
             &mut channel,
+            false, // simd_combined
         );
         assert!(result.is_err(), "should reject None proofs by default");
         let err_msg = format!("{:?}", result.err().unwrap());
@@ -6377,10 +6506,8 @@ mod tests {
     }
 
     #[test]
-    fn test_activation_allow_missing_opt_out() {
-        // STWO_ALLOW_MISSING_ACTIVATION_PROOF=1 opts out of the default requirement
-        let _guard = EnvVarGuard::set("STWO_ALLOW_MISSING_ACTIVATION_PROOF", "1");
-
+    fn test_activation_simd_combined_allows_missing_proofs() {
+        // SIMD block-combination path legitimately has all proofs None
         let input_eval = SecureField::from(M31::from(42u32));
         let output_eval = SecureField::from(M31::from(99u32));
         let output_claim = GKRClaim {
@@ -6402,8 +6529,9 @@ mod tests {
             0, // expected_size
             0,
             &mut channel,
+            true, // simd_combined: allows missing proofs
         );
-        assert!(result.is_ok(), "should accept None proofs when opt-out is set");
+        assert!(result.is_ok(), "SIMD combined path should accept None proofs");
     }
 
     // ===== LayerNorm Tests =====
@@ -6454,6 +6582,52 @@ mod tests {
                 if col < n_active {
                     let centered = padded.get(row, col) - mean;
                     output.set(row, col, centered * rsqrt);
+                } else {
+                    output.set(row, col, padded.get(row, col));
+                }
+            }
+        }
+        output
+    }
+
+    fn rmsnorm_forward(input: &M31Matrix, dim: usize) -> M31Matrix {
+        use crate::components::rmsnorm::{build_rsqrt_table, RMSNormConfig};
+        let config = RMSNormConfig::new(dim);
+        let rsqrt_table = build_rsqrt_table(config.rsqrt_table_log_size);
+        let padded = pad_matrix_pow2(input);
+        let n_active = dim.min(padded.cols);
+        let p: u64 = (1u64 << 31) - 1;
+
+        let inv_n = {
+            let mut result: u64 = 1;
+            let mut base = n_active as u64 % p;
+            let mut exp = p - 2;
+            while exp > 0 {
+                if exp & 1 == 1 {
+                    result = result * base % p;
+                }
+                base = base * base % p;
+                exp >>= 1;
+            }
+            M31::from(result as u32)
+        };
+
+        let mut output = M31Matrix::new(padded.rows, padded.cols);
+        for row in 0..padded.rows {
+            let mut sq_sum = M31::from(0u32);
+            for col in 0..n_active {
+                let x = padded.get(row, col);
+                sq_sum = sq_sum + x * x;
+            }
+            let rms_sq_raw = sq_sum * inv_n;
+            let rms_sq =
+                M31::from(rms_sq_raw.0 & ((1u32 << config.rsqrt_table_log_size) - 1));
+            let rsqrt = rsqrt_table
+                .lookup(rms_sq)
+                .expect("rms_sq reduced to table range");
+            for col in 0..padded.cols {
+                if col < n_active {
+                    output.set(row, col, padded.get(row, col) * rsqrt);
                 } else {
                     output.set(row, col, padded.get(row, col));
                 }
@@ -6525,6 +6699,7 @@ mod tests {
                 var_eval,
                 centered_binding_evals,
                 mv_claimed_sums,
+                row_means,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -6547,6 +6722,7 @@ mod tests {
                     *var_eval,
                     *centered_binding_evals,
                     *mv_claimed_sums,
+                    row_means.as_ref(),
                 );
                 assert!(
                     result.is_ok(),
@@ -6555,6 +6731,409 @@ mod tests {
                 );
             }
             _ => panic!("expected LayerNorm proof"),
+        }
+    }
+
+    /// Test multi-row LayerNorm with a 4×4 matrix (4 rows) — proves and verifies successfully.
+    #[test]
+    fn test_layernorm_multi_row_4x4_binding() {
+        let input = {
+            let mut m = M31Matrix::new(4, 4);
+            for r in 0..4u32 {
+                for c in 0..4u32 {
+                    m.set(r as usize, c as usize, M31::from(10 + r * 4 + c));
+                }
+            }
+            m
+        };
+        let dim = 4;
+
+        let output = layernorm_forward(&input, dim);
+        let output_padded = pad_matrix_pow2(&output);
+        let n = output_padded.rows * output_padded.cols;
+        let output_mle: Vec<SecureField> = output_padded
+            .data
+            .iter()
+            .take(n)
+            .map(|&v| SecureField::from(v))
+            .collect();
+        let num_vars = output_mle.len().ilog2() as usize;
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0x4C4E_4D52); // unique seed
+        let r = prover_channel.draw_qm31s(num_vars);
+        let claimed = evaluate_mle_pub(&output_mle, &r);
+        let output_claim = GKRClaim {
+            point: r.clone(),
+            value: claimed,
+        };
+
+        let (proof, _) =
+            reduce_layernorm_layer_for_test(&output_claim, &input, dim, &mut prover_channel)
+                .unwrap();
+
+        let mut verifier_channel = PoseidonChannel::new();
+        verifier_channel.mix_u64(0x4C4E_4D52);
+        let _r_v = verifier_channel.draw_qm31s(num_vars);
+
+        match &proof {
+            LayerProof::LayerNorm {
+                logup_proof,
+                multiplicity_sumcheck,
+                linear_round_polys,
+                linear_final_evals,
+                input_eval,
+                output_eval,
+                mean,
+                rsqrt_var,
+                rsqrt_table_commitment,
+                simd_combined,
+                mean_var_round_polys,
+                mean_var_final_evals,
+                var_eval,
+                centered_binding_evals,
+                mv_claimed_sums,
+                row_means,
+                ..
+            } => {
+                assert!(row_means.is_some(), "4-row LayerNorm should have row_means");
+                assert_eq!(row_means.as_ref().unwrap().len(), 4);
+                let result = verify_layernorm_reduction(
+                    &output_claim,
+                    logup_proof.as_ref(),
+                    multiplicity_sumcheck.as_ref(),
+                    linear_round_polys,
+                    *linear_final_evals,
+                    *input_eval,
+                    *output_eval,
+                    *mean,
+                    *rsqrt_var,
+                    *rsqrt_table_commitment,
+                    *simd_combined,
+                    dim,
+                    0,
+                    &mut verifier_channel,
+                    mean_var_round_polys.as_ref(),
+                    *mean_var_final_evals,
+                    *var_eval,
+                    *centered_binding_evals,
+                    *mv_claimed_sums,
+                    row_means.as_ref(),
+                );
+                assert!(
+                    result.is_ok(),
+                    "4×4 multi-row LayerNorm should verify: {:?}",
+                    result.err()
+                );
+            }
+            _ => panic!("expected LayerNorm proof"),
+        }
+    }
+
+    /// Tampering row_means[1] in a multi-row LayerNorm should make verification fail.
+    #[test]
+    fn test_layernorm_multi_row_tampered_mean_rejected() {
+        let input = {
+            let mut m = M31Matrix::new(2, 4);
+            m.set(0, 0, M31::from(10u32));
+            m.set(0, 1, M31::from(20u32));
+            m.set(0, 2, M31::from(30u32));
+            m.set(0, 3, M31::from(40u32));
+            m.set(1, 0, M31::from(5u32));
+            m.set(1, 1, M31::from(15u32));
+            m.set(1, 2, M31::from(25u32));
+            m.set(1, 3, M31::from(35u32));
+            m
+        };
+        let dim = 4;
+
+        let output = layernorm_forward(&input, dim);
+        let output_padded = pad_matrix_pow2(&output);
+        let n = output_padded.rows * output_padded.cols;
+        let output_mle: Vec<SecureField> = output_padded
+            .data
+            .iter()
+            .take(n)
+            .map(|&v| SecureField::from(v))
+            .collect();
+        let num_vars = output_mle.len().ilog2() as usize;
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0x4C4E_5441); // "LNTA" seed
+        let r = prover_channel.draw_qm31s(num_vars);
+        let claimed = evaluate_mle_pub(&output_mle, &r);
+        let output_claim = GKRClaim {
+            point: r.clone(),
+            value: claimed,
+        };
+
+        let (mut proof, _) =
+            reduce_layernorm_layer_for_test(&output_claim, &input, dim, &mut prover_channel)
+                .unwrap();
+
+        // Tamper row_means[1] — malicious prover sets a fake mean for row 1
+        if let LayerProof::LayerNorm {
+            ref mut row_means, ..
+        } = &mut proof
+        {
+            if let Some(ref mut rm) = row_means {
+                rm[1] = M31::from(999u32); // fake mean
+            }
+        }
+
+        let mut verifier_channel = PoseidonChannel::new();
+        verifier_channel.mix_u64(0x4C4E_5441);
+        let _r_v = verifier_channel.draw_qm31s(num_vars);
+
+        match &proof {
+            LayerProof::LayerNorm {
+                logup_proof,
+                multiplicity_sumcheck,
+                linear_round_polys,
+                linear_final_evals,
+                input_eval,
+                output_eval,
+                mean,
+                rsqrt_var,
+                rsqrt_table_commitment,
+                simd_combined,
+                mean_var_round_polys,
+                mean_var_final_evals,
+                var_eval,
+                centered_binding_evals,
+                mv_claimed_sums,
+                row_means,
+                ..
+            } => {
+                let result = verify_layernorm_reduction(
+                    &output_claim,
+                    logup_proof.as_ref(),
+                    multiplicity_sumcheck.as_ref(),
+                    linear_round_polys,
+                    *linear_final_evals,
+                    *input_eval,
+                    *output_eval,
+                    *mean,
+                    *rsqrt_var,
+                    *rsqrt_table_commitment,
+                    *simd_combined,
+                    dim,
+                    0,
+                    &mut verifier_channel,
+                    mean_var_round_polys.as_ref(),
+                    *mean_var_final_evals,
+                    *var_eval,
+                    *centered_binding_evals,
+                    *mv_claimed_sums,
+                    row_means.as_ref(),
+                );
+                assert!(
+                    result.is_err(),
+                    "tampered row_means should be rejected"
+                );
+                let err_msg = format!("{:?}", result.err().unwrap());
+                assert!(
+                    err_msg.contains("multi-row mean binding failed"),
+                    "unexpected error: {err_msg}",
+                );
+            }
+            _ => panic!("expected LayerNorm proof"),
+        }
+    }
+
+    /// Test multi-row RMSNorm with 2×8 matrix — proves and verifies successfully.
+    #[test]
+    fn test_rmsnorm_multi_row_binding() {
+        let input = {
+            let mut m = M31Matrix::new(2, 8);
+            for r in 0..2u32 {
+                for c in 0..8u32 {
+                    m.set(r as usize, c as usize, M31::from(1 + r * 8 + c));
+                }
+            }
+            m
+        };
+        let dim = 8;
+
+        let output = rmsnorm_forward(&input, dim);
+        let output_padded = pad_matrix_pow2(&output);
+        let n = output_padded.rows * output_padded.cols;
+        let output_mle: Vec<SecureField> = output_padded
+            .data
+            .iter()
+            .take(n)
+            .map(|&v| SecureField::from(v))
+            .collect();
+        let num_vars = output_mle.len().ilog2() as usize;
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0x524E_4D52); // "RNMR" seed
+        let r = prover_channel.draw_qm31s(num_vars);
+        let claimed = evaluate_mle_pub(&output_mle, &r);
+        let output_claim = GKRClaim {
+            point: r.clone(),
+            value: claimed,
+        };
+
+        let (proof, _) =
+            reduce_rmsnorm_layer_for_test(&output_claim, &input, dim, &mut prover_channel)
+                .unwrap();
+
+        let mut verifier_channel = PoseidonChannel::new();
+        verifier_channel.mix_u64(0x524E_4D52);
+        let _r_v = verifier_channel.draw_qm31s(num_vars);
+
+        match &proof {
+            LayerProof::RMSNorm {
+                logup_proof,
+                multiplicity_sumcheck,
+                linear_round_polys,
+                linear_final_evals,
+                input_eval,
+                output_eval,
+                rms_sq_eval,
+                rsqrt_eval,
+                rsqrt_table_commitment,
+                simd_combined,
+                rms_sq_round_polys,
+                rms_sq_input_final,
+                rms_sq_claimed_sq_sum,
+                row_rms_sq,
+                ..
+            } => {
+                assert!(row_rms_sq.is_some(), "2-row RMSNorm should have row_rms_sq");
+                assert_eq!(row_rms_sq.as_ref().unwrap().len(), 2);
+                let result = verify_rmsnorm_reduction(
+                    &output_claim,
+                    logup_proof.as_ref(),
+                    multiplicity_sumcheck.as_ref(),
+                    linear_round_polys,
+                    *linear_final_evals,
+                    *input_eval,
+                    *output_eval,
+                    *rms_sq_eval,
+                    *rsqrt_eval,
+                    *rsqrt_table_commitment,
+                    *simd_combined,
+                    dim,
+                    0,
+                    &mut verifier_channel,
+                    rms_sq_round_polys.as_ref(),
+                    *rms_sq_input_final,
+                    *rms_sq_claimed_sq_sum,
+                    row_rms_sq.as_ref(),
+                );
+                assert!(
+                    result.is_ok(),
+                    "2×8 multi-row RMSNorm should verify: {:?}",
+                    result.err()
+                );
+            }
+            _ => panic!("expected RMSNorm proof"),
+        }
+    }
+
+    /// Tampering row_rms_sq[0] in a multi-row RMSNorm should make verification fail.
+    #[test]
+    fn test_rmsnorm_multi_row_tampered_rms_sq_rejected() {
+        let input = {
+            let mut m = M31Matrix::new(2, 8);
+            for r in 0..2u32 {
+                for c in 0..8u32 {
+                    m.set(r as usize, c as usize, M31::from(1 + r * 8 + c));
+                }
+            }
+            m
+        };
+        let dim = 8;
+
+        let output = rmsnorm_forward(&input, dim);
+        let output_padded = pad_matrix_pow2(&output);
+        let n = output_padded.rows * output_padded.cols;
+        let output_mle: Vec<SecureField> = output_padded
+            .data
+            .iter()
+            .take(n)
+            .map(|&v| SecureField::from(v))
+            .collect();
+        let num_vars = output_mle.len().ilog2() as usize;
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0x524E_5441); // "RNTA" seed
+        let r = prover_channel.draw_qm31s(num_vars);
+        let claimed = evaluate_mle_pub(&output_mle, &r);
+        let output_claim = GKRClaim {
+            point: r.clone(),
+            value: claimed,
+        };
+
+        let (mut proof, _) =
+            reduce_rmsnorm_layer_for_test(&output_claim, &input, dim, &mut prover_channel)
+                .unwrap();
+
+        // Tamper row_rms_sq[0] — malicious prover sets fake rms_sq for row 0
+        if let LayerProof::RMSNorm {
+            ref mut row_rms_sq, ..
+        } = &mut proof
+        {
+            if let Some(ref mut rr) = row_rms_sq {
+                rr[0] = M31::from(42u32); // fake rms_sq
+            }
+        }
+
+        let mut verifier_channel = PoseidonChannel::new();
+        verifier_channel.mix_u64(0x524E_5441);
+        let _r_v = verifier_channel.draw_qm31s(num_vars);
+
+        match &proof {
+            LayerProof::RMSNorm {
+                logup_proof,
+                multiplicity_sumcheck,
+                linear_round_polys,
+                linear_final_evals,
+                input_eval,
+                output_eval,
+                rms_sq_eval,
+                rsqrt_eval,
+                rsqrt_table_commitment,
+                simd_combined,
+                rms_sq_round_polys,
+                rms_sq_input_final,
+                rms_sq_claimed_sq_sum,
+                row_rms_sq,
+                ..
+            } => {
+                let result = verify_rmsnorm_reduction(
+                    &output_claim,
+                    logup_proof.as_ref(),
+                    multiplicity_sumcheck.as_ref(),
+                    linear_round_polys,
+                    *linear_final_evals,
+                    *input_eval,
+                    *output_eval,
+                    *rms_sq_eval,
+                    *rsqrt_eval,
+                    *rsqrt_table_commitment,
+                    *simd_combined,
+                    dim,
+                    0,
+                    &mut verifier_channel,
+                    rms_sq_round_polys.as_ref(),
+                    *rms_sq_input_final,
+                    *rms_sq_claimed_sq_sum,
+                    row_rms_sq.as_ref(),
+                );
+                assert!(
+                    result.is_err(),
+                    "tampered row_rms_sq should be rejected"
+                );
+                let err_msg = format!("{:?}", result.err().unwrap());
+                assert!(
+                    err_msg.contains("multi-row rms_sq binding failed"),
+                    "unexpected error: {err_msg}",
+                );
+            }
+            _ => panic!("expected RMSNorm proof"),
         }
     }
 
@@ -6634,6 +7213,7 @@ mod tests {
                 var_eval,
                 centered_binding_evals,
                 mv_claimed_sums,
+                row_means,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -6656,6 +7236,7 @@ mod tests {
                     *var_eval,
                     *centered_binding_evals,
                     *mv_claimed_sums,
+                    row_means.as_ref(),
                 );
                 assert!(result.is_err(), "tampered linear round poly should fail");
             }
@@ -6738,6 +7319,7 @@ mod tests {
                 var_eval,
                 centered_binding_evals,
                 mv_claimed_sums,
+                row_means,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -6760,6 +7342,7 @@ mod tests {
                     *var_eval,
                     *centered_binding_evals,
                     *mv_claimed_sums,
+                    row_means.as_ref(),
                 );
                 assert!(result.is_err(), "tampered LogUp multiplicity should fail");
             }
@@ -6840,6 +7423,7 @@ mod tests {
                 var_eval,
                 centered_binding_evals,
                 mv_claimed_sums,
+                row_means,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -6862,6 +7446,7 @@ mod tests {
                     *var_eval,
                     *centered_binding_evals,
                     *mv_claimed_sums,
+                    row_means.as_ref(),
                 );
                 assert!(result.is_err(), "tampered linear final eval should fail");
             }
@@ -7052,6 +7637,7 @@ mod tests {
                 var_eval,
                 centered_binding_evals,
                 mv_claimed_sums,
+                row_means,
                 ..
             } => {
                 assert!(
@@ -7082,6 +7668,7 @@ mod tests {
                     *var_eval,
                     *centered_binding_evals,
                     *mv_claimed_sums,
+                    row_means.as_ref(),
                 );
                 assert!(
                     result.is_ok(),
@@ -7168,6 +7755,7 @@ mod tests {
                 var_eval,
                 centered_binding_evals,
                 mv_claimed_sums,
+                row_means,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -7190,6 +7778,7 @@ mod tests {
                     *var_eval,
                     *centered_binding_evals,
                     *mv_claimed_sums,
+                    row_means.as_ref(),
                 );
                 assert!(result.is_err(), "tampered SIMD layernorm proof should fail");
             }
@@ -7993,6 +8582,7 @@ mod tests {
                 var_eval,
                 centered_binding_evals,
                 mv_claimed_sums,
+                row_means,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -8015,6 +8605,7 @@ mod tests {
                     *var_eval,
                     *centered_binding_evals,
                     *mv_claimed_sums,
+                    row_means.as_ref(),
                 );
                 assert!(
                     result.is_err(),

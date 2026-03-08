@@ -1398,7 +1398,7 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 centered_binding_evals,
                 mv_claimed_sums,
                 n_active,
-                ..
+                row_means,
             } => {
                 serialize_u32(4, output); // tag: LayerNorm
                 serialize_qm31(*input_eval, output);
@@ -1458,6 +1458,15 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 serialize_multiplicity_sumcheck(multiplicity_sumcheck, output);
                 // var_eval (for verifier, not channel-mixed)
                 if let Some(ve) = var_eval { serialize_qm31(*ve, output); }
+                // Per-row means for multi-row binding
+                match row_means {
+                    Some(rm) => {
+                        serialize_u32(1, output);
+                        serialize_u32(rm.len() as u32, output);
+                        for m in rm { serialize_u32(m.0, output); }
+                    }
+                    None => serialize_u32(0, output),
+                }
             }
             LayerProof::Attention {
                 sub_proofs,
@@ -1603,7 +1612,7 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 rms_sq_input_final,
                 rms_sq_claimed_sq_sum,
                 rms_sq_n_active,
-                ..
+                row_rms_sq,
             } => {
                 serialize_u32(8, output); // tag: RMSNorm
                 serialize_qm31(*input_eval, output);
@@ -1655,6 +1664,15 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                     None => {
                         serialize_u32(0, output);
                     }
+                }
+                // Per-row rms_sq for multi-row binding
+                match row_rms_sq {
+                    Some(rr) => {
+                        serialize_u32(1, output);
+                        serialize_u32(rr.len() as u32, output);
+                        for v in rr { serialize_u32(v.0, output); }
+                    }
+                    None => serialize_u32(0, output),
                 }
             }
         }
@@ -1789,7 +1807,7 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 centered_binding_evals,
                 mv_claimed_sums,
                 n_active,
-                ..
+                row_means,
             } => {
                 serialize_u32(4, output);
                 serialize_qm31(*input_eval, output);
@@ -1845,6 +1863,15 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 serialize_multiplicity_sumcheck(multiplicity_sumcheck, output);
                 // var_eval (for verifier, not channel-mixed)
                 if let Some(ve) = var_eval { serialize_qm31(*ve, output); }
+                // Per-row means for multi-row binding
+                match row_means {
+                    Some(rm) => {
+                        serialize_u32(1, output);
+                        serialize_u32(rm.len() as u32, output);
+                        for m in rm { serialize_u32(m.0, output); }
+                    }
+                    None => serialize_u32(0, output),
+                }
             }
             LayerProof::Attention {
                 sub_proofs,
@@ -1986,7 +2013,7 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 rms_sq_input_final,
                 rms_sq_claimed_sq_sum,
                 rms_sq_n_active,
-                ..
+                row_rms_sq,
             } => {
                 serialize_u32(8, output);
                 serialize_qm31(*input_eval, output);
@@ -2037,6 +2064,15 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                     None => serialize_u32(0, output),
                 }
                 serialize_multiplicity_sumcheck(multiplicity_sumcheck, output);
+                // Per-row rms_sq for multi-row binding
+                match row_rms_sq {
+                    Some(rr) => {
+                        serialize_u32(1, output);
+                        serialize_u32(rr.len() as u32, output);
+                        for v in rr { serialize_u32(v.0, output); }
+                    }
+                    None => serialize_u32(0, output),
+                }
             }
         }
     }
@@ -2170,7 +2206,7 @@ fn serialize_layer_proof_packed_inner(
             centered_binding_evals,
             mv_claimed_sums,
             n_active,
-            ..
+            row_means,
         } => {
             serialize_u32(4, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2226,6 +2262,15 @@ fn serialize_layer_proof_packed_inner(
             serialize_multiplicity_sumcheck_packed(multiplicity_sumcheck, output);
             // var_eval (for verifier, not channel-mixed)
             if let Some(ve) = var_eval { serialize_qm31_packed(*ve, output); }
+            // Per-row means for multi-row binding
+            match row_means {
+                Some(rm) => {
+                    serialize_u32(1, output);
+                    serialize_u32(rm.len() as u32, output);
+                    for m in rm { serialize_u32(m.0, output); }
+                }
+                None => serialize_u32(0, output),
+            }
         }
         LayerProof::Attention {
             sub_proofs,
@@ -2310,7 +2355,7 @@ fn serialize_layer_proof_packed_inner(
             rms_sq_input_final,
             rms_sq_claimed_sq_sum,
             rms_sq_n_active,
-            ..
+            row_rms_sq,
         } => {
             serialize_u32(8, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2360,6 +2405,15 @@ fn serialize_layer_proof_packed_inner(
                 None => serialize_u32(0, output),
             }
             serialize_multiplicity_sumcheck_packed(multiplicity_sumcheck, output);
+            // Per-row rms_sq for multi-row binding
+            match row_rms_sq {
+                Some(rr) => {
+                    serialize_u32(1, output);
+                    serialize_u32(rr.len() as u32, output);
+                    for v in rr { serialize_u32(v.0, output); }
+                }
+                None => serialize_u32(0, output),
+            }
         }
         LayerProof::Quantize {
             logup_proof,
@@ -2583,7 +2637,7 @@ fn serialize_layer_proof_double_packed_inner(
             centered_binding_evals,
             mv_claimed_sums,
             n_active,
-            ..
+            row_means,
         } => {
             serialize_u32(4, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2639,6 +2693,15 @@ fn serialize_layer_proof_double_packed_inner(
             serialize_multiplicity_sumcheck_packed(multiplicity_sumcheck, output);
             // var_eval (for verifier, not channel-mixed)
             if let Some(ve) = var_eval { serialize_qm31_packed(*ve, output); }
+            // Per-row means for multi-row binding
+            match row_means {
+                Some(rm) => {
+                    serialize_u32(1, output);
+                    serialize_u32(rm.len() as u32, output);
+                    for m in rm { serialize_u32(m.0, output); }
+                }
+                None => serialize_u32(0, output),
+            }
         }
         LayerProof::Attention {
             sub_proofs,
@@ -2723,7 +2786,7 @@ fn serialize_layer_proof_double_packed_inner(
             rms_sq_input_final,
             rms_sq_claimed_sq_sum,
             rms_sq_n_active,
-            ..
+            row_rms_sq,
         } => {
             serialize_u32(8, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2773,6 +2836,15 @@ fn serialize_layer_proof_double_packed_inner(
                 None => serialize_u32(0, output),
             }
             serialize_multiplicity_sumcheck_packed(multiplicity_sumcheck, output);
+            // Per-row rms_sq for multi-row binding
+            match row_rms_sq {
+                Some(rr) => {
+                    serialize_u32(1, output);
+                    serialize_u32(rr.len() as u32, output);
+                    for v in rr { serialize_u32(v.0, output); }
+                }
+                None => serialize_u32(0, output),
+            }
         }
         LayerProof::Quantize {
             logup_proof,

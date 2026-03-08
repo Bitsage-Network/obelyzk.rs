@@ -3326,6 +3326,7 @@ fn reduce_activation_layer_gpu(
             input_eval,
             output_eval: output_claim.value,
             table_commitment,
+            simd_combined: false,
         },
         claim,
     ))
@@ -3532,8 +3533,8 @@ pub fn prove_gkr_simd_gpu_with_cache(
                 // SOUNDNESS NOTE: This path is NOT used in production proving.
                 // Production uses per-execution GPU/CPU paths (prove_gkr_gpu /
                 // prove_gkr) which produce full activation LogUp proofs.
-                // The verifier rejects proofs from this path by default —
-                // set STWO_ALLOW_MISSING_ACTIVATION_PROOF=1 to accept.
+                // The verifier accepts proofs from this SIMD path only when
+                // simd_combined=true (set above).
                 if crate::components::activation::piecewise_activation_enabled()
                     && !matches!(activation_type, crate::components::activation::ActivationType::ReLU)
                 {
@@ -3581,6 +3582,7 @@ pub fn prove_gkr_simd_gpu_with_cache(
                         input_eval,
                         output_eval: current_claim.value,
                         table_commitment: starknet_ff::FieldElement::ZERO,
+                        simd_combined: true,
                     },
                     claim,
                 )
@@ -5008,6 +5010,7 @@ fn reduce_activation_layer(
             input_eval,
             output_eval: output_claim.value,
             table_commitment,
+            simd_combined: false,
         },
         claim,
     ))
@@ -5297,6 +5300,7 @@ fn reduce_activation_layer_algebraic(
             input_eval,
             output_eval: output_claim.value,
             table_commitment: starknet_ff::FieldElement::ZERO,
+            simd_combined: false,
         },
         claim,
     ))
@@ -5630,6 +5634,7 @@ fn reduce_activation_layer_piecewise(
             input_eval,
             output_eval: output_claim.value,
             table_commitment: starknet_ff::FieldElement::ZERO,
+            simd_combined: false,
         },
         claim,
     ))
@@ -6376,6 +6381,7 @@ fn reduce_layernorm_layer(
     let mut var_mle = vec![SecureField::zero(); n];
     let mut output_mle = vec![SecureField::zero(); n];
     let mut centered_mle = vec![SecureField::zero(); n];
+    let mut per_row_means = Vec::with_capacity(input_padded.rows);
 
     for row in 0..input_padded.rows {
         // Mean: sum(x) / n over active columns
@@ -6384,6 +6390,7 @@ fn reduce_layernorm_layer(
             sum = sum + input_padded.get(row, col);
         }
         let mean = sum * inv_n;
+        per_row_means.push(mean);
         let mean_sf = SecureField::from(mean);
 
         // Variance: sum((x - mean)^2) / n
@@ -6745,6 +6752,7 @@ fn reduce_layernorm_layer(
             centered_binding_evals: Some((centered_binding_input, centered_binding_mean)),
             mv_claimed_sums: Some((total_input_sum, total_centered_sq_sum)),
             n_active: Some(n_active),
+            row_means: if input_padded.rows > 1 { Some(per_row_means) } else { None },
         },
         claim,
     ))
@@ -6826,6 +6834,7 @@ fn reduce_rmsnorm_layer(
     let mut rsqrt_mle = vec![SecureField::zero(); n];
     let mut rms_sq_mle = vec![SecureField::zero(); n];
     let mut output_mle = vec![SecureField::zero(); n];
+    let mut per_row_rms_sq = Vec::with_capacity(input_padded.rows);
 
     for row in 0..input_padded.rows {
         let mut sq_sum = M31::from(0u32);
@@ -6836,6 +6845,7 @@ fn reduce_rmsnorm_layer(
         // Reduce rms_sq to rsqrt_table range for LogUp.
         let rms_sq_raw = sq_sum * inv_n;
         let rms_sq = M31::from(rms_sq_raw.0 & ((1u32 << config.rsqrt_table_log_size) - 1));
+        per_row_rms_sq.push(rms_sq);
         let rsqrt = rsqrt_table.lookup(rms_sq).ok_or_else(|| {
             GKRError::LookupTableError(format!(
                 "RMSNorm rsqrt lookup failed: rms_sq {} (raw {}) exceeds table range 2^{}",
@@ -7118,6 +7128,7 @@ fn reduce_rmsnorm_layer(
             rms_sq_input_final: Some(rms_input_final),
             rms_sq_claimed_sq_sum: Some(total_sq_sum),
             rms_sq_n_active: Some(n_active),
+            row_rms_sq: if input_padded.rows > 1 { Some(per_row_rms_sq) } else { None },
         },
         GKRClaim {
             point: output_claim.point.clone(),
@@ -7376,6 +7387,7 @@ fn reduce_layernorm_layer_simd(
             centered_binding_evals: None,
             mv_claimed_sums: None,
             n_active: None,
+            row_means: None,
         },
         claim,
     ))
@@ -7503,6 +7515,7 @@ pub fn reduce_layernorm_simd_for_test(
             centered_binding_evals: None,
             mv_claimed_sums: None,
             n_active: None,
+            row_means: None,
         },
         claim,
     ))
