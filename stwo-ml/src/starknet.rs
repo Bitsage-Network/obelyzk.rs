@@ -3773,6 +3773,14 @@ pub fn replay_verify_serialized_proof(
                         let _ = read_u32_from(proof_data, &mut off);
                     }
                 }
+                // Per-row variances (consumed for offset tracking, not channel-mixed)
+                let has_row_variances = read_u32_from(proof_data, &mut off);
+                if has_row_variances == 1 {
+                    let num_rows = read_u32_from(proof_data, &mut off) as usize;
+                    for _ in 0..num_rows {
+                        let _ = read_u32_from(proof_data, &mut off);
+                    }
+                }
 
                 mix_secure_field(&mut ch, input_eval);
                 mix_secure_field(&mut ch, output_eval);

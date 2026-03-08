@@ -1399,6 +1399,7 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 mv_claimed_sums,
                 n_active,
                 row_means,
+                row_variances,
             } => {
                 serialize_u32(4, output); // tag: LayerNorm
                 serialize_qm31(*input_eval, output);
@@ -1464,6 +1465,15 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                         serialize_u32(1, output);
                         serialize_u32(rm.len() as u32, output);
                         for m in rm { serialize_u32(m.0, output); }
+                    }
+                    None => serialize_u32(0, output),
+                }
+                // Per-row variances for multi-row variance binding
+                match row_variances {
+                    Some(rv) => {
+                        serialize_u32(1, output);
+                        serialize_u32(rv.len() as u32, output);
+                        for v in rv { serialize_u32(v.0, output); }
                     }
                     None => serialize_u32(0, output),
                 }
@@ -1833,6 +1843,7 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 mv_claimed_sums,
                 n_active,
                 row_means,
+                row_variances,
             } => {
                 serialize_u32(4, output);
                 serialize_qm31(*input_eval, output);
@@ -1894,6 +1905,15 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                         serialize_u32(1, output);
                         serialize_u32(rm.len() as u32, output);
                         for m in rm { serialize_u32(m.0, output); }
+                    }
+                    None => serialize_u32(0, output),
+                }
+                // Per-row variances for multi-row variance binding
+                match row_variances {
+                    Some(rv) => {
+                        serialize_u32(1, output);
+                        serialize_u32(rv.len() as u32, output);
+                        for v in rv { serialize_u32(v.0, output); }
                     }
                     None => serialize_u32(0, output),
                 }
@@ -2267,6 +2287,7 @@ fn serialize_layer_proof_packed_inner(
             mv_claimed_sums,
             n_active,
             row_means,
+            row_variances,
         } => {
             serialize_u32(4, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2328,6 +2349,15 @@ fn serialize_layer_proof_packed_inner(
                     serialize_u32(1, output);
                     serialize_u32(rm.len() as u32, output);
                     for m in rm { serialize_u32(m.0, output); }
+                }
+                None => serialize_u32(0, output),
+            }
+            // Per-row variances for multi-row variance binding
+            match row_variances {
+                Some(rv) => {
+                    serialize_u32(1, output);
+                    serialize_u32(rv.len() as u32, output);
+                    for v in rv { serialize_u32(v.0, output); }
                 }
                 None => serialize_u32(0, output),
             }
@@ -2741,6 +2771,7 @@ fn serialize_layer_proof_double_packed_inner(
             mv_claimed_sums,
             n_active,
             row_means,
+            row_variances,
         } => {
             serialize_u32(4, output);
             serialize_qm31_packed(*input_eval, output);
@@ -2802,6 +2833,15 @@ fn serialize_layer_proof_double_packed_inner(
                     serialize_u32(1, output);
                     serialize_u32(rm.len() as u32, output);
                     for m in rm { serialize_u32(m.0, output); }
+                }
+                None => serialize_u32(0, output),
+            }
+            // Per-row variances for multi-row variance binding
+            match row_variances {
+                Some(rv) => {
+                    serialize_u32(1, output);
+                    serialize_u32(rv.len() as u32, output);
+                    for v in rv { serialize_u32(v.0, output); }
                 }
                 None => serialize_u32(0, output),
             }

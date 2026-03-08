@@ -6389,6 +6389,7 @@ fn reduce_layernorm_layer(
     let mut output_mle = vec![SecureField::zero(); n];
     let mut centered_mle = vec![SecureField::zero(); n];
     let mut per_row_means = Vec::with_capacity(input_padded.rows);
+    let mut per_row_variances = Vec::with_capacity(input_padded.rows);
 
     for row in 0..input_padded.rows {
         // Mean: sum(x) / n over active columns
@@ -6409,6 +6410,7 @@ fn reduce_layernorm_layer(
         // Reduce variance to rsqrt_table range [0, 2^table_log_size) for LogUp.
         let variance_raw = var_sum * inv_n;
         let variance = M31::from(variance_raw.0 & ((1u32 << config.rsqrt_table_log_size) - 1));
+        per_row_variances.push(variance);
         let variance_sf = SecureField::from(variance);
 
         let rsqrt = rsqrt_table.lookup(variance).ok_or_else(|| {
@@ -6760,6 +6762,7 @@ fn reduce_layernorm_layer(
             mv_claimed_sums: Some((total_input_sum, total_centered_sq_sum)),
             n_active: Some(n_active),
             row_means: if input_padded.rows > 1 { Some(per_row_means) } else { None },
+            row_variances: if input_padded.rows > 1 { Some(per_row_variances) } else { None },
         },
         claim,
     ))
@@ -7395,6 +7398,7 @@ fn reduce_layernorm_layer_simd(
             mv_claimed_sums: None,
             n_active: None,
             row_means: None,
+            row_variances: None,
         },
         claim,
     ))
@@ -7523,6 +7527,7 @@ pub fn reduce_layernorm_simd_for_test(
             mv_claimed_sums: None,
             n_active: None,
             row_means: None,
+            row_variances: None,
         },
         claim,
     ))

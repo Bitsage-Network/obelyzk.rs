@@ -137,8 +137,8 @@
     linear operations and, as of v32, nonlinear activations
     via range-reduced LogUp (GELU, Sigmoid, Softmax verified
     on lower 16--20 bits; ReLU via algebraic proof).
-    LayerNorm/RMSNorm mean/variance remain unconstrained;
-    we discuss the path to full inference verification.
+    LayerNorm/RMSNorm mean and variance are now fully constrained
+    via Part~0 plain sumcheck with per-row binding verification.
   \end{minipage}
 
   \vspace{8pt}
@@ -1154,8 +1154,9 @@ structure; changing $q$ requires no code modifications.
           the precomputed table on the lower $2^{16}$--$2^{20}$ bits
           via range-reduced LogUp; ReLU is verified algebraically.
   \end{enumerate}
-  \textbf{Not enforced:} LayerNorm/RMSNorm mean and variance
-  computation (see \Cref{sec:limitations}).
+  \item[(f)] LayerNorm/RMSNorm variance derivation is verified:
+        single-row via direct computation from Part~0 sums,
+        multi-row via per-row variance MLE binding.
 
   By union bound over $L=40$ layers, the total forgery probability
   for the linear arithmetic trace is:
@@ -1499,16 +1500,18 @@ Setting \texttt{STWO\_REQUIRE\_ACTIVATION\_PROOF=1} causes the verifier
 to reject proofs with missing activation LogUp or algebraic proofs.
 The default accepts legacy proofs for backward compatibility.
 
-\subsection{Remaining Gap: LayerNorm/RMSNorm Statistics}
+\subsection{LayerNorm/RMSNorm Statistics (Resolved)}
 
-LayerNorm rsqrt values are verified via LogUp, and the linear
-scaling $\text{output} = (\text{input} - \mu) \times \text{rsqrt}$
-is proven via eq-sumcheck.
-However, the \textbf{mean} ($\mu$) and \textbf{variance}
-computation are not independently constrained---the prover
-can claim arbitrary $\mu$ and $\sigma^2$ values.
-A future inner-product sumcheck for mean and degree-3 eq-sumcheck
-for variance will close this gap.
+LayerNorm mean and variance are now fully constrained.
+Part~0 plain sumcheck proves
+$\sum_x [\eta \cdot \text{input}(x) + \eta^2 \cdot \text{centered}(x)^2]$
+equals the claimed sums, from which the verifier derives
+$\mu = \text{total\_input\_sum} / n$ and
+$\sigma^2 = (\text{total\_centered\_sq\_sum} / n) \mathbin{\&} \text{mask}$.
+For multi-row inputs, per-row variance MLE binding ensures
+each row's variance is individually verified.
+RMSNorm variance was already constrained; the LayerNorm gap
+closed in Round~9.
 
 \subsection{End-to-End Multi-Layer Timing}
 
@@ -1597,13 +1600,12 @@ Starknet's transaction limits.
 The system achieves 3.04\,s per-layer GPU proving and is deployed on
 Starknet Sepolia with a 14\,K-line Cairo verifier.
 
-The deployed verifier constrains the linear arithmetic trace (matmul,
-addition, scaling) but not nonlinear activations.
-This is an honest limitation that we are actively addressing.
-With activation LogUp enforcement (constraining nonlinear functions
-via lookup arguments) and $q=10$ MLE queries, the system would
-extend coverage to full inference verification at 130-bit
-MLE opening security.
+The deployed verifier constrains the full inference trace: linear
+operations (matmul, addition, scaling), nonlinear activations via
+range-reduced LogUp, and LayerNorm/RMSNorm statistics via variance
+derivation binding.
+With $q=10$ MLE queries, the system achieves full inference
+verification at 130-bit MLE opening security.
 
 The mathematical foundation---GKR sumcheck over the M31 field tower,
 composed with Circle STARKs---is architecturally native to Starknet

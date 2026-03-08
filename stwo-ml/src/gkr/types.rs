@@ -303,6 +303,10 @@ pub enum LayerProof {
         /// When rows > 1, the verifier uses these to reconstruct mean(s₀)
         /// from the Part 0 sumcheck challenge, preventing fake per-row means.
         row_means: Option<Vec<M31>>,
+        /// Per-row variance values for multi-row variance binding verification.
+        /// When rows > 1, the verifier uses these to reconstruct var_eval
+        /// from the Part 0 sumcheck challenge, preventing fake per-row variances.
+        row_variances: Option<Vec<M31>>,
     },
 
     /// RMS normalization reduction.

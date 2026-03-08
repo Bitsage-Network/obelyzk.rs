@@ -264,6 +264,7 @@ fn verify_gkr_inner(
                     centered_binding_evals,
                     mv_claimed_sums,
                     row_means,
+                    row_variances,
                     ..
                 },
             ) => verify_layernorm_reduction(
@@ -287,6 +288,7 @@ fn verify_gkr_inner(
                 *centered_binding_evals,
                 *mv_claimed_sums,
                 row_means.as_ref(),
+                row_variances.as_ref(),
             )?,
 
             (
@@ -1429,6 +1431,7 @@ fn verify_gkr_simd_inner(
                     centered_binding_evals,
                     mv_claimed_sums,
                     row_means,
+                    row_variances,
                     ..
                 },
             ) => verify_layernorm_reduction(
@@ -1452,6 +1455,7 @@ fn verify_gkr_simd_inner(
                 *centered_binding_evals,
                 *mv_claimed_sums,
                 row_means.as_ref(),
+                row_variances.as_ref(),
             )?,
 
             (
@@ -3693,6 +3697,7 @@ fn verify_layernorm_reduction(
     centered_binding_evals: Option<(SecureField, SecureField)>,
     mv_claimed_sums: Option<(SecureField, SecureField)>,
     row_means: Option<&Vec<M31>>,
+    row_variances: Option<&Vec<M31>>,
 ) -> Result<GKRClaim, GKRError> {
     let num_vars = linear_round_polys.len();
     if num_vars == 0 {
@@ -3750,7 +3755,7 @@ fn verify_layernorm_reduction(
                 ),
             });
         }
-        let _ve = var_eval.ok_or_else(|| GKRError::VerificationError {
+        let ve = var_eval.ok_or_else(|| GKRError::VerificationError {
             layer_idx,
             reason: "layernorm: mean_var_round_polys present but var_eval missing".into(),
         })?;
@@ -3839,6 +3844,22 @@ fn verify_layernorm_reduction(
                     ),
                 });
             }
+            // Variance derivation: (total_centered_sq_sum / n_active) & mask
+            let centered_sq_sum_m31 = M31::from(total_centered_sq_sum.0 .0 .0);
+            let var_raw = centered_sq_sum_m31 * inv_n;
+            let rsqrt_table_log_size = 16u32;
+            let var_mask = (1u32 << rsqrt_table_log_size) - 1;
+            let var_expected = M31::from(var_raw.0 & var_mask);
+            let var_actual = M31::from(ve.0 .0 .0);
+            if var_expected != var_actual {
+                return Err(GKRError::VerificationError {
+                    layer_idx,
+                    reason: format!(
+                        "layernorm variance derivation mismatch: expected {} got {}",
+                        var_expected.0, var_actual.0,
+                    ),
+                });
+            }
         } else if let Some(rm) = row_means {
             // Multi-row binding: verify per-row means reconstruct mv_mean_final
             if rm.len() != rows {
@@ -3904,6 +3925,47 @@ fn verify_layernorm_reduction(
                         "layernorm multi-row mean binding failed: mv_mean_final={:?} != expected={:?}",
                         mv_mean_final, expected_mean,
                     ),
+                });
+            }
+            // Multi-row variance binding: verify per-row variances reconstruct ve
+            // var_mle is constant per row: var(s) = Σ_r var_r * eq(s_row, r)
+            // (same identity as mean_mle — column variables sum to 1)
+            if let Some(rv) = row_variances {
+                if rv.len() != rows {
+                    return Err(GKRError::VerificationError {
+                        layer_idx,
+                        reason: format!(
+                            "layernorm row_variances length {} != rows {}",
+                            rv.len(), rows,
+                        ),
+                    });
+                }
+                let expected_var: SecureField = (0..rows).map(|r| {
+                    let mut eq_val = SecureField::one();
+                    for k in 0..log_rows {
+                        let s_bit = mv_challenges[k];
+                        let row_bit = (r >> (log_rows - 1 - k)) & 1;
+                        if row_bit == 1 {
+                            eq_val = eq_val * s_bit;
+                        } else {
+                            eq_val = eq_val * (SecureField::one() - s_bit);
+                        }
+                    }
+                    eq_val * SecureField::from(rv[r])
+                }).sum();
+                if ve != expected_var {
+                    return Err(GKRError::VerificationError {
+                        layer_idx,
+                        reason: format!(
+                            "layernorm multi-row variance binding failed: ve={:?} != expected={:?}",
+                            ve, expected_var,
+                        ),
+                    });
+                }
+            } else if !simd_combined {
+                return Err(GKRError::VerificationError {
+                    layer_idx,
+                    reason: "multi-row LayerNorm missing row_variances for binding verification".into(),
                 });
             }
         } else if !simd_combined {
@@ -6712,6 +6774,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -6735,6 +6798,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(
                     result.is_ok(),
@@ -6806,6 +6870,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 assert!(row_means.is_some(), "4-row LayerNorm should have row_means");
@@ -6831,6 +6896,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(
                     result.is_ok(),
@@ -6915,6 +6981,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -6938,6 +7005,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(
                     result.is_err(),
@@ -7226,6 +7294,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -7249,6 +7318,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(result.is_err(), "tampered linear round poly should fail");
             }
@@ -7332,6 +7402,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -7355,6 +7426,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(result.is_err(), "tampered LogUp multiplicity should fail");
             }
@@ -7436,6 +7508,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -7459,6 +7532,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(result.is_err(), "tampered linear final eval should fail");
             }
@@ -7650,6 +7724,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 assert!(
@@ -7681,6 +7756,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(
                     result.is_ok(),
@@ -7768,6 +7844,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -7791,6 +7868,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(result.is_err(), "tampered SIMD layernorm proof should fail");
             }
@@ -8599,6 +8677,7 @@ mod tests {
                 centered_binding_evals,
                 mv_claimed_sums,
                 row_means,
+                row_variances,
                 ..
             } => {
                 let result = verify_layernorm_reduction(
@@ -8622,6 +8701,7 @@ mod tests {
                     *centered_binding_evals,
                     *mv_claimed_sums,
                     row_means.as_ref(),
+                    row_variances.as_ref(),
                 );
                 assert!(
                     result.is_err(),
