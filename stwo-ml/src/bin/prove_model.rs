@@ -227,6 +227,13 @@ struct Cli {
     /// The cache is saved back after proving.
     #[arg(long)]
     kv_cache_dir: Option<PathBuf>,
+
+    /// Run N decode-step benchmarks after prefill, reporting per-step latency.
+    ///
+    /// Requires `--kv-cache-dir` and `--format ml_gkr`. Forces `--profile`.
+    /// Outputs `<output>.decode_bench.json` with per-step timing breakdown.
+    #[arg(long)]
+    decode_bench: Option<usize>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1573,6 +1580,131 @@ fn main() {
             stwo_ml::components::attention::ModelKVCache::new()
         }
     });
+
+    // ── Decode-step benchmark mode ──────────────────────────────────────
+    if let Some(n_steps) = cli.decode_bench {
+        if cli.format != OutputFormat::MlGkr {
+            eprintln!("Error: --decode-bench requires --format ml_gkr");
+            process::exit(1);
+        }
+        if cli.kv_cache_dir.is_none() {
+            eprintln!("Error: --decode-bench requires --kv-cache-dir");
+            process::exit(1);
+        }
+        // Force profiling on
+        stwo_ml::set_profile(true);
+
+        let mut kvc = model_kv_cache.take().unwrap();
+
+        // Pre-warm weight cache if available
+        if let Some(ref wc) = weight_cache {
+            let total_weights = model.weights.weights.len();
+            let cache_count = wc.read().map(|c| c.len()).unwrap_or(0);
+            if cache_count < total_weights {
+                eprintln!("[BENCH] Pre-warming {} weight Merkle roots...", total_weights - cache_count);
+                stwo_ml::weight_cache::prewarm_weight_roots_gpu_exclusive(
+                    &model.weights, wc, cli.model_dir.as_deref(),
+                );
+            }
+        }
+
+        // Phase 1: Prefill
+        let (_, d_model) = model.input_shape;
+        eprintln!("[BENCH] Prefill ({} tokens, d_model={})...", input.rows, d_model);
+        let t_prefill = Instant::now();
+        let _prefill_proof = stwo_ml::aggregation::prove_model_pure_gkr_prefill_with_cache(
+            &model.graph, &input, &model.weights, &mut kvc,
+            weight_cache.as_ref(),
+        ).unwrap_or_else(|e| {
+            eprintln!("Error: prefill failed: {e}");
+            process::exit(1);
+        });
+        let prefill_ms = t_prefill.elapsed().as_secs_f64() * 1000.0;
+        // Consume prefill profile
+        let _ = stwo_ml::gkr::profiler::take_profile_json();
+        eprintln!("[BENCH] Prefill: {:.0}ms", prefill_ms);
+
+        // Phase 2: Decode steps
+        let mut steps: Vec<serde_json::Value> = Vec::with_capacity(n_steps);
+
+        eprintln!("[BENCH] Running {} decode steps...", n_steps);
+        eprintln!();
+        for step in 0..n_steps {
+            // Deterministic synthetic token: M31Matrix(1, d_model)
+            let mut token = M31Matrix::new(1, d_model);
+            for j in 0..d_model {
+                token.set(0, j, M31::from(((step * d_model + j) % 251 + 1) as u32));
+            }
+
+            // Get cache length before this step
+            let cache_len: usize = kvc.layers.values().next().map(|c| c.cached_len).unwrap_or(0);
+
+            let t_step = Instant::now();
+            let _proof = stwo_ml::aggregation::prove_model_pure_gkr_decode_step(
+                &model.graph, &token, &model.weights, &mut kvc,
+                weight_cache.as_ref(),
+            ).unwrap_or_else(|e| {
+                eprintln!("Error: decode step {} failed: {e}", step + 1);
+                process::exit(1);
+            });
+            let step_ms = t_step.elapsed().as_secs_f64() * 1000.0;
+
+            // Extract per-phase timing from profiler JSON
+            let profile_json = stwo_ml::gkr::profiler::take_profile_json();
+            let ph = parse_profile_phases(&profile_json);
+
+            // RSS memory (Unix only)
+            let rss_mb = get_rss_mb();
+
+            eprintln!(
+                "Step {:>2}: {:>6.0}ms (fwd={:.0}ms gkr={:.0}ms attn={:.0}ms kv={:.0}ms) cache={}",
+                step + 1, step_ms, ph.forward_pass_ms, ph.gkr_proof_ms,
+                ph.attention_proofs_ms, ph.commitments_kv_cache_ms, cache_len + 1,
+            );
+
+            steps.push(serde_json::json!({
+                "step": step + 1,
+                "cache_len": cache_len + 1,
+                "elapsed_ms": round1(step_ms),
+                "rss_mb": rss_mb,
+                "forward_pass_ms": round1(ph.forward_pass_ms),
+                "gkr_proof_ms": round1(ph.gkr_proof_ms),
+                "attention_proofs_ms": round1(ph.attention_proofs_ms),
+                "commitments_io_ms": round1(ph.commitments_io_ms),
+                "commitments_kv_cache_ms": round1(ph.commitments_kv_cache_ms),
+            }));
+        }
+
+        // Scaling analysis: linear fit of attention_proofs_ms vs cache_len
+        let (growth_per_token, steady_state) = compute_scaling_analysis(&steps);
+
+        eprintln!();
+        eprintln!("Attention growth: {:.1}ms/token", growth_per_token);
+        eprintln!("Steady-state per-token: {:.0}ms", steady_state);
+
+        let report = serde_json::json!({
+            "prefill": {
+                "tokens": input.rows,
+                "elapsed_ms": round1(prefill_ms),
+            },
+            "decode_steps": steps,
+            "scaling_analysis": {
+                "attention_growth_per_token_ms": round1(growth_per_token),
+                "steady_state_per_token_ms": round1(steady_state),
+            },
+        });
+
+        let bench_path = cli.output.with_extension("decode_bench.json");
+        let report_str = serde_json::to_string_pretty(&report).unwrap();
+        std::fs::write(&bench_path, &report_str).unwrap_or_else(|e| {
+            eprintln!("Error writing decode bench output: {e}");
+            process::exit(1);
+        });
+        eprintln!();
+        eprintln!("Decode bench JSON written to {}", bench_path.display());
+        return;
+    }
+    // ── End: decode-step benchmark mode ──────────────────────────────────
 
     let mut run_proof = || {
         if cli.format == OutputFormat::MlGkr {
@@ -6535,4 +6667,110 @@ fn compute_weight_commitment(
         }
     }
     commitment
+}
+
+// ── Decode-bench helpers ─────────────────────────────────────────────
+
+/// Per-phase timing extracted from a single profiler JSON snapshot.
+struct StepPhases {
+    forward_pass_ms: f64,
+    gkr_proof_ms: f64,
+    attention_proofs_ms: f64,
+    commitments_io_ms: f64,
+    commitments_kv_cache_ms: f64,
+}
+
+fn parse_profile_phases(json: &Option<String>) -> StepPhases {
+    let zero = StepPhases {
+        forward_pass_ms: 0.0,
+        gkr_proof_ms: 0.0,
+        attention_proofs_ms: 0.0,
+        commitments_io_ms: 0.0,
+        commitments_kv_cache_ms: 0.0,
+    };
+    let Some(json) = json else { return zero };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return zero;
+    };
+    let phases = v.get("phases").and_then(|p| p.as_array());
+    let Some(phases) = phases else { return zero };
+
+    let mut s = zero;
+    for phase in phases {
+        let name = phase.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let ms = phase.get("elapsed_ms").and_then(|m| m.as_f64()).unwrap_or(0.0);
+        match name {
+            "forward_pass" => s.forward_pass_ms = ms,
+            "gkr_proof" => s.gkr_proof_ms += ms,
+            "attention_proofs" => s.attention_proofs_ms = ms,
+            "commitments_io" => s.commitments_io_ms = ms,
+            "commitments_kv_cache" => s.commitments_kv_cache_ms = ms,
+            _ => {}
+        }
+    }
+    s
+}
+
+/// Get current RSS in MB (Unix only, returns 0 on other platforms).
+fn get_rss_mb() -> u64 {
+    #[cfg(unix)]
+    {
+        // getrusage maxrss is in KB on Linux, bytes on macOS
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        if ret == 0 {
+            #[cfg(target_os = "macos")]
+            { (usage.ru_maxrss as u64) / (1024 * 1024) }
+            #[cfg(not(target_os = "macos"))]
+            { (usage.ru_maxrss as u64) / 1024 }
+        } else {
+            0
+        }
+    }
+    #[cfg(not(unix))]
+    { 0 }
+}
+
+/// Round to 1 decimal place.
+fn round1(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
+}
+
+/// Simple linear regression: attention_proofs_ms ~ a * cache_len + b.
+/// Returns (slope = growth per token, mean elapsed = steady state).
+fn compute_scaling_analysis(steps: &[serde_json::Value]) -> (f64, f64) {
+    if steps.len() < 2 {
+        let ms = steps.first()
+            .and_then(|s| s.get("elapsed_ms"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        return (0.0, ms);
+    }
+
+    let n = steps.len() as f64;
+    let mut sum_x = 0.0f64;
+    let mut sum_y = 0.0f64;
+    let mut sum_xy = 0.0f64;
+    let mut sum_xx = 0.0f64;
+    let mut sum_elapsed = 0.0f64;
+
+    for s in steps {
+        let x = s.get("cache_len").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let y = s.get("attention_proofs_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let elapsed = s.get("elapsed_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        sum_x += x;
+        sum_y += y;
+        sum_xy += x * y;
+        sum_xx += x * x;
+        sum_elapsed += elapsed;
+    }
+
+    let denom = n * sum_xx - sum_x * sum_x;
+    let slope = if denom.abs() > 1e-12 {
+        (n * sum_xy - sum_x * sum_y) / denom
+    } else {
+        0.0
+    };
+
+    (slope, sum_elapsed / n)
 }

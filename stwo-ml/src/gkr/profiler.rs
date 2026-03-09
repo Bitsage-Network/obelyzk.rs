@@ -24,7 +24,8 @@
 //! - `forward_pass` — model forward execution (contains per-op-type sub-breakdown)
 //! - `gkr_proof` — GKR proving pass
 //! - `attention_proofs` — attention layer proving (independent from GKR)
-//! - `commitments` — layer chain + IO commitment computation
+//! - `commitments_io` — layer chain + IO + LayerNorm commitment computation
+//! - `commitments_kv_cache` — KV-cache rehash commitment
 //! - `unified_stark` — non-matmul component STARK proving
 //!
 //! **Serialization phases** (recorded by `starknet.rs`):

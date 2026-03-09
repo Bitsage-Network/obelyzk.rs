@@ -4705,8 +4705,8 @@ where
     outer_profiler.end_phase(0);
     // ── End: attention_proofs ──
 
-    // Phase 2c: Commitments (layer chain + IO, computed in parallel)
-    outer_profiler.begin_phase("commitments", 0);
+    // Phase 2c: Commitments — IO (layer chain + IO + layernorm)
+    outer_profiler.begin_phase("commitments_io", 0);
     let (layer_chain_commitment, io_commitment) = rayon::join(
         || compute_layer_chain_commitment(input, &intermediates, &current),
         || compute_io_commitment(input, &current),
@@ -4715,6 +4715,11 @@ where
         .par_iter()
         .map(|layer| compute_layernorm_mean_var_commitment(&layer.means, &layer.variances))
         .collect();
+    outer_profiler.end_phase(0);
+    // ── End: commitments_io ──
+
+    // Phase 2d: Commitments — KV-cache rehash
+    outer_profiler.begin_phase("commitments_kv_cache", 0);
     let (kv_cache_commitment, prev_kv_cache_commitment) = if let Some(ref mut kvc) = kv_cache {
         let prev = kvc.super_commitment();
         let commitment = kvc.commit();
@@ -4723,7 +4728,7 @@ where
         (None, None)
     };
     outer_profiler.end_phase(0);
-    // ── End: commitments ──
+    // ── End: commitments_kv_cache ──
 
     let execution = GraphExecution {
         intermediates,

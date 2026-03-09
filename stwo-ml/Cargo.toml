@@ -98,3 +98,7 @@ harness = false
 [[bench]]
 name = "e2e_models"
 harness = false
+
+[[bench]]
+name = "decode"
+harness = false
