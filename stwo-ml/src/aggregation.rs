@@ -4497,14 +4497,11 @@ where
     // If a KV-cache is present, mix its current super-commitment so proofs are
     // cryptographically tied to a specific cache snapshot. Verifiers that replay
     // the channel must mix the same commitment to get matching challenges.
+    // Uses mix_felt (1 hades permutation) — matches Cairo's channel_mix_felt
+    // and replay_verify_serialized_proof's ch.mix_felt(kvc).
     if let Some(ref kvc) = kv_cache {
         let sc = kvc.super_commitment();
-        // Mix all 4 felt limbs into the channel for full 252-bit binding.
-        let bytes = sc.to_bytes_be();
-        for chunk in bytes.chunks(8) {
-            let val = u64::from_be_bytes(chunk.try_into().unwrap_or([0u8; 8]));
-            gkr_channel.mix_u64(val);
-        }
+        gkr_channel.mix_felt(sc);
     }
 
     #[allow(unused_variables)]

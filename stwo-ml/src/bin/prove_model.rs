@@ -1959,6 +1959,11 @@ fn main() {
                         Ok(circuit) => {
                             let mut verify_channel =
                                 stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
+                            // Mix KV-cache commitment before GKR verification
+                            // (must match prover's channel seeding in aggregation.rs)
+                            if let Some(kvc) = proof.kv_cache_commitment {
+                                verify_channel.mix_felt(kvc);
+                            }
                             match stwo_ml::gkr::verify_gkr_with_weights(
                                 &circuit,
                                 gkr_p,
@@ -2116,7 +2121,7 @@ fn main() {
                                     // Auto-select streaming verification (v25) for large proofs.
                                     // Streaming passes proof data as calldata (no storage reads),
                                     // avoiding the step limit hit by verify_gkr_execute.
-                                    match build_streaming_gkr_calldata(gkr_p, &circuit, model_id, &raw_io) {
+                                    match build_streaming_gkr_calldata(gkr_p, &circuit, model_id, &raw_io, proof.kv_cache_commitment, proof.prev_kv_cache_commitment) {
                                         Ok(streaming) => {
                                             let num_batches = streaming.stream_batches.len();
                                             eprintln!(
@@ -2171,7 +2176,7 @@ fn main() {
                                                 "  Warning: streaming calldata build failed, falling back to chunked v2: {e}"
                                             );
                                             // Fall back to chunked v2 (may hit step limit for large proofs)
-                                            match build_chunked_gkr_calldata(gkr_p, &circuit, model_id, &raw_io) {
+                                            match build_chunked_gkr_calldata(gkr_p, &circuit, model_id, &raw_io, proof.kv_cache_commitment) {
                                                 Ok(chunked) => {
                                                     eprintln!(
                                                         "  verify_calldata: {} felts → {} chunks (chunked session mode)",
