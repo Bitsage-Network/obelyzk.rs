@@ -316,6 +316,37 @@ impl PhaseProfiler {
         self.phases.values().map(|p| p.hash_count).sum()
     }
 
+    /// Merge phases from an inner profiler (e.g. GKR sub-phases) into this
+    /// outer profiler with a `"gkr/"` prefix so they appear in the JSON output.
+    ///
+    /// Existing phases in `self` are preserved. Inner phases are prefixed to
+    /// avoid name collisions (e.g. `"channel_init"` → `"gkr/channel_init"`).
+    pub fn merge_inner(&mut self, inner: &PhaseProfiler) {
+        if !self.enabled || !inner.enabled {
+            return;
+        }
+        for &name in &inner.phase_order {
+            if let Some(timing) = inner.phases.get(name) {
+                // Leak a prefixed name — same lifetime pattern as other &'static str phases
+                let prefixed: &'static str =
+                    Box::leak(format!("gkr/{name}").into_boxed_str());
+                if !self.phases.contains_key(prefixed) {
+                    self.phase_order.push(prefixed);
+                }
+                self.phases.insert(prefixed, timing.clone());
+            }
+        }
+        // Merge matmul accumulator
+        self.matmul_acc.count += inner.matmul_acc.count;
+        self.matmul_acc.channel_seed += inner.matmul_acc.channel_seed;
+        self.matmul_acc.backend_reduce += inner.matmul_acc.backend_reduce;
+        self.matmul_acc.output_bind += inner.matmul_acc.output_bind;
+        // Merge layer type counts
+        for (&kind, &count) in &inner.layer_type_counts {
+            *self.layer_type_counts.entry(kind).or_insert(0) += count;
+        }
+    }
+
     /// Format a human-readable summary table for stderr output.
     pub fn summary(&self) -> String {
         if self.phases.is_empty() {
@@ -525,6 +556,8 @@ use std::cell::RefCell;
 thread_local! {
     /// Stores the last profiler JSON output for retrieval by the CLI.
     static LAST_PROFILE_JSON: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Stores the inner GKR profiler for retrieval by the outer pipeline.
+    static LAST_INNER_PROFILER: RefCell<Option<PhaseProfiler>> = const { RefCell::new(None) };
 }
 
 /// Store profiler JSON in thread-local storage (called by aggregation.rs after proving).
@@ -537,6 +570,18 @@ pub fn store_profile_json(json: String) {
 /// Retrieve and consume the last profiler JSON from thread-local storage.
 pub fn take_profile_json() -> Option<String> {
     LAST_PROFILE_JSON.with(|cell| cell.borrow_mut().take())
+}
+
+/// Store the inner GKR profiler for later merging into the outer pipeline profiler.
+pub fn store_inner_profiler(profiler: PhaseProfiler) {
+    LAST_INNER_PROFILER.with(|cell| {
+        *cell.borrow_mut() = Some(profiler);
+    });
+}
+
+/// Retrieve and consume the inner GKR profiler from thread-local storage.
+pub fn take_inner_profiler() -> Option<PhaseProfiler> {
+    LAST_INNER_PROFILER.with(|cell| cell.borrow_mut().take())
 }
 
 /// Print serialization timing to stderr (env-var gated, standalone use from starknet.rs).
@@ -701,5 +746,71 @@ mod tests {
         assert_eq!(retrieved, Some(json));
         // Second take should return None (consumed)
         assert_eq!(take_profile_json(), None);
+    }
+
+    #[test]
+    fn test_profiler_inner_merge() {
+        // Create an inner profiler simulating GKR sub-phases
+        let mut inner = PhaseProfiler::new(true);
+        inner.begin_phase("channel_init", 0);
+        std::thread::sleep(Duration::from_millis(1));
+        inner.end_phase(42);
+        inner.begin_phase("layer_walk", 42);
+        inner.record_matmul(MatMulTimings {
+            channel_seed: Duration::from_millis(5),
+            backend_reduce: Duration::from_millis(50),
+            output_bind: Duration::from_millis(3),
+        });
+        inner.record_layer_type("matmul");
+        inner.record_layer_type("matmul");
+        inner.record_layer_type("activation");
+        inner.end_phase(100);
+
+        // Create an outer profiler and merge
+        let mut outer = PhaseProfiler::new(true);
+        outer.begin_phase("forward_pass", 0);
+        outer.end_phase(0);
+        outer.begin_phase("gkr_proof", 0);
+        outer.end_phase(0);
+
+        outer.merge_inner(&inner);
+
+        // Inner phases should appear with gkr/ prefix
+        assert!(outer.phases().contains_key("gkr/channel_init"));
+        assert!(outer.phases().contains_key("gkr/layer_walk"));
+        assert_eq!(outer.phases()["gkr/channel_init"].hash_count, 42);
+        assert_eq!(outer.phases()["gkr/layer_walk"].hash_count, 58);
+
+        // Matmul accumulator should be merged
+        assert_eq!(outer.matmul_acc.count, 1);
+        assert_eq!(outer.matmul_acc.channel_seed, Duration::from_millis(5));
+
+        // Layer type counts should be merged
+        assert_eq!(outer.layer_type_counts["matmul"], 2);
+        assert_eq!(outer.layer_type_counts["activation"], 1);
+
+        // Phase order should have outer phases first, then gkr/ prefixed
+        assert_eq!(outer.phase_order[0], "forward_pass");
+        assert_eq!(outer.phase_order[1], "gkr_proof");
+        assert_eq!(outer.phase_order[2], "gkr/channel_init");
+        assert_eq!(outer.phase_order[3], "gkr/layer_walk");
+
+        // JSON output should include inner phases
+        let json = outer.to_json();
+        assert!(json.contains("\"gkr/channel_init\""));
+        assert!(json.contains("\"gkr/layer_walk\""));
+    }
+
+    #[test]
+    fn test_store_and_take_inner_profiler() {
+        let mut p = PhaseProfiler::new(true);
+        p.begin_phase("test", 0);
+        p.end_phase(10);
+        store_inner_profiler(p);
+        let retrieved = take_inner_profiler();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().total_hashes(), 10);
+        // Second take should return None (consumed)
+        assert!(take_inner_profiler().is_none());
     }
 }

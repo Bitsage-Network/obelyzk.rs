@@ -320,6 +320,82 @@ pub(crate) fn compute_quantize_params_commitment(
     starknet_crypto::poseidon_hash_many(&felts)
 }
 
+/// Verify that a sequence of proofs forms a valid KV-cache commitment chain.
+///
+/// For each consecutive pair of proofs, checks that
+/// `proof[i+1].prev_kv_cache_commitment == proof[i].kv_cache_commitment`.
+/// The first proof's `prev_kv_cache_commitment` must be ZERO (initial step).
+pub fn verify_kv_cache_commitment_chain(
+    proofs: &[&AggregatedModelProofOnChain],
+) -> Result<(), AggregationError> {
+    if proofs.is_empty() {
+        return Ok(());
+    }
+    // First proof should chain from ZERO.
+    if let Some(prev) = proofs[0].prev_kv_cache_commitment {
+        if prev != FieldElement::ZERO {
+            return Err(AggregationError::VerificationFailed(
+                "First proof's prev_kv_cache_commitment must be ZERO".into(),
+            ));
+        }
+    }
+    for i in 0..proofs.len() - 1 {
+        let current_commit = proofs[i].kv_cache_commitment;
+        let next_prev = proofs[i + 1].prev_kv_cache_commitment;
+        match (current_commit, next_prev) {
+            (Some(cur), Some(prev)) => {
+                if cur != prev {
+                    return Err(AggregationError::VerificationFailed(format!(
+                        "KV-cache chain break at step {}: commitment={:#x} != next_prev={:#x}",
+                        i, cur, prev,
+                    )));
+                }
+            }
+            (None, None) => {} // both non-cached — fine
+            _ => {
+                return Err(AggregationError::VerificationFailed(format!(
+                    "KV-cache chain mismatch at step {}: one proof has commitment, other does not",
+                    i,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verify that a proof's KV-cache commitment matches the actual cache state.
+///
+/// Recomputes the commitment from the live `ModelKVCache` and checks it against
+/// the commitment carried in the proof.
+pub fn verify_kv_cache_binding(
+    kv_cache: &crate::components::attention::ModelKVCache,
+    proof: &AggregatedModelProofOnChain,
+) -> Result<(), AggregationError> {
+    let proof_commit = match proof.kv_cache_commitment {
+        Some(c) => c,
+        None => {
+            return Err(AggregationError::VerificationFailed(
+                "Proof has no kv_cache_commitment to verify".into(),
+            ));
+        }
+    };
+    let prev = proof.prev_kv_cache_commitment.unwrap_or(FieldElement::ZERO);
+    let step = kv_cache
+        .commitment
+        .as_ref()
+        .map(|c| c.step_index)
+        .unwrap_or(0);
+    let recomputed =
+        crate::components::attention::compute_model_kv_cache_commitment(kv_cache, prev, step);
+    if recomputed.super_commitment != proof_commit {
+        return Err(AggregationError::VerificationFailed(format!(
+            "KV-cache binding mismatch: recomputed={:#x}, proof={:#x}",
+            recomputed.super_commitment, proof_commit,
+        )));
+    }
+    Ok(())
+}
+
 /// A claim about a single layer's computation.
 #[derive(Debug, Clone)]
 pub struct LayerClaim {
@@ -2271,6 +2347,12 @@ pub struct AggregatedModelProofOnChain {
     /// STWO's native GKR protocol (lighter than unified STARK for LogUp gates).
     /// Format is directly compatible with Cairo's `partially_verify_batch()`.
     pub gkr_batch_data: Option<GkrBatchData>,
+    /// KV-cache commitment: Poseidon super-commitment over all layer K/V heads.
+    /// Present when proving with a KV-cache (prefill / decode steps).
+    pub kv_cache_commitment: Option<FieldElement>,
+    /// Previous step's KV-cache commitment (ZERO for prefill / step 0).
+    /// Used for chain verification: `proof[i+1].prev == proof[i].kv_cache_commitment`.
+    pub prev_kv_cache_commitment: Option<FieldElement>,
 }
 
 impl AggregatedModelProofOnChain {
@@ -3333,6 +3415,8 @@ where
             tiled_matmul_proofs: tiled_matmul_proofs_out,
             gkr_proof: None,
             gkr_batch_data: None,
+            kv_cache_commitment: None,
+            prev_kv_cache_commitment: None,
         });
     }
 
@@ -3385,6 +3469,8 @@ where
         tiled_matmul_proofs: tiled_matmul_proofs_out,
         gkr_proof: None,
         gkr_batch_data: None,
+        kv_cache_commitment: None,
+        prev_kv_cache_commitment: None,
     })
 }
 
@@ -3890,6 +3976,12 @@ pub fn prove_model_pure_gkr_prefill_chunked(
         )?;
         proofs.push(proof);
         offset += chunk_rows;
+    }
+
+    // Self-verify: commitment chain must link correctly across chunks.
+    if proofs.len() > 1 {
+        let refs: Vec<&AggregatedModelProofOnChain> = proofs.iter().collect();
+        verify_kv_cache_commitment_chain(&refs)?;
     }
 
     Ok(proofs)
@@ -4401,6 +4493,20 @@ where
 
     let mut gkr_channel = crate::crypto::poseidon_channel::PoseidonChannel::new();
 
+    // Bind KV-cache state into GKR Fiat-Shamir transcript.
+    // If a KV-cache is present, mix its current super-commitment so proofs are
+    // cryptographically tied to a specific cache snapshot. Verifiers that replay
+    // the channel must mix the same commitment to get matching challenges.
+    if let Some(ref kvc) = kv_cache {
+        let sc = kvc.super_commitment();
+        // Mix all 4 felt limbs into the channel for full 252-bit binding.
+        let bytes = sc.to_bytes_be();
+        for chunk in bytes.chunks(8) {
+            let val = u64::from_be_bytes(chunk.try_into().unwrap_or([0u8; 8]));
+            gkr_channel.mix_u64(val);
+        }
+    }
+
     #[allow(unused_variables)]
     let gkr_proof = {
         #[cfg(feature = "cuda-runtime")]
@@ -4442,6 +4548,11 @@ where
     // Each layer is fully independent (lookup by node_id, no shared mutable
     // state), so we prove them in parallel via rayon.
     outer_profiler.begin_phase("attention_proofs", 0);
+    // Capture KV commitment before parallel attention proving so each attention
+    // proof can bind to the cache state without needing mutable access.
+    let attn_kv_commitment: Option<starknet_ff::FieldElement> = kv_cache
+        .as_ref()
+        .map(|kvc| kvc.super_commitment());
     let attn_results: Vec<Result<(usize, AttentionProofOnChain, std::time::Duration, bool), AggregationError>> =
         attention_layers
             .par_iter()
@@ -4449,11 +4560,12 @@ where
                 let t_attn = std::time::Instant::now();
                 let is_cached = layer.cached_intermediates.is_some();
                 let proof = if let Some(ref inter) = layer.cached_intermediates {
-                    prove_attention_cached_from_intermediates(
+                    crate::components::attention::prove_attention_cached_from_intermediates_with_kv_commitment(
                         &layer.input,
                         &layer.weights,
                         &layer.config,
                         inter,
+                        attn_kv_commitment,
                     )
                 } else {
                     prove_attention_onchain(
@@ -4501,6 +4613,13 @@ where
         .par_iter()
         .map(|layer| compute_layernorm_mean_var_commitment(&layer.means, &layer.variances))
         .collect();
+    let (kv_cache_commitment, prev_kv_cache_commitment) = if let Some(ref mut kvc) = kv_cache {
+        let prev = kvc.super_commitment();
+        let commitment = kvc.commit();
+        (Some(commitment.super_commitment), Some(prev))
+    } else {
+        (None, None)
+    };
     outer_profiler.end_phase(0);
     // ── End: commitments ──
 
@@ -4551,6 +4670,8 @@ where
             tiled_matmul_proofs: Vec::new(),
             gkr_proof: Some(gkr_proof),
             gkr_batch_data: None,
+            kv_cache_commitment,
+            prev_kv_cache_commitment,
         });
     }
 
@@ -4655,6 +4776,8 @@ where
                 tiled_matmul_proofs: Vec::new(),
                 gkr_proof: Some(gkr_proof),
                 gkr_batch_data: None,
+                kv_cache_commitment,
+                prev_kv_cache_commitment,
             });
         }
     }
@@ -4712,6 +4835,8 @@ where
         tiled_matmul_proofs: Vec::new(),
         gkr_proof: Some(gkr_proof),
         gkr_batch_data: None,
+        kv_cache_commitment,
+        prev_kv_cache_commitment,
     })
 }
 
@@ -11045,5 +11170,156 @@ mod tests {
         // KV-cache should contain entries from both chunks
         let layer_cache = kv_cache.get(attn_id).expect("attention layer should have cache");
         assert_eq!(layer_cache.len(), 8, "KV-cache should have all 8 tokens");
+    }
+
+    // ── KV-cache commitment integration tests ──
+
+    #[test]
+    fn test_prefill_proof_carries_kv_commitment() {
+        use crate::compiler::graph::{ComputationGraph, GraphOp};
+        use crate::components::attention::{ModelKVCache, MultiHeadAttentionConfig};
+
+        let d_model = 8;
+        let seq_len = 2;
+        let config = MultiHeadAttentionConfig {
+            d_model,
+            num_heads: 2,
+            num_kv_heads: 2,
+            seq_len,
+            causal: false,
+        };
+        let mut graph = ComputationGraph::new((seq_len, d_model));
+        let mm_id = graph.add_node(
+            GraphOp::MatMul { dims: (seq_len, d_model, d_model) },
+            vec![],
+            (seq_len, d_model),
+        );
+        let attn_id = graph.add_node(
+            GraphOp::Attention { config },
+            vec![mm_id],
+            (seq_len, d_model),
+        );
+
+        let input = make_test_matrix(seq_len, d_model);
+        let mut weights = crate::compiler::graph::GraphWeights::new();
+        weights.add_weight(mm_id, make_test_matrix(d_model, d_model));
+        let wq = make_test_matrix(d_model, d_model);
+        let wk = make_test_matrix(d_model, d_model);
+        let wv = make_test_matrix(d_model, d_model);
+        let wo = make_test_matrix(d_model, d_model);
+        weights.add_named_weight(attn_id, "w_q", wq.clone());
+        weights.add_named_weight(attn_id, "w_k", wk.clone());
+        weights.add_named_weight(attn_id, "w_v", wv.clone());
+        weights.add_named_weight(attn_id, "w_o", wo.clone());
+        weights.add_weight(attn_id + 1, wq);
+        weights.add_weight(attn_id + 2, wk);
+        weights.add_weight(attn_id + 3, wv);
+        weights.add_weight(attn_id + 4, wo);
+
+        let mut kv_cache = ModelKVCache::new();
+        let proof = prove_model_pure_gkr_prefill(&graph, &input, &weights, &mut kv_cache)
+            .expect("prefill should succeed");
+
+        // Prefill proof must carry a KV commitment with prev == ZERO.
+        assert!(
+            proof.kv_cache_commitment.is_some(),
+            "prefill proof must carry kv_cache_commitment"
+        );
+        assert_eq!(
+            proof.prev_kv_cache_commitment,
+            Some(FieldElement::ZERO),
+            "first prefill prev must be ZERO"
+        );
+    }
+
+    #[test]
+    fn test_chunked_prefill_kv_commitment_chain() {
+        use crate::compiler::graph::{ComputationGraph, GraphOp};
+        use crate::components::attention::{ModelKVCache, MultiHeadAttentionConfig};
+
+        let d_model = 8;
+        let seq_len = 8;
+        let config = MultiHeadAttentionConfig {
+            d_model,
+            num_heads: 2,
+            num_kv_heads: 2,
+            seq_len,
+            causal: true,
+        };
+        let mut graph = ComputationGraph::new((seq_len, d_model));
+        let mm_id = graph.add_node(
+            GraphOp::MatMul { dims: (seq_len, d_model, d_model) },
+            vec![],
+            (seq_len, d_model),
+        );
+        let attn_id = graph.add_node(
+            GraphOp::Attention { config },
+            vec![mm_id],
+            (seq_len, d_model),
+        );
+
+        let input = make_test_matrix(seq_len, d_model);
+        let mut weights = crate::compiler::graph::GraphWeights::new();
+        weights.add_weight(mm_id, make_test_matrix(d_model, d_model));
+        let wq = make_test_matrix(d_model, d_model);
+        let wk = make_test_matrix(d_model, d_model);
+        let wv = make_test_matrix(d_model, d_model);
+        let wo = make_test_matrix(d_model, d_model);
+        weights.add_named_weight(attn_id, "w_q", wq.clone());
+        weights.add_named_weight(attn_id, "w_k", wk.clone());
+        weights.add_named_weight(attn_id, "w_v", wv.clone());
+        weights.add_named_weight(attn_id, "w_o", wo.clone());
+        weights.add_weight(attn_id + 1, wq);
+        weights.add_weight(attn_id + 2, wk);
+        weights.add_weight(attn_id + 3, wv);
+        weights.add_weight(attn_id + 4, wo);
+
+        let mut kv_cache = ModelKVCache::new();
+        let chunk_size = 4;
+        let proofs = prove_model_pure_gkr_prefill_chunked(
+            &graph, &input, &weights, &mut kv_cache, chunk_size,
+        )
+        .expect("chunked prefill should succeed");
+
+        assert_eq!(proofs.len(), 2, "8 tokens / 4 chunk_size = 2 proofs");
+
+        // Both proofs must carry KV commitments.
+        for (i, p) in proofs.iter().enumerate() {
+            assert!(
+                p.kv_cache_commitment.is_some(),
+                "chunk {} must have kv_cache_commitment",
+                i
+            );
+        }
+
+        // Chain must validate.
+        let refs: Vec<&AggregatedModelProofOnChain> = proofs.iter().collect();
+        verify_kv_cache_commitment_chain(&refs)
+            .expect("chunked prefill commitment chain must validate");
+    }
+
+    #[test]
+    fn test_no_kv_commitment_for_non_cached_proof() {
+        use crate::compiler::graph::{ComputationGraph, GraphOp};
+
+        let (m, k, n) = (4, 4, 4);
+        let mut graph = ComputationGraph::new((m, k));
+        let mm_id = graph.add_node(GraphOp::MatMul { dims: (m, k, n) }, vec![], (m, n));
+
+        let input = make_test_matrix(m, k);
+        let mut weights = crate::compiler::graph::GraphWeights::new();
+        weights.add_weight(mm_id, make_test_matrix(k, n));
+
+        let proof = prove_model_pure_gkr(&graph, &input, &weights)
+            .expect("non-cached proof should succeed");
+
+        assert!(
+            proof.kv_cache_commitment.is_none(),
+            "non-cached proof must have no kv_cache_commitment"
+        );
+        assert!(
+            proof.prev_kv_cache_commitment.is_none(),
+            "non-cached proof must have no prev_kv_cache_commitment"
+        );
     }
 }

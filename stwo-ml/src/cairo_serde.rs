@@ -4139,6 +4139,8 @@ mod tests {
             tiled_matmul_proofs: Vec::new(),
             gkr_proof: None,
             gkr_batch_data: None,
+            kv_cache_commitment: None,
+            prev_kv_cache_commitment: None,
         };
 
         let metadata = MLClaimMetadata {
@@ -4249,6 +4251,8 @@ mod tests {
             tiled_matmul_proofs: Vec::new(),
             gkr_proof: None,
             gkr_batch_data: None,
+            kv_cache_commitment: None,
+            prev_kv_cache_commitment: None,
         };
 
         let metadata = MLClaimMetadata {
@@ -4442,6 +4446,8 @@ mod tests {
             tiled_matmul_proofs: Vec::new(),
             gkr_proof: None,
             gkr_batch_data: None,
+            kv_cache_commitment: None,
+            prev_kv_cache_commitment: None,
         };
         let felts_none = serialize_ml_proof_for_recursive(&aggregated_none, &metadata, None);
 
@@ -4475,6 +4481,8 @@ mod tests {
             tiled_matmul_proofs: Vec::new(),
             gkr_proof: None,
             gkr_batch_data: None,
+            kv_cache_commitment: None,
+            prev_kv_cache_commitment: None,
         };
         let felts_some = serialize_ml_proof_for_recursive(&aggregated_some, &metadata, None);
 
@@ -4588,6 +4596,8 @@ mod tests {
             tiled_matmul_proofs: Vec::new(),
             gkr_proof: None,
             gkr_batch_data: None,
+            kv_cache_commitment: None,
+            prev_kv_cache_commitment: None,
         };
 
         let metadata = MLClaimMetadata {
@@ -4955,6 +4965,8 @@ mod tests {
             tiled_matmul_proofs: Vec::new(),
             gkr_proof: None,
             gkr_batch_data: None,
+            kv_cache_commitment: None,
+            prev_kv_cache_commitment: None,
         };
 
         let metadata = MLClaimMetadata {
@@ -5078,6 +5090,8 @@ mod tests {
             tiled_matmul_proofs: Vec::new(),
             gkr_proof: None,
             gkr_batch_data: None,
+            kv_cache_commitment: None,
+            prev_kv_cache_commitment: None,
         };
 
         let metadata = MLClaimMetadata {

@@ -65,6 +65,131 @@ pub fn softmax_table() -> &'static PrecomputedTable {
     })
 }
 
+// ---------------------------------------------------------------------------
+// KV-cache commitment chain
+// ---------------------------------------------------------------------------
+// Domain tags for Poseidon hash domain separation.
+const DOMAIN_KV_K: u64 = 0x4b56_4b; // "KVK"
+const DOMAIN_KV_V: u64 = 0x4b56_56; // "KVV"
+const DOMAIN_KV_LAYER: u64 = 0x4b56_4c59; // "KVLY"
+const DOMAIN_KV_MODEL: u64 = 0x4b56_4d44; // "KVMD"
+
+/// Per-layer KV-cache commitment: individual K/V head roots + combined root.
+#[derive(Debug, Clone)]
+pub struct KVLayerCommitment {
+    /// Poseidon root for each K head matrix.
+    pub k_roots: Vec<starknet_ff::FieldElement>,
+    /// Poseidon root for each V head matrix.
+    pub v_roots: Vec<starknet_ff::FieldElement>,
+    /// Combined layer commitment: Poseidon(DOMAIN_LAYER, layer_id, cached_len, num_kv_heads, d_k, k_roots..., v_roots...).
+    pub combined: starknet_ff::FieldElement,
+    /// Cached sequence length at the time of commitment.
+    pub cached_len: usize,
+}
+
+/// Model-level KV-cache commitment chaining across decode steps.
+#[derive(Debug, Clone)]
+pub struct ModelKVCacheCommitment {
+    /// Per-layer commitments.
+    pub layer_commitments: Vec<(usize, KVLayerCommitment)>,
+    /// Super-commitment chaining prev_commitment → current state.
+    pub super_commitment: starknet_ff::FieldElement,
+    /// Decode step index (0 for prefill).
+    pub step_index: usize,
+    /// Previous step's super-commitment (ZERO for step 0).
+    pub prev_commitment: starknet_ff::FieldElement,
+}
+
+/// Compute Poseidon commitment for a single K or V head matrix.
+///
+/// `domain_tag` should be `DOMAIN_KV_K` or `DOMAIN_KV_V` for domain separation.
+pub fn compute_kv_head_commitment(
+    matrix: &M31Matrix,
+    domain_tag: u64,
+) -> starknet_ff::FieldElement {
+    use starknet_ff::FieldElement;
+
+    let mut parts = Vec::with_capacity(3 + matrix.data.len());
+    parts.push(FieldElement::from(domain_tag));
+    parts.push(FieldElement::from(matrix.rows as u64));
+    parts.push(FieldElement::from(matrix.cols as u64));
+    for &v in &matrix.data {
+        parts.push(FieldElement::from(v.0 as u64));
+    }
+    starknet_crypto::poseidon_hash_many(&parts)
+}
+
+/// Compute per-layer KV-cache commitment combining all K/V head roots.
+pub fn compute_kv_layer_commitment(
+    cache: &KVCache,
+    layer_id: usize,
+) -> KVLayerCommitment {
+    use starknet_ff::FieldElement;
+
+    let k_roots: Vec<FieldElement> = (0..cache.num_kv_heads)
+        .map(|h| compute_kv_head_commitment(cache.get_k(h), DOMAIN_KV_K))
+        .collect();
+    let v_roots: Vec<FieldElement> = (0..cache.num_kv_heads)
+        .map(|h| compute_kv_head_commitment(cache.get_v(h), DOMAIN_KV_V))
+        .collect();
+
+    let mut parts = Vec::with_capacity(5 + k_roots.len() + v_roots.len());
+    parts.push(FieldElement::from(DOMAIN_KV_LAYER));
+    parts.push(FieldElement::from(layer_id as u64));
+    parts.push(FieldElement::from(cache.cached_len as u64));
+    parts.push(FieldElement::from(cache.num_kv_heads as u64));
+    parts.push(FieldElement::from(cache.d_k as u64));
+    parts.extend_from_slice(&k_roots);
+    parts.extend_from_slice(&v_roots);
+    let combined = starknet_crypto::poseidon_hash_many(&parts);
+
+    KVLayerCommitment {
+        k_roots,
+        v_roots,
+        combined,
+        cached_len: cache.cached_len,
+    }
+}
+
+/// Compute model-level KV-cache super-commitment, chaining from the previous step.
+///
+/// `prev_commitment` is `FieldElement::ZERO` for the initial prefill step.
+pub fn compute_model_kv_cache_commitment(
+    kv_cache: &ModelKVCache,
+    prev_commitment: starknet_ff::FieldElement,
+    step_index: usize,
+) -> ModelKVCacheCommitment {
+    use starknet_ff::FieldElement;
+
+    // Collect layer commitments in sorted order for determinism.
+    let mut layer_ids: Vec<usize> = kv_cache.layers.keys().copied().collect();
+    layer_ids.sort();
+
+    let layer_commitments: Vec<(usize, KVLayerCommitment)> = layer_ids
+        .iter()
+        .map(|&lid| {
+            let cache = kv_cache.layers.get(&lid).unwrap();
+            (lid, compute_kv_layer_commitment(cache, lid))
+        })
+        .collect();
+
+    let mut parts = Vec::with_capacity(3 + layer_commitments.len());
+    parts.push(FieldElement::from(DOMAIN_KV_MODEL));
+    parts.push(prev_commitment);
+    parts.push(FieldElement::from(step_index as u64));
+    for (_, lc) in &layer_commitments {
+        parts.push(lc.combined);
+    }
+    let super_commitment = starknet_crypto::poseidon_hash_many(&parts);
+
+    ModelKVCacheCommitment {
+        layer_commitments,
+        super_commitment,
+        step_index,
+        prev_commitment,
+    }
+}
+
 /// Configuration for a single attention head.
 #[derive(Debug, Clone, Copy)]
 pub struct AttentionHeadConfig {
@@ -383,13 +508,40 @@ fn vstack(top: &M31Matrix, bottom: &M31Matrix) -> M31Matrix {
 pub struct ModelKVCache {
     /// Per-layer caches, indexed by layer/node ID.
     pub layers: std::collections::HashMap<usize, KVCache>,
+    /// Commitment computed after the latest cache mutation.
+    pub commitment: Option<ModelKVCacheCommitment>,
 }
 
 impl ModelKVCache {
     pub fn new() -> Self {
         Self {
             layers: std::collections::HashMap::new(),
+            commitment: None,
         }
+    }
+
+    /// Compute and store a commitment for the current cache state.
+    ///
+    /// Uses the previous super-commitment (or ZERO) as the chain link.
+    /// The step index auto-increments based on the previous commitment.
+    pub fn commit(&mut self) -> &ModelKVCacheCommitment {
+        let prev = self.super_commitment();
+        let step = self
+            .commitment
+            .as_ref()
+            .map(|c| c.step_index + 1)
+            .unwrap_or(0);
+        let new_commitment = compute_model_kv_cache_commitment(self, prev, step);
+        self.commitment = Some(new_commitment);
+        self.commitment.as_ref().unwrap()
+    }
+
+    /// Return the current super-commitment, or ZERO if not yet committed.
+    pub fn super_commitment(&self) -> starknet_ff::FieldElement {
+        self.commitment
+            .as_ref()
+            .map(|c| c.super_commitment)
+            .unwrap_or(starknet_ff::FieldElement::ZERO)
     }
 
     /// Get or create a cache for a given layer.
@@ -560,6 +712,10 @@ pub struct AttentionProofOnChain {
     /// Log2 of trace size for softmax STARK.
     pub softmax_log_size: u32,
     pub intermediates: AttentionIntermediates,
+    /// KV-cache commitment at the time this attention proof was generated.
+    /// Present when proving with a KV-cache; verifiers check this matches the
+    /// outer proof's `kv_cache_commitment`.
+    pub kv_cache_commitment: Option<starknet_ff::FieldElement>,
 }
 
 /// Error type for attention proving.
@@ -1097,6 +1253,7 @@ pub fn prove_attention_onchain(
         softmax_claimed_sum: component.claimed_sum(),
         softmax_log_size,
         intermediates,
+        kv_cache_commitment: None,
     })
 }
 
@@ -1229,6 +1386,7 @@ pub fn prove_attention_cached(
         softmax_claimed_sum: component.claimed_sum(),
         softmax_log_size,
         intermediates,
+        kv_cache_commitment: None,
     })
 }
 
@@ -1247,6 +1405,24 @@ pub fn prove_attention_cached_from_intermediates(
     weights: &AttentionWeights,
     config: &MultiHeadAttentionConfig,
     intermediates: &AttentionIntermediates,
+) -> Result<AttentionProofOnChain, AttentionError> {
+    prove_attention_cached_from_intermediates_with_kv_commitment(
+        input,
+        weights,
+        config,
+        intermediates,
+        None,
+    )
+}
+
+/// Like [`prove_attention_cached_from_intermediates`] but binds a KV-cache
+/// commitment into the returned proof for verifier cross-checking.
+pub fn prove_attention_cached_from_intermediates_with_kv_commitment(
+    input: &M31Matrix,
+    weights: &AttentionWeights,
+    config: &MultiHeadAttentionConfig,
+    intermediates: &AttentionIntermediates,
+    kv_cache_commitment: Option<starknet_ff::FieldElement>,
 ) -> Result<AttentionProofOnChain, AttentionError> {
     // K/V projection proofs verify only the NEW token projections:
     //   input (new_tokens × d_model) × W_k = k_new (new_tokens × d_k_total)
@@ -1355,6 +1531,7 @@ pub fn prove_attention_cached_from_intermediates(
         softmax_claimed_sum: component.claimed_sum(),
         softmax_log_size,
         intermediates: intermediates.clone(),
+        kv_cache_commitment,
     })
 }
 
@@ -2370,5 +2547,79 @@ mod tests {
         // Same pointer ⇒ OnceLock reuse, no rebuild.
         assert!(std::ptr::eq(t1, t2), "softmax_table() should return the same static reference");
         assert_eq!(t1.log_size, ActivationType::Softmax.production_log_size());
+    }
+
+    // ── KV-cache commitment tests ──
+
+    #[test]
+    fn test_kv_head_commitment_deterministic() {
+        let m = make_test_input(4, 8);
+        let c1 = compute_kv_head_commitment(&m, DOMAIN_KV_K);
+        let c2 = compute_kv_head_commitment(&m, DOMAIN_KV_K);
+        assert_eq!(c1, c2, "Same data + same domain → same commitment");
+    }
+
+    #[test]
+    fn test_kv_head_commitment_domain_separation() {
+        let m = make_test_input(4, 8);
+        let ck = compute_kv_head_commitment(&m, DOMAIN_KV_K);
+        let cv = compute_kv_head_commitment(&m, DOMAIN_KV_V);
+        assert_ne!(ck, cv, "K vs V domain tags must produce different commitments");
+    }
+
+    #[test]
+    fn test_kv_layer_commitment_grows() {
+        let config = MultiHeadAttentionConfig::new(1, 4, 8);
+        let mut cache = KVCache::new(&config);
+
+        // Prefill 2 tokens
+        let k1 = make_test_input(2, 4);
+        let v1 = make_test_input(2, 4);
+        cache.append(&k1, &v1);
+        let c1 = compute_kv_layer_commitment(&cache, 0);
+
+        // Append 1 more token
+        let k2 = make_test_input(1, 4);
+        let v2 = make_test_input(1, 4);
+        cache.append(&k2, &v2);
+        let c2 = compute_kv_layer_commitment(&cache, 0);
+
+        assert_ne!(
+            c1.combined, c2.combined,
+            "Commitment must change after appending tokens"
+        );
+        assert_eq!(c1.cached_len, 2);
+        assert_eq!(c2.cached_len, 3);
+    }
+
+    #[test]
+    fn test_model_kv_cache_commit_chain() {
+        use starknet_ff::FieldElement;
+
+        let config = MultiHeadAttentionConfig::new(1, 4, 8);
+        let mut model_cache = ModelKVCache::new();
+
+        // Step 0: prefill
+        {
+            let layer_cache = model_cache.get_or_create(0, &config);
+            let k = make_test_input(3, 4);
+            let v = make_test_input(3, 4);
+            layer_cache.append(&k, &v);
+        }
+        let c0 = model_cache.commit().clone();
+        assert_eq!(c0.step_index, 0);
+        assert_eq!(c0.prev_commitment, FieldElement::ZERO);
+
+        // Step 1: decode 1 token — chains from step 0
+        {
+            let layer_cache = model_cache.get_or_create(0, &config);
+            let k = make_test_input(1, 4);
+            let v = make_test_input(1, 4);
+            layer_cache.append(&k, &v);
+        }
+        let c1 = model_cache.commit().clone();
+        assert_eq!(c1.step_index, 1);
+        assert_eq!(c1.prev_commitment, c0.super_commitment);
+        assert_ne!(c0.super_commitment, c1.super_commitment);
     }
 }

@@ -2033,6 +2033,7 @@ pub fn prove_gkr_with_cache(
     // Print profile summary if enabled.
     if profiler.is_enabled() {
         eprintln!("{}", profiler.summary());
+        super::profiler::store_inner_profiler(profiler);
     }
 
     Ok(proof)
@@ -3054,6 +3055,7 @@ pub fn prove_gkr_gpu_with_cache(
     // Print profile summary if enabled.
     if profiler.is_enabled() {
         eprintln!("{}", profiler.summary());
+        super::profiler::store_inner_profiler(profiler);
     }
 
     Ok(proof)
