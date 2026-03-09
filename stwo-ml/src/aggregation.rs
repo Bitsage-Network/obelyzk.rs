@@ -1124,7 +1124,7 @@ where
 
             GraphOp::RoPE { config } => {
                 let table = crate::components::rope::build_rope_table(config);
-                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table);
+                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table, 0);
                 intermediates.push((node.id, current.clone()));
                 node_outputs.insert(node.id, rotated.clone());
                 current = rotated;
@@ -2994,7 +2994,7 @@ where
 
             GraphOp::RoPE { config } => {
                 let table = crate::components::rope::build_rope_table(config);
-                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table);
+                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table, 0);
                 intermediates.push((node.id, current.clone()));
                 node_outputs.insert(node.id, rotated.clone());
                 current = rotated;
@@ -3987,6 +3987,98 @@ pub fn prove_model_pure_gkr_prefill_chunked(
     Ok(proofs)
 }
 
+/// Prove a single decode step (autoregressive generation of 1 token).
+///
+/// The KV-cache already contains tokens from prefill (and any prior decode steps).
+/// RoPE uses the correct absolute position (`kv_cache.cached_len()`).
+/// The graph is re-dimensioned to `seq_len=1` for the single new token.
+///
+/// This is a thin wrapper: the real work is in `prove_model_pure_gkr_prefill_with_cache`
+/// with the RoPE offset threading in the inner forward pass.
+pub fn prove_model_pure_gkr_decode_step(
+    graph: &ComputationGraph,
+    token_input: &M31Matrix,
+    weights: &GraphWeights,
+    kv_cache: &mut crate::components::attention::ModelKVCache,
+    weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+) -> Result<AggregatedModelProofOnChain, AggregationError> {
+    assert_eq!(
+        token_input.rows, 1,
+        "decode step expects single token, got {} rows",
+        token_input.rows
+    );
+    let decode_graph = graph.with_seq_len(1);
+    prove_model_pure_gkr_prefill_with_cache(
+        &decode_graph,
+        token_input,
+        weights,
+        kv_cache,
+        weight_cache,
+    )
+}
+
+/// Prove a sequence of decode steps (N autoregressive tokens).
+///
+/// Each step:
+/// 1. Proves the single-token inference against the current KV-cache
+/// 2. KV-cache grows by 1 token (via the inner attention forward pass)
+/// 3. Commitment chain links `proof[i].kv_cache_commitment` → `proof[i+1].prev_kv_cache_commitment`
+///
+/// Returns one proof per decode step.
+pub fn prove_model_pure_gkr_decode_sequence(
+    graph: &ComputationGraph,
+    token_inputs: &[M31Matrix],
+    weights: &GraphWeights,
+    kv_cache: &mut crate::components::attention::ModelKVCache,
+    weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+) -> Result<Vec<AggregatedModelProofOnChain>, AggregationError> {
+    let decode_graph = graph.with_seq_len(1);
+    let mut proofs = Vec::with_capacity(token_inputs.len());
+
+    for (i, token) in token_inputs.iter().enumerate() {
+        assert_eq!(
+            token.rows, 1,
+            "decode sequence token {} has {} rows, expected 1",
+            i, token.rows
+        );
+        let proof = prove_model_pure_gkr_prefill_with_cache(
+            &decode_graph,
+            token,
+            weights,
+            kv_cache,
+            weight_cache,
+        )?;
+        proofs.push(proof);
+    }
+
+    // Verify internal commitment chaining across decode steps:
+    // proof[i].kv_cache_commitment == proof[i+1].prev_kv_cache_commitment.
+    // Note: we do NOT require the first decode proof to start from ZERO —
+    // it chains from the prefill (or prior decode) commitment.
+    for i in 0..proofs.len().saturating_sub(1) {
+        let cur = proofs[i].kv_cache_commitment;
+        let next_prev = proofs[i + 1].prev_kv_cache_commitment;
+        match (cur, next_prev) {
+            (Some(c), Some(p)) if c != p => {
+                return Err(AggregationError::VerificationFailed(format!(
+                    "Decode chain break at step {}: commitment={:#x} != next_prev={:#x}",
+                    i, c, p,
+                )));
+            }
+            (None, None) => {}
+            (Some(_), Some(_)) => {} // matching — ok
+            _ => {
+                return Err(AggregationError::VerificationFailed(format!(
+                    "Decode chain mismatch at step {}: one proof has commitment, other does not",
+                    i,
+                )));
+            }
+        }
+    }
+
+    Ok(proofs)
+}
+
 /// Inner implementation: forward pass → GKR → unified STARK.
 fn prove_model_pure_gkr_inner<B>(
     graph: &ComputationGraph,
@@ -4397,9 +4489,22 @@ where
             }
 
             GraphOp::RoPE { config } => {
-                let table = crate::components::rope::build_rope_table(config);
+                // During decode steps, RoPE needs absolute position = cached_len
+                // (i.e. number of tokens already in KV-cache). RoPE runs BEFORE
+                // attention in the graph, so cached_len is still the count of
+                // previously-cached tokens, giving the correct offset.
+                let rope_offset = kv_cache
+                    .as_ref()
+                    .map(|kvc| kvc.cached_len())
+                    .unwrap_or(0);
+                let mut rope_cfg = *config;
+                // Ensure table covers offset + current seq_len
+                if rope_offset + current.rows > rope_cfg.max_seq_len {
+                    rope_cfg.max_seq_len = rope_offset + current.rows;
+                }
+                let table = crate::components::rope::build_rope_table(&rope_cfg);
                 let (rotated, _cos_used, _sin_used) =
-                    crate::components::rope::apply_rope(&current, &table);
+                    crate::components::rope::apply_rope(&current, &table, rope_offset);
                 intermediates.push((node.id, current.clone()));
                 node_outputs.insert(node.id, rotated.clone());
                 current = rotated;
@@ -5287,7 +5392,7 @@ pub(crate) fn collect_forward_pass_layer_data(
 
             GraphOp::RoPE { config } => {
                 let table = crate::components::rope::build_rope_table(config);
-                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table);
+                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table, 0);
                 intermediates.push((node.id, current.clone()));
                 node_outputs.insert(node.id, rotated.clone());
                 current = rotated;
@@ -6767,7 +6872,7 @@ pub fn verify_aggregated_model_proof(
             }
             GraphOp::RoPE { config } => {
                 let table = crate::components::rope::build_rope_table(config);
-                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table);
+                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table, 0);
                 node_outputs.insert(node.id, rotated.clone());
                 current = rotated;
             }
@@ -7075,7 +7180,7 @@ pub fn verify_aggregated_model_proof_onchain(
             }
             GraphOp::RoPE { config } => {
                 let table = crate::components::rope::build_rope_table(config);
-                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table);
+                let (rotated, _, _) = crate::components::rope::apply_rope(&current, &table, 0);
                 node_outputs.insert(node.id, rotated.clone());
                 current = rotated;
             }
@@ -11318,5 +11423,194 @@ mod tests {
             proof.prev_kv_cache_commitment.is_none(),
             "non-cached proof must have no prev_kv_cache_commitment"
         );
+    }
+
+    // ── Decode-step proving tests ──
+
+    /// Helper: build a minimal graph with MatMul → Attention for decode testing.
+    fn build_decode_test_graph(
+        d_model: usize,
+        seq_len: usize,
+    ) -> (
+        ComputationGraph,
+        crate::compiler::graph::GraphWeights,
+        usize, // attn_id
+    ) {
+        use crate::compiler::graph::{ComputationGraph, GraphOp};
+        use crate::components::attention::MultiHeadAttentionConfig;
+
+        let config = MultiHeadAttentionConfig {
+            d_model,
+            num_heads: 2,
+            num_kv_heads: 2,
+            seq_len,
+            causal: true,
+        };
+        let mut graph = ComputationGraph::new((seq_len, d_model));
+        let mm_id = graph.add_node(
+            GraphOp::MatMul {
+                dims: (seq_len, d_model, d_model),
+            },
+            vec![],
+            (seq_len, d_model),
+        );
+        let attn_id = graph.add_node(
+            GraphOp::Attention { config },
+            vec![mm_id],
+            (seq_len, d_model),
+        );
+
+        let mut weights = crate::compiler::graph::GraphWeights::new();
+        weights.add_weight(mm_id, make_test_matrix(d_model, d_model));
+        let wq = make_test_matrix(d_model, d_model);
+        let wk = make_test_matrix(d_model, d_model);
+        let wv = make_test_matrix(d_model, d_model);
+        let wo = make_test_matrix(d_model, d_model);
+        weights.add_named_weight(attn_id, "w_q", wq.clone());
+        weights.add_named_weight(attn_id, "w_k", wk.clone());
+        weights.add_named_weight(attn_id, "w_v", wv.clone());
+        weights.add_named_weight(attn_id, "w_o", wo.clone());
+        weights.add_weight(attn_id + 1, wq);
+        weights.add_weight(attn_id + 2, wk);
+        weights.add_weight(attn_id + 3, wv);
+        weights.add_weight(attn_id + 4, wo);
+
+        (graph, weights, attn_id)
+    }
+
+    #[test]
+    fn test_decode_step_single_token() {
+        use crate::components::attention::ModelKVCache;
+
+        let d_model = 8;
+        let (graph, weights, attn_id) = build_decode_test_graph(d_model, 2);
+
+        // Step 1: Prefill with 2 tokens
+        let mut kv_cache = ModelKVCache::new();
+        let prefill_input = make_test_matrix(2, d_model);
+        let prefill_proof =
+            prove_model_pure_gkr_prefill(&graph, &prefill_input, &weights, &mut kv_cache)
+                .expect("prefill should succeed");
+        assert_eq!(kv_cache.cached_len(), 2, "prefill should cache 2 tokens");
+
+        // Step 2: Decode 1 token
+        let decode_input = make_test_matrix(1, d_model);
+        let decode_proof =
+            prove_model_pure_gkr_decode_step(&graph, &decode_input, &weights, &mut kv_cache, None)
+                .expect("decode step should succeed");
+        assert_eq!(kv_cache.cached_len(), 3, "cache should grow to 3 after decode");
+
+        // Decode proof must carry KV commitment
+        assert!(
+            decode_proof.kv_cache_commitment.is_some(),
+            "decode proof must have kv_cache_commitment"
+        );
+        // prev should link to the prefill commitment
+        assert_eq!(
+            decode_proof.prev_kv_cache_commitment,
+            prefill_proof.kv_cache_commitment,
+            "decode prev must link to prefill commitment"
+        );
+    }
+
+    #[test]
+    fn test_decode_sequence_chain() {
+        use crate::components::attention::ModelKVCache;
+
+        let d_model = 8;
+        let (graph, weights, _attn_id) = build_decode_test_graph(d_model, 2);
+
+        // Prefill with 2 tokens
+        let mut kv_cache = ModelKVCache::new();
+        let prefill_input = make_test_matrix(2, d_model);
+        let _prefill_proof =
+            prove_model_pure_gkr_prefill(&graph, &prefill_input, &weights, &mut kv_cache)
+                .expect("prefill should succeed");
+
+        // Decode 3 tokens as a sequence
+        let tokens: Vec<M31Matrix> = (0..3).map(|_| make_test_matrix(1, d_model)).collect();
+        let decode_proofs =
+            prove_model_pure_gkr_decode_sequence(&graph, &tokens, &weights, &mut kv_cache, None)
+                .expect("decode sequence should succeed");
+
+        assert_eq!(decode_proofs.len(), 3, "should produce 3 decode proofs");
+        assert_eq!(
+            kv_cache.cached_len(),
+            5,
+            "cache should have 2 prefill + 3 decode = 5 tokens"
+        );
+
+        // All decode proofs carry commitments
+        for (i, p) in decode_proofs.iter().enumerate() {
+            assert!(
+                p.kv_cache_commitment.is_some(),
+                "decode proof {} must have kv_cache_commitment",
+                i
+            );
+        }
+
+        // Verify internal chaining: proof[i].kv → proof[i+1].prev_kv
+        for i in 0..decode_proofs.len() - 1 {
+            assert_eq!(
+                decode_proofs[i].kv_cache_commitment,
+                decode_proofs[i + 1].prev_kv_cache_commitment,
+                "decode chain break at step {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_step_rope_position() {
+        // Verify that during decode, RoPE uses absolute positions, not local positions.
+        // After prefilling P tokens, the decode token should get RoPE for position P.
+        use crate::components::rope::{
+            apply_rope, build_rope_table, float_to_m31_signed, m31_to_float_signed, RoPEConfig,
+        };
+
+        let head_dim = 4;
+        let max_seq = 8;
+
+        // Build a table large enough
+        let config = RoPEConfig::new(max_seq, head_dim).with_max_seq_len(max_seq);
+        let table = build_rope_table(&config);
+
+        // Simulate decode: position_offset = 3 (3 tokens already cached)
+        let row = M31Matrix {
+            rows: 1,
+            cols: head_dim,
+            data: vec![
+                float_to_m31_signed(0.5),
+                float_to_m31_signed(-0.5),
+                float_to_m31_signed(0.3),
+                float_to_m31_signed(0.7),
+            ],
+        };
+
+        // With offset=3, the single row should use angles for position 3
+        let (rot_decode, _, _) = apply_rope(&row, &table, 3);
+
+        // Compare: a 4-row matrix with offset=0, extract row 3
+        let mut four_rows = M31Matrix {
+            rows: 4,
+            cols: head_dim,
+            data: vec![float_to_m31_signed(0.0); 4 * head_dim],
+        };
+        for j in 0..head_dim {
+            four_rows.data[3 * head_dim + j] = row.data[j];
+        }
+        let (rot_full, _, _) = apply_rope(&four_rows, &table, 0);
+
+        for j in 0..head_dim {
+            let decode_val = m31_to_float_signed(rot_decode.data[j]);
+            let full_val = m31_to_float_signed(rot_full.data[3 * head_dim + j]);
+            assert!(
+                (decode_val - full_val).abs() < 1e-6,
+                "col {}: decode offset-3 ({}) != full pos-3 ({})",
+                j,
+                decode_val,
+                full_val
+            );
+        }
     }
 }
