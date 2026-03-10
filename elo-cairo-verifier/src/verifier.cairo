@@ -181,6 +181,15 @@ pub trait ISumcheckVerifier<TContractState> {
     /// Get the number of GKR weight commitments for a model.
     fn get_model_gkr_weight_count(self: @TContractState, model_id: felt252) -> u32;
 
+    /// Get the last KV-cache commitment for a model's decode chain.
+    fn get_decode_chain_kv_commitment(self: @TContractState, model_id: felt252) -> felt252;
+
+    /// Get the last full_seq_len for a model's decode chain.
+    fn get_decode_chain_full_seq_len(self: @TContractState, model_id: felt252) -> u32;
+
+    /// Check whether a model's decode chain has been initialized.
+    fn is_decode_chain_initialized(self: @TContractState, model_id: felt252) -> bool;
+
     // ─── Chunked GKR Session Entrypoints ─────────────────────────────
     // For proofs exceeding Starknet's per-TX calldata limit (~5K felts).
     // 4-step protocol: open → upload chunks → seal → verify.
@@ -252,6 +261,10 @@ pub trait ISumcheckVerifier<TContractState> {
         has_kv_cache: bool,
         kv_cache_commitment: felt252,
         prev_kv_cache_commitment: felt252,
+        position_offset: u32,
+        full_seq_len: u32,
+        new_tokens: u32,
+        validate_decode_chain: u8,
     );
 
     /// Evaluate output MLE in chunked TXs (splits expensive computation across
@@ -512,6 +525,20 @@ mod SumcheckVerifierContract {
         stream_kv_cache_commitment: Map<u64, felt252>,
         /// session_id → previous step's KV-cache commitment (for chaining).
         stream_prev_kv_cache_commitment: Map<u64, felt252>,
+        /// Decode chain registry: model_id → last KV commitment for chaining.
+        decode_chain_last_kv_commitment: Map<felt252, felt252>,
+        /// Decode chain registry: model_id → last full_seq_len.
+        decode_chain_last_full_seq_len: Map<felt252, u32>,
+        /// Decode chain registry: model_id → whether chain is initialized.
+        decode_chain_initialized: Map<felt252, bool>,
+        /// session_id → position_offset for decode step.
+        stream_position_offset: Map<u64, u32>,
+        /// session_id → full_seq_len for decode step.
+        stream_full_seq_len: Map<u64, u32>,
+        /// session_id → new_tokens for decode step.
+        stream_new_tokens: Map<u64, u32>,
+        /// session_id → whether to validate decode chain continuity.
+        stream_decode_chain_validate: Map<u64, bool>,
     }
 
     #[event]
@@ -558,6 +585,9 @@ mod SumcheckVerifierContract {
         num_layers: u32,
         kv_cache_commitment: felt252,
         prev_kv_cache_commitment: felt252,
+        position_offset: u32,
+        full_seq_len: u32,
+        new_tokens: u32,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -933,6 +963,18 @@ mod SumcheckVerifierContract {
             self.model_gkr_weight_count.entry(model_id).read()
         }
 
+        fn get_decode_chain_kv_commitment(self: @ContractState, model_id: felt252) -> felt252 {
+            self.decode_chain_last_kv_commitment.entry(model_id).read()
+        }
+
+        fn get_decode_chain_full_seq_len(self: @ContractState, model_id: felt252) -> u32 {
+            self.decode_chain_last_full_seq_len.entry(model_id).read()
+        }
+
+        fn is_decode_chain_initialized(self: @ContractState, model_id: felt252) -> bool {
+            self.decode_chain_initialized.entry(model_id).read()
+        }
+
         // ─── Chunked GKR Session Entrypoints (stubbed for lean v20) ───────
         // Superseded by streaming verification (v25). Storage preserved across upgrades.
 
@@ -1056,6 +1098,10 @@ mod SumcheckVerifierContract {
             has_kv_cache: bool,
             kv_cache_commitment: felt252,
             prev_kv_cache_commitment: felt252,
+            position_offset: u32,
+            full_seq_len: u32,
+            new_tokens: u32,
+            validate_decode_chain: u8,
         ) {
             // Auth: must be session owner, session must be sealed
             assert!(self.session_sealed.entry(session_id).read(), "SESSION_NOT_SEALED");
@@ -1128,6 +1174,12 @@ mod SumcheckVerifierContract {
             self.stream_has_kv_cache.entry(session_id).write(has_kv_cache == 1);
             self.stream_kv_cache_commitment.entry(session_id).write(kv_cache_commitment);
             self.stream_prev_kv_cache_commitment.entry(session_id).write(prev_kv_cache_commitment);
+
+            // Store decode metadata
+            self.stream_position_offset.entry(session_id).write(position_offset);
+            self.stream_full_seq_len.entry(session_id).write(full_seq_len);
+            self.stream_new_tokens.entry(session_id).write(new_tokens);
+            self.stream_decode_chain_validate.entry(session_id).write(validate_decode_chain == 1);
 
             self.stream_initialized.entry(session_id).write(true);
             self.stream_output_mle_done.entry(session_id).write(false);
@@ -1796,6 +1848,30 @@ mod SumcheckVerifierContract {
                 )
             };
 
+            // Read decode metadata from session
+            let position_offset = self.stream_position_offset.entry(session_id).read();
+            let full_seq_len = self.stream_full_seq_len.entry(session_id).read();
+            let new_tokens = self.stream_new_tokens.entry(session_id).read();
+            let validate_chain = self.stream_decode_chain_validate.entry(session_id).read();
+
+            // Decode chain continuity validation
+            if has_kv && validate_chain {
+                let chain_init = self.decode_chain_initialized.entry(model_id).read();
+                if chain_init {
+                    let last_kv = self.decode_chain_last_kv_commitment.entry(model_id).read();
+                    assert!(stored_prev_kv == last_kv, "DECODE_CHAIN_KV_MISMATCH");
+                    let last_seq = self.decode_chain_last_full_seq_len.entry(model_id).read();
+                    assert!(position_offset == last_seq, "DECODE_CHAIN_POSITION_MISMATCH");
+                }
+            }
+
+            // Update decode chain registry when this is a KV proof
+            if has_kv && full_seq_len > 0 {
+                self.decode_chain_last_kv_commitment.entry(model_id).write(stored_kv);
+                self.decode_chain_last_full_seq_len.entry(model_id).write(full_seq_len);
+                self.decode_chain_initialized.entry(model_id).write(true);
+            }
+
             // Record proof on-chain
             assert!(!self.verified_proofs.entry(proof_hash).read(), "PROOF_ALREADY_VERIFIED");
             self.verified_proofs.entry(proof_hash).write(true);
@@ -1808,6 +1884,9 @@ mod SumcheckVerifierContract {
                 num_layers,
                 kv_cache_commitment: stored_kv,
                 prev_kv_cache_commitment: stored_prev_kv,
+                position_offset,
+                full_seq_len,
+                new_tokens,
             });
 
             self.stream_finalized.entry(session_id).write(true);

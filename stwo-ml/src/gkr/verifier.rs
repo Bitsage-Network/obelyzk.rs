@@ -430,6 +430,7 @@ fn verify_gkr_inner(
                     full_seq_len,
                     d_model,
                     causal,
+                    position_offset,
                 },
             ) => {
                 verify_attention_reduction_decode(
@@ -441,6 +442,7 @@ fn verify_gkr_inner(
                     *full_seq_len,
                     *d_model,
                     *causal,
+                    *position_offset,
                     layer_idx,
                     channel,
                 )?
@@ -1619,6 +1621,7 @@ fn verify_gkr_simd_inner(
                     full_seq_len,
                     d_model,
                     causal,
+                    position_offset,
                 },
             ) => verify_attention_reduction_decode(
                 &current_claim,
@@ -1629,6 +1632,7 @@ fn verify_gkr_simd_inner(
                 *full_seq_len,
                 *d_model,
                 *causal,
+                *position_offset,
                 layer_idx,
                 channel,
             )?,
@@ -5030,6 +5034,7 @@ pub(crate) fn verify_attention_reduction_decode(
     full_seq_len: usize,
     d_model: usize,
     causal: bool,
+    position_offset: usize,
     layer_idx: usize,
     channel: &mut PoseidonChannel,
 ) -> Result<GKRClaim, GKRError> {
@@ -5064,6 +5069,18 @@ pub(crate) fn verify_attention_reduction_decode(
     channel.mix_u64(full_seq_len as u64);
     channel.mix_u64(d_model as u64);
     channel.mix_u64(if causal { 1 } else { 0 });
+    channel.mix_u64(position_offset as u64);
+
+    // Assert position_offset consistency
+    if position_offset + new_tokens != full_seq_len {
+        return Err(GKRError::VerificationError {
+            layer_idx,
+            reason: format!(
+                "attention_decode: position_offset({}) + new_tokens({}) != full_seq_len({})",
+                position_offset, new_tokens, full_seq_len,
+            ),
+        });
+    }
 
     let verify_fresh_sub_matmul = |proof: &LayerProof,
                                    claimed_value: SecureField,

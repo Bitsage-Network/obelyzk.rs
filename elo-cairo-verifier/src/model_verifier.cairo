@@ -365,7 +365,15 @@ pub fn dispatch_attention_decode(
     let full_seq_len = read_u32(ref reader);
     let d_model = read_u32(ref reader);
     let causal = read_u32(ref reader);
+    let position_offset = read_u32(ref reader);
     let d_k = d_model / num_heads;
+
+    // Dimension assertions
+    assert!(new_tokens > 0, "DCOD_NEW_TOKENS_ZERO");
+    assert!(full_seq_len >= new_tokens, "DCOD_FULL_SEQ_LT_NEW_TOKENS");
+    assert!(d_model % num_heads == 0, "DCOD_DMODEL_INDIVISIBLE");
+    assert!(position_offset + new_tokens == full_seq_len, "DCOD_POSITION_MISMATCH");
+    assert!(num_sub_proofs == 4 + 2 * num_heads, "DCOD_SUBPROOF_COUNT_PRECHECK");
 
     // Read sub_claim_values
     let mut sub_claim_values: Array<QM31> = array![];
@@ -383,6 +391,7 @@ pub fn dispatch_attention_decode(
     channel_mix_u64(ref ch, full_seq_len.into());
     channel_mix_u64(ref ch, d_model.into());
     channel_mix_u64(ref ch, causal.into());
+    channel_mix_u64(ref ch, position_offset.into());
 
     let mut proof_idx: u32 = 0;
 

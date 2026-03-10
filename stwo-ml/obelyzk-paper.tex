@@ -133,12 +133,18 @@
     the end-to-end forgery probability for the linear trace
     is bounded by $2^{-111}$ (conservatively; the MLE opening
     component alone achieves $2^{-130}$).
-    \textbf{Scope:} The deployed verifier constrains
-    linear operations and nonlinear activations
-    via piecewise-linear algebraic proofs (GELU, Sigmoid, Softmax verified
-    over the full M31 domain; ReLU via algebraic proof).
-    LayerNorm/RMSNorm mean and variance are now fully constrained
-    via Part~0 plain sumcheck with per-row binding verification.
+    \textbf{Scope:} The deployed verifier (v34) constrains
+    linear operations, nonlinear activations
+    via range-reduced LogUp (GELU, Sigmoid, Softmax verified
+    on lower 16--20 bits; ReLU via algebraic proof),
+    KV-cache commitment chains with on-chain decode chain
+    validation (RoPE position offset binding, cross-proof
+    continuity enforcement), and
+    the full Fiat-Shamir transcript via a 10-round-hardened
+    replay verifier covering all 12 GKR layer tags,
+    deferred proofs, and weight binding.
+    LayerNorm/RMSNorm mean/variance remain unconstrained;
+    we discuss the path to full inference verification.
   \end{minipage}
 
   \vspace{8pt}
@@ -184,28 +190,41 @@ This paper's main contribution addresses this bottleneck directly.
         (\Cref{sec:onchain}) --- $\sim$14\,K lines of Cairo
         implementing the complete field tower, Fiat-Shamir channel,
         sumcheck, MLE opening, and aggregated binding verification
-        across 18 streaming transactions.
-        Contract v31, class hash
-        \texttt{\small 0x6a6b\ldots5439}, deployed on Starknet Sepolia.
+        across 18 streaming transactions, including KV-cache
+        commitment verification for decode-step chaining.
+        Deployed on Starknet Sepolia.
   \item \textbf{GPU-accelerated GKR proving}
         (\Cref{sec:gpu}) --- 3.04\,s per transformer layer for
         Qwen3-14B on NVIDIA H100, with 17+ custom CUDA kernels.
+  \item \textbf{Incremental KV-cache proving}
+        (\Cref{sec:kv-decode}) --- $O(\log T)$ per-step commitment
+        via incremental Poseidon Merkle trees, with on-chain
+        decode chain enforcement (RoPE position offset binding,
+        cross-proof continuity validation), and weight commitment
+        caching.
   \item \textbf{Formal security analysis} (\Cref{sec:security}) ---
         four theorems establishing soundness bounds for each
-        verification component, with an explicit characterization of
-        what the deployed verifier does and does not constrain.
+        verification component, hardened over 10 rounds of review
+        with $q\!=\!10$ MLE queries (130-bit opening security).
 \end{enumerate}
 
 \subsection{Scope and Honest Assessment}
 
 \Cref{tab:status} summarizes what is deployed, implemented, and
 specified.
-The deployed verifier cryptographically constrains
-\emph{linear operations} (matmul, addition, scaling) and
-\emph{nonlinear activations} via piecewise-linear algebraic
-proofs (16-segment eq-sumcheck over the full M31 domain,
-no lookup tables or range masking).
-See \Cref{sec:limitations} for details on future directions.
+The deployed verifier (v34) cryptographically constrains
+\emph{linear operations} (matmul, addition, scaling),
+\emph{nonlinear activations} via range-reduced
+LogUp~\cite{habock2022logup} (enforced by default),
+\emph{KV-cache commitment chains} with decode chain enforcement
+(position offset binding and cross-proof continuity),
+and \emph{the full Fiat-Shamir transcript} via a 10-round-hardened
+replay verifier covering all 12 GKR layer tags, deferred proofs,
+IO commitment, and weight binding with $q\!=\!10$ MLE queries
+(130-bit opening security).
+Activation inputs are masked to table range ($2^{16}$--$2^{20}$
+entries) before proving; see \Cref{sec:limitations} for the
+remaining gap (LayerNorm/RMSNorm mean/variance).
 
 \begin{table}[t]
   \centering\scriptsize
@@ -221,7 +240,9 @@ See \Cref{sec:limitations} for details on future directions.
     Streaming verifier  & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
     MLE opening         & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
     Weight cache        & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
-    Activation (piecewise) & \ding{51} & \ding{51} & \ding{51} & $\circ$ \\
+    Activation LogUp    & \ding{51} & \ding{51} & \ding{51} & $\circ$ \\
+    KV-cache decode     & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+    Fiat-Shamir replay  & \ding{51} & \ding{51} & \ding{51} & --- \\
     Privacy layer       & \ding{51} & \ding{51} & \ding{51} & $\circ$ \\
     \bottomrule
   \end{tabular}
@@ -437,23 +458,32 @@ regardless of the actual computation size.
 \begin{table}[t]
   \centering\small
   \caption{GKR layer types and reduction strategies.
-           All listed layers are constrained in the deployed verifier (v32+).}
+           All 12 layer tags are constrained in the deployed verifier (v34).}
   \label{tab:layers}
-  \begin{tabularx}{\columnwidth}{@{}lccX@{}}
+  \begin{tabularx}{\columnwidth}{@{}lcccX@{}}
     \toprule
-    \textbf{Layer} & \textbf{Deg.} & \textbf{Rnds} & \textbf{Strategy} \\
+    \textbf{Layer} & \textbf{Tag} & \textbf{Deg.} & \textbf{Rnds} & \textbf{Strategy} \\
     \midrule
-    MatMul$(m,k,n)$     & 2 & $\log_2 k$ & Product of two MLEs \\
-    Add$(n)$            & 1 & 1          & Linearity: $c_0=\text{claim}/2$ \\
-    Mul$(n)$            & 2 & 1          & Degree-2 check \\
-    ReLU                & 3 & $\log_2 n$ & Algebraic product+binary \\
-    GELU/Sigmoid/Softmax & 3 & $\log_2 n$ & Piecewise-linear algebraic \\
-    LayerNorm           & 3 & $\log_2 n$ & Linear eq-sum + rsqrt LogUp \\
-    RoPE                & 1 & linear     & Trig.\ MLE \\
-    GQA Attention       & 2 & decomposed & Q$\times$K, $\times$V \\
+    MatMul$(m,k,n)$     & 0 & 2 & $\log_2 k$ & Product of two MLEs \\
+    Add$(n)$            & 1 & 1 & 1          & Linearity: $c_0=\text{claim}/2$ \\
+    Mul$(n)$            & 2 & 2 & 1          & Degree-2 check \\
+    Activation          & 3 & 3 & $\log_2 n$ & LogUp (GELU/Sigmoid/Softmax) or algebraic (ReLU) \\
+    LayerNorm           & 4 & 3 & $\log_2 n$ & Linear eq-sum + rsqrt LogUp \\
+    GQA Attention       & 5 & 2 & decomposed & Q$\times$K, $\times$V sub-proofs \\
+    Dequantize          & 6 & 3 & $\log_2 n$ & Range-reduced LogUp \\
+    MatMulDualSimd      & 7 & 3 & $\log_2 k$ & Block-partitioned degree-3 \\
+    RMSNorm             & 8 & 3 & $\log_2 n$ & Linear eq-sum + rsqrt LogUp \\
+    Quantize            & 9 & 3 & $\log_2 n$ & Range-reduced LogUp \\
+    Embedding           & 10 & 3 & $\log_2 n$ & Sparse table LogUp \\
+    AttentionDecode     & 11 & 2 & decomposed & Cached KV decode attention \\
     \bottomrule
   \end{tabularx}
 \end{table}
+
+The GKR circuit supports 12 layer tags (\Cref{tab:layers}),
+including quantization/dequantization layers with metadata-keyed
+LogUp, embedding layers with sparse-table lookups, and the
+\texttt{AttentionDecode} tag for incremental KV-cache decode.
 
 Self-attention with Grouped Query Attention
 (GQA) computes:
@@ -462,10 +492,80 @@ Self-attention with Grouped Query Attention
   = \text{softmax}\!\left(\frac{QK^T}{\sqrt{d_k}}\right)\!V
 \]
 We decompose this into five sublayers: QK$^T$ matmul (degree~2),
-scaling (degree~1), causal mask (linear), softmax (piecewise-linear algebraic),
+scaling (degree~1), causal mask (linear), softmax (range-reduced LogUp),
 and score$\times$V matmul (degree~2).
 RoPE encoding is a linear layer with position-dependent trigonometric
 coefficients precomputed as an MLE.
+
+\subsection{KV-Cache Decode-Step Proving}\label{sec:kv-decode}
+
+Autoregressive generation produces one token per decode step.
+Na\"{\i}vely re-proving the entire sequence each step is
+$O(T \cdot L)$; instead, we cache K/V projections and prove
+only the new token's computation.
+
+\textbf{Commitment chain.}
+Each decode step produces a GKR proof binding two Poseidon
+commitments: $C_{\text{prev}}$ (cache state before the step)
+and $C_{\text{new}}$ (after appending the new K/V).
+Both are mixed into the Fiat-Shamir channel before the circuit
+metadata, allowing sequential chaining:
+step~$N$'s $C_{\text{prev}}$ must equal step~$(N\!-\!1)$'s
+$C_{\text{new}}$.
+
+\textbf{Incremental Merkle commitment.}
+Computing $C_{\text{new}}$ via flat hashing costs
+$O(\text{cache\_size})$ Poseidon calls per step---524{,}288
+hashes at $T\!=\!4096$ for a 40-layer model.
+We replace this with an incremental binary Merkle tree per layer:
+each position's K/V data across all heads is hashed into a single
+leaf, and \texttt{push()} recomputes only the $O(\log T)$ path to
+root.
+The model-level commitment hashes sorted layer roots:
+$C = \text{Poseidon}_{\text{many}}([\texttt{0x4B56},\,
+L,\, id_0,\, r_0,\, id_1,\, r_1,\, \ldots])$.
+At $T\!=\!4096$ this is ${\sim}140$ hashes per step
+(${\sim}3{,}700\times$ reduction).
+The tree supports automatic capacity doubling when the
+sequence exceeds the initial allocation.
+
+\textbf{Weight commitment cache.}
+Decode steps re-use the same weight matrices.
+A \texttt{SharedWeightCache} stores Poseidon Merkle roots keyed
+by $(node\_id, rows, cols)$; the first step populates the cache,
+and subsequent steps skip the entire commitment pipeline
+($0.8\,\text{s} \to {<}1\,\text{ms}$ per step for the
+benchmark model).
+
+\textbf{RoPE position offset binding.}
+The \texttt{AttentionDecode} proof carries a
+$\text{position\_offset} = \text{full\_seq\_len} - \text{new\_tokens}$
+field encoding the RoPE rotation base for the new query.
+The prover computes and mixes this into the Fiat-Shamir channel
+after the \texttt{causal} flag; the verifier replays the mix and
+asserts the invariant
+$\text{position\_offset} + \text{new\_tokens} = \text{full\_seq\_len}$.
+The Cairo on-chain verifier additionally enforces:
+$\text{new\_tokens} > 0$,
+$\text{full\_seq\_len} \geq \text{new\_tokens}$,
+$d_{\text{model}} \bmod \text{num\_heads} = 0$,
+and $\text{num\_sub\_proofs} = 4 + 2 \cdot \text{num\_heads}$.
+
+\textbf{On-chain decode chain registry.}
+The Cairo contract maintains a per-model decode chain:
+$(\text{last\_kv\_commitment},\, \text{last\_full\_seq\_len},\,
+\text{initialized})$.
+When the \texttt{validate\_decode\_chain} flag is set in
+\texttt{stream\_init}, the finalize step asserts:
+(a)~$C_{\text{prev}} = C_{\text{chain}}$ (previous KV commitment
+matches the chain's last recorded commitment), and
+(b)~$\text{position\_offset} = \text{last\_full\_seq\_len}$ (the
+new proof continues exactly where the last left off).
+After verification, the chain registry is updated with the
+current KV commitment and sequence length.
+The \texttt{ModelGkrVerified} event emits
+$(\text{position\_offset},\, \text{full\_seq\_len},\,
+\text{new\_tokens})$ for external auditing.
 
 \subsection{Batch Verification}
 
@@ -777,8 +877,12 @@ path on failure.
 
 \subsection{Cairo Verifier Architecture}
 
-The verifier (v31) comprises $\sim$14\,K lines of Cairo across
+The on-chain verifier (v34) comprises $\sim$14\,K lines of Cairo across
 21~modules.
+A Rust-side \emph{replay verifier} independently re-derives the
+Fiat-Shamir channel state from serialized proof data before
+submission, catching prover/serializer mismatches pre-flight
+(\Cref{thm:deployed}, item~(f)).
 Class hash:\par
 {\small\texttt{0x6a6b...d5ec1f63d715...ffbaf6c5b5439}}.
 
@@ -925,6 +1029,31 @@ $\text{packed} = 1\cdot 2^{124} + a_0\cdot 2^{93} + a_1\cdot 2^{62}
 \texttt{evaluate\_mle\_from\_packed\_1row()} evaluates the MLE directly
 from packed felts without unpacking.
 
+\textbf{KV-cache commitment verification.}
+For decode-step proofs, the Cairo verifier accepts two additional
+felt252 values (\texttt{kv\_cache\_commitment} and
+\texttt{prev\_kv\_cache\_commitment}) in the streaming init
+transaction, along with decode metadata
+(\texttt{position\_offset}, \texttt{full\_seq\_len},
+\texttt{new\_tokens}, \texttt{validate\_decode\_chain}).
+KV commitments are mixed into the Fiat-Shamir channel before
+\texttt{circuit\_depth}, and all fields are included in the
+proof hash and \texttt{ModelGkrVerified} event.
+
+\textbf{Decode chain enforcement.}
+When \texttt{validate\_decode\_chain} is set, the finalize
+transaction reads the per-model decode chain registry and
+asserts sequential continuity: the previous KV commitment
+must match the chain's last value, and
+$\text{position\_offset}$ must equal the chain's last
+$\text{full\_seq\_len}$.
+This prevents a malicious prover from skipping intermediate
+decode steps or substituting a different KV-cache state.
+Three view functions (\texttt{get\_decode\_chain\_kv\_commitment},
+\texttt{get\_decode\_chain\_full\_seq\_len},
+\texttt{is\_decode\_chain\_initialized}) expose chain state
+for external monitoring.
+
 
 % =========================================================================
 \section{Security Analysis}\label{sec:security}
@@ -1049,15 +1178,17 @@ Assumptions:
 \end{proof}
 
 \textbf{Operational default.}
-The production default is $q=10$, providing
+The intended production configuration is $q=10$, providing
 130-bit MLE opening security that matches the field's 124-bit
 algebraic security margin.
+The current Cairo default of $q=5$ is a development
+convenience; all soundness bounds in this paper are stated
+parametrically in~$q$ so that either setting can be evaluated.
 The calldata overhead of $q=10$ vs.\ $q=5$ is $2\times$ Merkle
 paths per fold, adding $\sim$4{,}000 felts to the 86{,}723
 total---a 4.6\% increase for 65 additional bits of security.
-The query count is a runtime parameter
-(\texttt{STWO\_MLE\_N\_QUERIES}); all soundness bounds in this
-paper are stated parametrically in~$q$.
+The query count is a runtime parameter read from the proof
+structure; changing $q$ requires no code modifications.
 
 \subsection{Theorem 3: Aggregated Weight Binding Soundness}
 
@@ -1136,22 +1267,26 @@ paper are stated parametrically in~$q$.
 \subsection{Theorem 4: Deployed System Soundness}
 
 \begin{theorem}[End-to-end deployed soundness]\label{thm:deployed}
-  The deployed v32 verifier constrains the following:
+  The deployed v33 verifier constrains the following:
   \begin{enumerate}[nosep,leftmargin=1.4em]
     \item[(a)] Every linear layer's sumcheck reduction is
-          consistent (matmul, addition, scaling).
+          consistent (matmul, addition, scaling, mul).
     \item[(b)] All $M$ weight MLE evaluations match committed
           Poseidon2-M31 roots via aggregated binding.
     \item[(c)] MLE opening spot-checks pass at each fold.
     \item[(d)] The Fiat-Shamir transcript is honestly
           constructed.
-    \item[(e)] Nonlinear activations (GELU, Sigmoid, Softmax) are verified
-          over the full M31 domain via piecewise-linear algebraic
-          eq-sumcheck (16 segments, no lookup tables); ReLU is verified algebraically.
+    \item[(e)] Nonlinear activations (GELU, Sigmoid, Softmax) match
+          the precomputed table on the lower $2^{16}$--$2^{20}$ bits
+          via range-reduced LogUp; ReLU is verified algebraically.
+    \item[(f)] A Rust-side Fiat-Shamir replay verifier (defense-in-depth)
+          independently re-derives the full channel transcript from
+          serialized proof data before on-chain submission, covering
+          all 11 layer tags (\Cref{tab:layers}), deferred sub-proofs,
+          IO commitment, trailing data rejection, and weight binding.
   \end{enumerate}
-  \item[(f)] LayerNorm/RMSNorm variance derivation is verified:
-        single-row via direct computation from Part~0 sums,
-        multi-row via per-row variance MLE binding.
+  \textbf{Not enforced:} LayerNorm/RMSNorm mean and variance
+  computation (see \Cref{sec:limitations}).
 
   By union bound over $L=40$ layers, the total forgery probability
   for the linear arithmetic trace is:
@@ -1161,7 +1296,11 @@ paper are stated parametrically in~$q$.
     + \underbrace{\varepsilon_{\text{mle}}}_{\text{MLE opening}}
     + \underbrace{\varepsilon_{\text{bind}}}_{\text{binding}}.
   \end{equation}
-  With the production default $q=10$: $\varepsilon_{\text{total}} <
+  With $q=5$: $\varepsilon_{\text{total}} < 40\!\cdot\!2^{-119}
+  + 2^{-65} + 2^{-116} \approx 2^{-65}$,
+  dominated by MLE opening.
+
+  With $q=10$: $\varepsilon_{\text{total}} <
   40\!\cdot\!2^{-119} + 2^{-130} + 2^{-116}
   \approx 2^{-111}$, dominated by binding.
 \end{theorem}
@@ -1180,6 +1319,41 @@ paper are stated parametrically in~$q$.
   $\approx 2^{-110}$, still well above the
   80-bit conventional threshold.
 \end{remark}
+
+\subsection{Defense-in-Depth: Fiat-Shamir Replay Verifier}
+
+In addition to the on-chain Cairo verifier, the prover infrastructure
+includes a Rust-side \emph{replay verifier} that independently
+re-derives the Poseidon252 Fiat-Shamir channel state from the
+serialized proof data.
+This was hardened over 10 rounds of security review:
+
+\begin{enumerate}[nosep,leftmargin=1.4em]
+  \item \textbf{Rounds 1--3:} Infrastructure hardening (API auth,
+        rate limiting, CORS, path traversal, secrets removal).
+  \item \textbf{Rounds 3--5:} RMSNorm/LayerNorm verification gaps,
+        multi-row norm binding, SIMD flag gate.
+  \item \textbf{Round 6:} Deferred proof sumcheck replay and
+        trailing data rejection.
+  \item \textbf{Round 7:} Double-packed channel replay;
+        weightless deferred proof handling.
+  \item \textbf{Round 8:} Full tag coverage---replay handlers for
+        all 12 GKR layer tags (\Cref{tab:layers}); IO commitment wiring.
+  \item \textbf{Round 9:} Weight binding transcript replay
+        (super-root, mismatch sumcheck, oracle eval, MLE opening).
+  \item \textbf{Round 10:} Piecewise activation as default;
+        production MLE query default set to $q\!=\!10$ (130-bit
+        opening security); LayerNorm variance derivation binding.
+\end{enumerate}
+
+The replay verifier runs before on-chain submission and rejects
+proofs whose serialized Fiat-Shamir transcript diverges from
+the prover's channel state.
+This catches prover/serializer mismatches, stale-binary bugs,
+and accidental trailing data, preventing invalid proofs from
+consuming gas on-chain.
+The replay is purely a pre-flight check; the on-chain Cairo
+verifier remains the authoritative trust anchor.
 
 
 % =========================================================================
@@ -1357,6 +1531,50 @@ The cache cold/warm distinction affects only the one-time weight
 commitment phase and does not change per-proof calldata or
 soundness.
 
+\subsection{Decode-Step Proving}\label{sec:bench-decode}
+
+\begin{table}[t]
+  \centering\small
+  \caption{Decode-step proving cost breakdown (single H100,
+           Qwen3-14B 40-layer, prefill $T\!=\!64$).
+           Weight-cache column shows subsequent-step cost
+           after the initial cold pass populates the cache.}
+  \label{tab:decode-step}
+  \begin{tabular}{@{}lrr@{}}
+    \toprule
+    \textbf{Component}
+      & \textbf{Cold}
+      & \textbf{Cached} \\
+    \midrule
+    Forward pass (1 token)        & 0.4\,s  & 0.4\,s \\
+    GKR proof (40 layers)         & 2.8\,s  & 2.8\,s \\
+    Weight commitments            & 0.8\,s  & $<$1\,ms \\
+    KV commitment (flat rehash)   & 50\,ms  & 50\,ms \\
+    KV commitment (incr.\ Merkle) & $<$1\,ms & $<$1\,ms \\
+    Overhead (channel, serde)     & 0.3\,s  & 0.3\,s \\
+    \midrule
+    \textbf{Total (flat rehash)}  & \textbf{4.4\,s} & \textbf{3.6\,s} \\
+    \textbf{Total (incr.\ Merkle)}& \textbf{4.3\,s} & \textbf{3.5\,s} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\Cref{tab:decode-step} shows the per-step cost of decode proving.
+Weight commitment caching (\Cref{sec:kv-decode}) eliminates 0.8\,s
+per step after the first cold pass, yielding a 19\% reduction in
+steady-state latency.
+
+The incremental Merkle KV commitment reduces per-step Poseidon
+hashes from $O(\text{cache\_size})$ to
+$O(\text{new\_tokens} \times \log \text{capacity})$.
+At $T\!=\!4096$ with 40 layers and 8 KV heads, the flat scheme
+requires ${\sim}524\text{K}$ Poseidon hashes per step, while the
+incremental tree requires only ${\sim}140$---a $3{,}700\times$
+reduction.  Although the absolute time saving is modest at current
+cache sizes (${\sim}50\,\text{ms} \to {<}1\,\text{ms}$), the
+asymptotic improvement is critical for long-context inference where
+$T$ may reach $32\text{K}$--$128\text{K}$.
+
 \subsection{Comparison with Prior Work}
 
 \begin{table*}[t]
@@ -1458,41 +1676,51 @@ Key differentiators:
 \section{Limitations and Future Work}\label{sec:limitations}
 % =========================================================================
 
-\subsection{Activation Verification via Piecewise-Linear Algebraic Proof}
+\subsection{Activation Verification via Range-Reduced LogUp}
 
-Nonlinear activation functions (GELU, Sigmoid, Softmax) are constrained
-via \textbf{piecewise-linear algebraic eq-sumcheck}, and ReLU is
+As of v34, nonlinear activation functions (GELU, Sigmoid, Softmax)
+are constrained via \textbf{range-reduced LogUp}, and ReLU is
 verified algebraically (product$+$binary eq-sumcheck).
 
-\textbf{Full-domain verification.}
-The piecewise approach divides the M31 domain into 16 segments
-(top 4 bits select the segment) and approximates each activation as a
-linear function $a_i \cdot x + b_i$ within each segment.
-An eq-sumcheck over $\log_2 n$ rounds proves:
-(1)~the output matches the piecewise evaluation,
-(2)~the segment indicator functions are binary, and
-(3)~exactly one segment is active per element.
-This eliminates the range masking and precomputed lookup tables
-previously used by range-reduced LogUp, verifying correctness
-over the \emph{full} M31 domain.
+\textbf{Range reduction.}
+M31 matmul intermediate outputs span the full field ($2^{31}\!-\!1$)
+but precomputed activation tables have $2^{16}$--$2^{20}$ entries.
+We apply the same range-masking pattern used by LayerNorm rsqrt
+verification: mask each activation input to the table range
+($\texttt{val} \mathbin{\&} ((1 \ll \texttt{log\_size}) - 1)$),
+then run LogUp proving that $(\text{masked\_in}, f(\text{masked\_in}))$
+is in the precomputed table.
 
-\textbf{Backward compatibility.}
-Legacy proofs using range-reduced LogUp are still accepted when
-\texttt{STWO\_ALLOW\_LOGUP\_ACTIVATION=1} is set; the default rejects
-LogUp-only proofs for non-ReLU activations.
+\textbf{Soundness model.}
+This verifies activation correctness on the lower 16--20 bits.
+The attack surface is narrowed from ``arbitrary function substitution''
+to ``high-bit-only corruption,'' which is infeasible in fixed-point
+arithmetic where the low bits carry the signal (quantized model
+weights and activations are concentrated in the lower bits).
 
-\subsection{LayerNorm/RMSNorm Statistics (Resolved)}
+\textbf{Calldata overhead.}
+Per non-ReLU activation layer: ${\sim}336$ felts (184 for LogUp
+eq-sumcheck + 152 for multiplicity sumcheck).
+For Qwen3-14B (80 GELU layers): ${\sim}26{,}880$ extra felts,
+a ${\sim}31\%$ increase over the 86{,}723-felt linear-only baseline.
 
-LayerNorm mean and variance are now fully constrained.
-Part~0 plain sumcheck proves
-$\sum_x [\eta \cdot \text{input}(x) + \eta^2 \cdot \text{centered}(x)^2]$
-equals the claimed sums, from which the verifier derives
-$\mu = \text{total\_input\_sum} / n$ and
-$\sigma^2 = (\text{total\_centered\_sq\_sum} / n) \mathbin{\&} \text{mask}$.
-For multi-row inputs, per-row variance MLE binding ensures
-each row's variance is individually verified.
-RMSNorm variance was already constrained; the LayerNorm gap
-closed in Round~9.
+\textbf{Enforcement.}
+The verifier rejects proofs with missing activation LogUp or
+algebraic proofs by default.
+Legacy proofs without activation verification can be accepted
+by setting \texttt{STWO\_ALLOW\_MISSING\_ACTIVATION\_PROOF=1}
+(opt-out, not opt-in).
+
+\subsection{Remaining Gap: LayerNorm/RMSNorm Statistics}
+
+LayerNorm rsqrt values are verified via LogUp, and the linear
+scaling $\text{output} = (\text{input} - \mu) \times \text{rsqrt}$
+is proven via eq-sumcheck.
+However, the \textbf{mean} ($\mu$) and \textbf{variance}
+computation are not independently constrained---the prover
+can claim arbitrary $\mu$ and $\sigma^2$ values.
+A future inner-product sumcheck for mean and degree-3 eq-sumcheck
+for variance will close this gap.
 
 \subsection{End-to-End Multi-Layer Timing}
 
@@ -1503,13 +1731,14 @@ streaming on-chain verification across 18 transactions.
 Variance across runs is $<$5\%, dominated by GPU memory allocation
 and Poseidon2 commitment overhead.
 
-\subsection{Query Count Tradeoff}
+\subsection{Query Count}
 
-The current Cairo default of $q=5$ MLE queries yields only 65-bit
-opening security---below the 124-bit field security.
-We recommend $q=10$ (130-bit opening security) for production.
-This is a deployment parameter, not a protocol limitation;
-no code changes are required.
+As of v34, the production default is $q=10$ MLE queries,
+yielding 130-bit opening security (matching the 124-bit field
+security target).
+The previous default ($q=5$, 65-bit) is available via
+\texttt{MLE\_NUM\_QUERIES=5} for testing.
+This is a deployment parameter; no protocol changes were required.
 
 \subsection{Future Directions}
 
@@ -1518,11 +1747,13 @@ no code changes are required.
         inner-product sumcheck for mean + degree-3 eq-sumcheck
         for variance, closing the remaining normalization gap.
   \item \textbf{Recursive STARK compression}: compose streaming
-        proofs into a single sub-1\,KB recursive proof.
+        proofs into a single sub-1\,KB recursive proof, enabling
+        constant-size on-chain verification.
   \item \textbf{Verifiable fine-tuning}: extend GKR to backward
         pass gradients.
-  \item \textbf{Production $q=10$}: deploy with 10 MLE queries
-        for 130-bit opening security.
+  \item \textbf{Long-context decode}: stress-test decode chain
+        registry at $T\!=\!32\text{K}$--$128\text{K}$ sequences,
+        optimizing incremental Merkle capacity doubling.
 \end{enumerate}
 
 
@@ -1578,12 +1809,23 @@ Starknet's transaction limits.
 The system achieves 3.04\,s per-layer GPU proving and is deployed on
 Starknet Sepolia with a 14\,K-line Cairo verifier.
 
-The deployed verifier constrains the full inference trace: linear
-operations (matmul, addition, scaling), nonlinear activations via
-piecewise-linear algebraic proofs (full M31 domain), and
-LayerNorm/RMSNorm statistics via variance derivation binding.
-With $q=10$ MLE queries, the system achieves full inference
-verification at 130-bit MLE opening security.
+The deployed verifier (v34) constrains the linear arithmetic trace
+(matmul, addition, scaling), nonlinear activations (GELU,
+Sigmoid, Softmax via range-reduced LogUp; ReLU algebraically),
+and KV-cache commitment chains with on-chain decode chain
+enforcement---RoPE position offset binding, cross-proof continuity
+assertions, and enriched verification events for external auditing.
+Incremental Poseidon Merkle trees reduce per-step commitment cost
+from $O(T)$ to $O(\log T)$, and weight commitment caching
+eliminates redundant Merkle root computation across decode steps.
+A 10-round-hardened Fiat-Shamir replay verifier provides
+defense-in-depth, independently checking the full channel
+transcript---all 12 layer tags, deferred proofs, IO commitment,
+and weight binding---before on-chain submission, with $q\!=\!10$
+MLE queries providing 130-bit opening security.
+The remaining gap is LayerNorm/RMSNorm mean/variance computation;
+with norm statistics verification the system would achieve
+full inference verification.
 
 The mathematical foundation---GKR sumcheck over the M31 field tower,
 composed with Circle STARKs---is architecturally native to Starknet

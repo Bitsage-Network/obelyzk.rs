@@ -241,6 +241,34 @@ fn decode_prove_verify_roundtrip() {
         "KV commitment should match"
     );
 
+    // Verify position_offset is set correctly in the decode proof
+    for lp in &gkr_proof.layer_proofs {
+        if let stwo_ml::gkr::types::LayerProof::AttentionDecode {
+            position_offset,
+            full_seq_len,
+            new_tokens,
+            ..
+        } = lp
+        {
+            assert_eq!(*new_tokens, 1, "decode step should have new_tokens=1");
+            assert_eq!(
+                *full_seq_len,
+                prefill_len + 1,
+                "full_seq_len should be prefill + 1"
+            );
+            assert_eq!(
+                *position_offset,
+                prefill_len,
+                "position_offset should equal prefill_len"
+            );
+            assert_eq!(
+                *position_offset + *new_tokens,
+                *full_seq_len,
+                "position_offset + new_tokens should equal full_seq_len"
+            );
+        }
+    }
+
     // Replay the verification channel with same KV commitment mixing
     let circuit = stwo_ml::gkr::LayeredCircuit::from_graph(&graph).unwrap();
     let mut verify_channel = stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
@@ -342,6 +370,33 @@ fn decode_kv_commitment_chain() {
             "Step {}: commitment should change as cache grows",
             step
         );
+
+        // Verify position_offset chain: position_offset[step] == full_seq_len[step-1]
+        for lp in &gkr_proof.layer_proofs {
+            if let stwo_ml::gkr::types::LayerProof::AttentionDecode {
+                position_offset,
+                full_seq_len,
+                new_tokens,
+                ..
+            } = lp
+            {
+                assert_eq!(
+                    *position_offset + *new_tokens, *full_seq_len,
+                    "Step {}: position_offset + new_tokens != full_seq_len",
+                    step
+                );
+                let expected_pos = prefill_len + step;
+                assert_eq!(
+                    *position_offset, expected_pos,
+                    "Step {}: position_offset should be prefill_len + step",
+                    step
+                );
+                eprintln!(
+                    "  Step {}: position_offset={} full_seq_len={} new_tokens={}",
+                    step, position_offset, full_seq_len, new_tokens
+                );
+            }
+        }
 
         eprintln!(
             "  Step {}: chain OK (prev={:?} -> new={:?})",

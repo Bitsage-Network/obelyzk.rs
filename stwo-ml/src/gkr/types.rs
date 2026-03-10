@@ -452,6 +452,7 @@ pub enum LayerProof {
         full_seq_len: usize,
         d_model: usize,
         causal: bool,
+        position_offset: usize,
     },
 }
 

@@ -8936,12 +8936,14 @@ pub(crate) fn reduce_attention_layer_decode(
     let d_k = config.d_k();
 
     // Mix decode metadata into channel for domain separation
+    let position_offset = full_seq_len - new_tokens;
     channel.mix_u64(0x44434F44_u64); // "DCOD" tag
     channel.mix_u64(num_heads as u64);
     channel.mix_u64(new_tokens as u64);
     channel.mix_u64(full_seq_len as u64);
     channel.mix_u64(d_model as u64);
     channel.mix_u64(if config.causal { 1 } else { 0 });
+    channel.mix_u64(position_offset as u64);
 
     let expected_count = 4 + 2 * num_heads;
     let mut sub_proofs = Vec::with_capacity(expected_count);
@@ -9089,6 +9091,7 @@ pub(crate) fn reduce_attention_layer_decode(
             full_seq_len,
             d_model: config.d_model,
             causal: config.causal,
+            position_offset,
         },
         final_input_claim,
     ))

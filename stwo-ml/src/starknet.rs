@@ -1730,6 +1730,23 @@ pub struct StreamSessionMetadata {
 /// Build streaming GKR calldata for calldata-only verification (v25).
 ///
 /// Splits the proof into:
+/// Extract decode metadata from layer proofs. Returns (position_offset, full_seq_len, new_tokens).
+/// Non-decode proofs return (0, 0, 0).
+fn extract_decode_metadata(layer_proofs: &[crate::gkr::types::LayerProof]) -> (u32, u32, u32) {
+    for proof in layer_proofs {
+        if let crate::gkr::types::LayerProof::AttentionDecode {
+            position_offset,
+            full_seq_len,
+            new_tokens,
+            ..
+        } = proof
+        {
+            return (*position_offset as u32, *full_seq_len as u32, *new_tokens as u32);
+        }
+    }
+    (0, 0, 0)
+}
+
 /// 1. init TX: IO data + metadata (~1500 felts)
 /// 2. N stream TXs: batches of layer proofs (~3500 felts each)
 /// 3. finalize TX: weight claims + binding (~200 felts)
@@ -1795,6 +1812,15 @@ pub fn build_streaming_gkr_calldata(
         init_calldata.push("0x0".to_string());
         init_calldata.push("0x0".to_string());
     }
+
+    // Decode metadata: position_offset, full_seq_len, new_tokens, validate_decode_chain
+    let (pos_off, full_seq, new_tok) = extract_decode_metadata(&proof.layer_proofs);
+    init_calldata.push(format!("{}", pos_off));
+    init_calldata.push(format!("{}", full_seq));
+    init_calldata.push(format!("{}", new_tok));
+    // validate_decode_chain: enabled when this is a decode proof with KV
+    let validate_chain = pos_off > 0 && proof.kv_cache_commitment.is_some();
+    init_calldata.push(if validate_chain { "1" } else { "0" }.to_string());
 
     // ── Build chunked output_mle calldata ──
     // Split output data into chunks of CHUNK_SIZE M31 values for gas-safe MLE evaluation.
@@ -4319,6 +4345,7 @@ pub fn replay_verify_serialized_proof(
                 let full_seq_len = read_u32_from(proof_data, &mut off) as usize;
                 let d_model = read_u32_from(proof_data, &mut off) as usize;
                 let causal_flag = read_u32_from(proof_data, &mut off);
+                let position_offset = read_u32_from(proof_data, &mut off) as usize;
                 let d_k = d_model / num_heads;
 
                 let mut sub_claim_values = Vec::with_capacity(num_sub_proofs);
@@ -4333,11 +4360,20 @@ pub fn replay_verify_serialized_proof(
                 ch.mix_u64(full_seq_len as u64);
                 ch.mix_u64(d_model as u64);
                 ch.mix_u64(causal_flag as u64);
+                ch.mix_u64(position_offset as u64);
+
+                // Assert position_offset consistency
+                if position_offset + new_tokens != full_seq_len {
+                    return Err(format!(
+                        "DCOD_POSITION_MISMATCH: position_offset({}) + new_tokens({}) != full_seq_len({})",
+                        position_offset, new_tokens, full_seq_len,
+                    ));
+                }
 
                 if trace {
                     eprintln!(
-                        "[VERIFIER AttentionDecode] num_sub={} heads={} new_tokens={} full_seq={} d_model={} causal={}",
-                        num_sub_proofs, num_heads, new_tokens, full_seq_len, d_model, causal_flag
+                        "[VERIFIER AttentionDecode] num_sub={} heads={} new_tokens={} full_seq={} d_model={} causal={} pos_offset={}",
+                        num_sub_proofs, num_heads, new_tokens, full_seq_len, d_model, causal_flag, position_offset
                     );
                 }
 

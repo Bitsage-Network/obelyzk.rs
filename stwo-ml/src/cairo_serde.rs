@@ -1513,6 +1513,7 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 full_seq_len,
                 d_model,
                 causal,
+                position_offset,
             } => {
                 serialize_u32(11, output); // tag: AttentionDecode
                 serialize_u32(sub_proofs.len() as u32, output);
@@ -1521,6 +1522,7 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 serialize_u32(*full_seq_len as u32, output);
                 serialize_u32(*d_model as u32, output);
                 serialize_u32(if *causal { 1 } else { 0 }, output);
+                serialize_u32(*position_offset as u32, output);
                 for val in sub_claim_values {
                     serialize_qm31(*val, output);
                 }
@@ -1995,6 +1997,7 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 full_seq_len,
                 d_model,
                 causal,
+                position_offset,
             } => {
                 serialize_u32(11, output);
                 serialize_u32(sub_proofs.len() as u32, output);
@@ -2003,6 +2006,7 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 serialize_u32(*full_seq_len as u32, output);
                 serialize_u32(*d_model as u32, output);
                 serialize_u32(if *causal { 1 } else { 0 }, output);
+                serialize_u32(*position_offset as u32, output);
                 for val in sub_claim_values {
                     serialize_qm31(*val, output);
                 }
@@ -2449,6 +2453,7 @@ fn serialize_layer_proof_packed_inner(
             full_seq_len,
             d_model,
             causal,
+            position_offset,
         } => {
             serialize_u32(11, output);
             serialize_u32(sub_proofs.len() as u32, output);
@@ -2457,6 +2462,7 @@ fn serialize_layer_proof_packed_inner(
             serialize_u32(*full_seq_len as u32, output);
             serialize_u32(*d_model as u32, output);
             serialize_u32(if *causal { 1 } else { 0 }, output);
+            serialize_u32(*position_offset as u32, output);
             for val in sub_claim_values {
                 serialize_qm31_packed(*val, output);
             }
@@ -2943,6 +2949,7 @@ fn serialize_layer_proof_double_packed_inner(
             full_seq_len,
             d_model,
             causal,
+            position_offset,
         } => {
             serialize_u32(11, output);
             serialize_u32(sub_proofs.len() as u32, output);
@@ -2951,6 +2958,7 @@ fn serialize_layer_proof_double_packed_inner(
             serialize_u32(*full_seq_len as u32, output);
             serialize_u32(*d_model as u32, output);
             serialize_u32(if *causal { 1 } else { 0 }, output);
+            serialize_u32(*position_offset as u32, output);
             for val in sub_claim_values {
                 serialize_qm31_packed(*val, output);
             }
