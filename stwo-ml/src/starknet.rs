@@ -3208,6 +3208,7 @@ pub fn replay_verify_double_packed_proof(
         Some(proof.io_commitment),
         proof.aggregated_binding.as_ref(),
         None, // KV-cache commitment: double-packed path doesn't use KV yet
+        None, // prev KV-cache commitment: double-packed path doesn't use KV yet
     )?;
 
     Ok(())
@@ -4336,6 +4337,7 @@ pub fn replay_verify_serialized_proof(
                     eprintln!("[VERIFIER Embedding] layer {} vocab={} dim={} ch={:?}",
                         layer, emb_vocab_size, emb_embed_dim, ch.digest());
                 }
+            }
             11 => {
                 // AttentionDecode — same structure as Attention (tag 5) but with
                 // DCOD domain tag and dual dimensions (new_tokens, full_seq_len).
@@ -8979,6 +8981,7 @@ mod tests {
             Some(gkr.io_commitment),
             None,
             None,
+            None,
         );
         assert!(result.is_ok(), "Unpacked replay failed: {:?}", result.err());
         println!("LayerNorm+Piecewise unpacked replay OK ({} felts)", proof_data.len());
@@ -8994,6 +8997,7 @@ mod tests {
             gkr.layer_proofs.len() as u32,
             true,
             Some(gkr.io_commitment),
+            None,
             None,
             None,
         );
@@ -9415,7 +9419,7 @@ mod tests {
         let result = super::replay_verify_serialized_proof(
             &proof_data, &raw_io, &matmul_dims,
             circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
-            false, Some(gkr.io_commitment), None, None,
+            false, Some(gkr.io_commitment), None, None, None,
         );
         assert!(result.is_ok(), "Unpacked deferred replay failed: {:?}", result.err());
 
@@ -9425,7 +9429,7 @@ mod tests {
         let result2 = super::replay_verify_serialized_proof(
             &packed_data, &raw_io, &matmul_dims,
             circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
-            true, Some(gkr.io_commitment), None, None,
+            true, Some(gkr.io_commitment), None, None, None,
         );
         assert!(result2.is_ok(), "Packed deferred replay failed: {:?}", result2.err());
         println!("Deferred proof replay roundtrip OK (unpacked={}, packed={} felts, {} deferred)",
@@ -9483,7 +9487,7 @@ mod tests {
         let result = super::replay_verify_serialized_proof(
             &packed_data, &raw_io, &matmul_dims,
             circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
-            true, Some(gkr.io_commitment), None, None,
+            true, Some(gkr.io_commitment), None, None, None,
         );
         assert!(result.is_err(), "Tampered deferred proof should be rejected");
         let err = result.unwrap_err();
@@ -9533,7 +9537,7 @@ mod tests {
         let result = super::replay_verify_serialized_proof(
             &packed_data, &raw_io, &matmul_dims,
             circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
-            true, Some(gkr.io_commitment), None, None,
+            true, Some(gkr.io_commitment), None, None, None,
         );
         assert!(result.is_ok(), "Clean data should pass: {:?}", result.err());
 
@@ -9544,7 +9548,7 @@ mod tests {
         let result2 = super::replay_verify_serialized_proof(
             &with_trailing, &raw_io, &matmul_dims,
             circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
-            true, Some(gkr.io_commitment), None, None,
+            true, Some(gkr.io_commitment), None, None, None,
         );
         assert!(result2.is_err(), "Trailing data should be rejected");
         let err = result2.unwrap_err();
@@ -9762,6 +9766,7 @@ mod tests {
             Some(gkr.io_commitment),
             None,
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -9828,7 +9833,7 @@ mod tests {
         let result = super::replay_verify_serialized_proof(
             &packed, &raw_io, &matmul_dims,
             circuit.layers.len() as u32, gkr.layer_proofs.len() as u32,
-            true, Some(gkr.io_commitment), None, None,
+            true, Some(gkr.io_commitment), None, None, None,
         );
         assert!(result.is_ok(), "Replay with kind-tagged deferred proofs failed: {:?}", result.err());
         println!("Kind-tagged deferred replay OK ({} packed felts, {} deferred)", packed.len(), gkr.deferred_proofs.len());

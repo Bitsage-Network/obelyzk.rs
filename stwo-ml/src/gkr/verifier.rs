@@ -708,6 +708,11 @@ fn verify_gkr_inner(
                 rsqrt_eval,
                 rsqrt_table_commitment,
                 simd_combined,
+                rms_sq_round_polys,
+                rms_sq_input_final,
+                rms_sq_claimed_sq_sum,
+                rms_sq_n_active,
+                row_rms_sq,
             } => {
                 // Deferred RMSNorm proof
                 let skip_layer_idx = deferred_skip_layer_indices.get(i).copied().unwrap_or(0);
@@ -738,6 +743,10 @@ fn verify_gkr_inner(
                     dim,
                     0,
                     channel,
+                    rms_sq_round_polys.as_ref(),
+                    *rms_sq_input_final,
+                    *rms_sq_claimed_sq_sum,
+                    row_rms_sq.as_ref(),
                 )?;
                 if deferred_input_claim.point != deferred.input_claim.point
                     || deferred_input_claim.value != deferred.input_claim.value
@@ -753,9 +762,11 @@ fn verify_gkr_inner(
                 logup_proof,
                 multiplicity_sumcheck,
                 activation_proof,
+                piecewise_proof,
                 input_eval,
                 output_eval,
                 table_commitment,
+                simd_combined,
             } => {
                 // Deferred Activation proof
                 let deferred_input_claim = verify_activation_reduction(
@@ -764,11 +775,14 @@ fn verify_gkr_inner(
                     logup_proof.as_ref(),
                     multiplicity_sumcheck.as_ref(),
                     activation_proof.as_ref(),
+                    piecewise_proof.as_ref(),
                     *input_eval,
                     *output_eval,
                     *table_commitment,
                     0,
+                    0,
                     channel,
+                    *simd_combined,
                 )?;
                 if deferred_input_claim.point != deferred.input_claim.point
                     || deferred_input_claim.value != deferred.input_claim.value

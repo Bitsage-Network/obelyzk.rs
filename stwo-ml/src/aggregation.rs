@@ -5098,7 +5098,7 @@ where
 /// Returns `(proof, new_kv_commitment)`. The proof includes both
 /// `kv_cache_commitment` (after) and `prev_kv_cache_commitment` (before)
 /// for sequential chaining.
-pub fn prove_model_pure_gkr_decode_step(
+pub fn prove_model_pure_gkr_decode_step_incremental(
     graph: &ComputationGraph,
     input: &M31Matrix,
     weights: &GraphWeights,
@@ -5308,6 +5308,8 @@ pub fn prove_model_pure_gkr_decode_step(
         tiled_matmul_proofs: Vec::new(),
         gkr_proof: Some(gkr_proof),
         gkr_batch_data: None,
+        kv_cache_commitment: Some(new_kv_commitment),
+        prev_kv_cache_commitment: Some(prev_kv_commitment),
     };
 
     eprintln!(

@@ -6825,7 +6825,7 @@ fn run_decode_mode(
     _prefill_model: &OnnxModel,
     weight_cache: Option<&stwo_ml::weight_cache::SharedWeightCache>,
 ) {
-    use stwo_ml::aggregation::prove_model_pure_gkr_decode_step;
+    use stwo_ml::aggregation::prove_model_pure_gkr_decode_step_incremental;
     use stwo_ml::kv_state::KVCacheState;
 
     let model_dir = cli.model_dir.as_ref().expect("--decode requires --model-dir");
@@ -6869,7 +6869,7 @@ fn run_decode_mode(
         let token_input = generate_random_input(1, decode_model.input_shape.1);
         let t_step = Instant::now();
 
-        let (proof, new_kv_commit) = prove_model_pure_gkr_decode_step(
+        let (proof, new_kv_commit) = prove_model_pure_gkr_decode_step_incremental(
             &decode_model.graph,
             &token_input,
             &decode_model.weights,

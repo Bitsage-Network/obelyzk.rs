@@ -2104,7 +2104,7 @@ pub fn prove_gkr_decode(
                 let b_matrix = weights.get_weight(*weight_node_id).ok_or(
                     GKRError::MissingWeight { node_id: *weight_node_id },
                 )?;
-                let (reduction, claim) =
+                let (reduction, claim, _timings) =
                     reduce_matmul_layer(&current_claim, a_matrix, b_matrix, *m, *k, *n, channel)?;
                 push_matmul_weight_data(
                     *weight_node_id, *m, *n,
@@ -2241,7 +2241,7 @@ pub fn prove_gkr_decode(
                     GKRError::MissingWeight { node_id: *weight_node_id },
                 )?;
                 mix_secure_field(channel, deferred_claim.value);
-                let (reduction, input_claim) =
+                let (reduction, input_claim, _timings) =
                     reduce_matmul_layer(&deferred_claim, a_matrix, b_matrix, *m, *k, *n, channel)?;
 
                 let pm = m.next_power_of_two();
@@ -9645,7 +9645,7 @@ pub(crate) fn reduce_attention_layer_decode(
             point: r,
             value: claimed_value,
         };
-        let (proof, input_claim) = reduce_matmul_layer(&fresh_claim, a, b, m, k, n, channel)?;
+        let (proof, input_claim, _timings) = reduce_matmul_layer(&fresh_claim, a, b, m, k, n, channel)?;
         let layer_proof = LayerProof::MatMul {
             round_polys: proof.round_polys,
             final_a_eval: proof.final_a_eval,
@@ -9655,7 +9655,7 @@ pub(crate) fn reduce_attention_layer_decode(
     };
 
     // --- Sub-proof 0: Output projection (new_tokens×d_model = new_tokens×d_model × d_model×d_model) ---
-    let (output_proj_proof, _concat_claim) = reduce_matmul_layer(
+    let (output_proj_proof, _concat_claim, _timings) = reduce_matmul_layer(
         output_claim,
         &intermediates.concat,
         &attn_weights.w_o,
@@ -9738,7 +9738,7 @@ pub(crate) fn reduce_attention_layer_decode(
         point: r_q,
         value: q_value,
     };
-    let (q_reduction, final_input_claim) = reduce_matmul_layer(
+    let (q_reduction, final_input_claim, _timings) = reduce_matmul_layer(
         &q_claim,
         input_matrix,
         &attn_weights.w_q,
