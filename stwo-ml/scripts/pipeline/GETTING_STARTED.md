@@ -214,17 +214,32 @@ Pre-warm the cache to make subsequent proves instant:
 - **Proof calldata**: Ready for on-chain verification
 - **Semantic evaluation**: Deterministic correctness checks
 
-## Performance (H100)
+## Performance (H100 NVL)
+
+### Full Model (Qwen3-14B, 40 layers, 160 MatMuls)
 
 | Phase | First Run | Cached |
 |-------|-----------|--------|
-| Model loading | ~5s | ~5s |
-| Weight cache pre-warm | ~60s | 0s (cached) |
-| Forward pass (1 layer) | ~1s | ~1s |
-| GKR prove (1 layer) | ~3s | ~3s |
-| Serialization | ~2.5s | ~2.5s |
-| **Total (1 layer, first run)** | **~140s** | **~8s** |
-| **Total (1 layer, cached)** | — | **~8s** |
+| Model loading (160 weights) | ~35s | ~35s |
+| Weight cache pre-warm (160 roots) | ~870s | 0s (cached) |
+| Forward pass (281 nodes) | ~38s | ~38s |
+| GKR reductions (160 matmuls) | ~47s | ~47s |
+| Weight binding (RLC) | ~0ms | ~0ms |
+| Unified STARK (121 components) | ~5s | ~5s |
+| Serialization | ~2s | ~2s |
+| **Total (40 layers, first run)** | **~15 min** | **~103s** |
+| **Total (40 layers, cached)** | — | **~103s** |
+
+### Single Layer (1 of 40)
+
+| Phase | First Run | Cached |
+|-------|-----------|--------|
+| Model loading (4 weights) | ~2s | ~2s |
+| Weight cache pre-warm | ~20s | 0s (cached) |
+| Forward pass (8 nodes) | ~1s | ~1s |
+| GKR prove (4 matmuls) | ~1s | ~1s |
+| Unified STARK | ~0.2s | ~0.2s |
+| **Total (1 layer, cached)** | — | **~3s** |
 
 ## Troubleshooting
 

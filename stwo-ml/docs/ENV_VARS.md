@@ -7,8 +7,8 @@ All `STWO_*` environment variables that control proving, GPU, calldata, caching,
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STWO_WEIGHT_BINDING` | `aggregated` | Weight binding mode. Set to `individual`, `sequential`, `0`, `off`, or `false` to opt out of aggregated oracle sumcheck. |
-| `STWO_AGGREGATED_FULL_BINDING` | `1` | Enable full aggregated binding verification (default). Ensures weight commitments are independently verified on-chain. |
-| `STWO_AGGREGATED_RLC_ONLY` | `0` | When `1`, use RLC-only binding (no full aggregated proof). Not accepted for streaming submission. |
+| `STWO_AGGREGATED_FULL_BINDING` | `0` | When `1`, enable full aggregated binding with virtual MLE opening proof. Needed for trustless on-chain streaming. Default off — RLC binding is fast (~0ms) and cryptographically sound (weight Merkle roots mixed into Fiat-Shamir). |
+| `STWO_AGGREGATED_RLC_ONLY` | `0` | When `1`, force RLC-only binding even if full binding is enabled. |
 | `STWO_FORCE_STREAMING` | `0` | Force streaming GKR calldata layout even when single-TX would fit. |
 | `STWO_STARKNET_GKR_V4` | `1` | Use V4 on-chain entrypoint (packed IO, aggregated openings). |
 

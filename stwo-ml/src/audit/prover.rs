@@ -102,13 +102,10 @@ impl<'a> AuditProver<'a> {
         };
 
         // Step 5: Set weight binding mode for GKR prover.
-        // AggregatedOracleSumcheck (mode 4) combines all weight claims via RLC
-        // into a single opening, reducing weight opening time dramatically.
-        // Note: STWO_AGGREGATED_FULL_BINDING is NOT set — the full binding proof
-        // requires all weight MLEs in memory simultaneously (~4GB × N matrices),
-        // which OOMs for large models. The RLC fast path provides equivalent
-        // security and the GKR verifier accepts it (verify_aggregated_binding
-        // falls back to RLC replay when aggregated_binding is None).
+        // AggregatedOracleSumcheck (mode 4) uses RLC binding by default (~0ms).
+        // Weight Merkle roots are mixed into the Fiat-Shamir channel before
+        // challenges, preventing fabrication. Full MLE opening proof available
+        // via STWO_AGGREGATED_FULL_BINDING=1 for trustless on-chain streaming.
         if matches!(mode, ProofMode::Gkr) && !request.weight_binding.is_empty() {
             std::env::set_var("STWO_WEIGHT_BINDING", &request.weight_binding);
         }
