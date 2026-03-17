@@ -10988,6 +10988,254 @@ mod tests {
         }
     }
 
+    // ===== Phase 1 Hardening Tests =====
+
+    #[test]
+    fn test_1d_causal_mismatch_detected() {
+        // Phase 1D hardening: prover proves with causal=true but verifier
+        // replays with causal=false. Channel state diverges → rejection.
+        use crate::components::attention::{attention_forward, MultiHeadAttentionConfig};
+        use crate::gkr::verifier::verify_attention_reduction_for_test;
+
+        let causal_config = MultiHeadAttentionConfig::new_causal(1, 4, 4);
+        let weights = make_attn_test_weights(4, 88);
+        let input = make_attn_test_input(4, 4);
+
+        let intermediates = attention_forward(&input, &weights, &causal_config, true);
+        let output = &intermediates.final_output;
+        let output_padded = pad_matrix_pow2(output);
+        let output_mle = matrix_to_mle(&output_padded);
+        let log_rows = output_padded.rows.ilog2() as usize;
+        let log_cols = output_padded.cols.ilog2() as usize;
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0xB001);
+        let r_out = prover_channel.draw_qm31s(log_rows + log_cols);
+        let output_value = evaluate_mle(&output_mle, &r_out);
+        let output_claim = GKRClaim {
+            point: r_out,
+            value: output_value,
+        };
+
+        let (proof, _) = reduce_attention_layer(
+            &output_claim,
+            &input,
+            &weights,
+            &causal_config,
+            &mut prover_channel,
+        )
+        .unwrap();
+
+        match &proof {
+            LayerProof::Attention {
+                sub_proofs,
+                sub_claim_values,
+                ref softmax_sum_proofs,
+                ..
+            } => {
+                // Verify with NON-causal config → channel divergence
+                let non_causal_config = MultiHeadAttentionConfig::new(1, 4, 4);
+                let mut verifier_channel = PoseidonChannel::new();
+                verifier_channel.mix_u64(0xB001);
+                let _ = verifier_channel.draw_qm31s(log_rows + log_cols);
+
+                let result = verify_attention_reduction_for_test(
+                    &output_claim,
+                    &non_causal_config,
+                    sub_proofs,
+                    sub_claim_values,
+                    softmax_sum_proofs,
+                    0,
+                    &mut verifier_channel,
+                );
+                assert!(
+                    result.is_err(),
+                    "causal proof verified with non-causal config should fail"
+                );
+            }
+            _ => panic!("expected Attention proof"),
+        }
+    }
+
+    #[test]
+    fn test_1b_softmax_final_eval_tampered_fails() {
+        // Phase 1B hardening: tamper with final_exp_eval in the softmax sum
+        // proof. This should break the final eval check in the verifier.
+        use crate::components::attention::{attention_forward, MultiHeadAttentionConfig};
+        use crate::gkr::verifier::verify_attention_reduction_for_test;
+
+        let config = MultiHeadAttentionConfig::new(1, 4, 4);
+        let weights = make_attn_test_weights(4, 91);
+        let input = make_attn_test_input(4, 4);
+
+        let intermediates = attention_forward(&input, &weights, &config, false);
+        let output = &intermediates.final_output;
+        let output_padded = pad_matrix_pow2(output);
+        let output_mle = matrix_to_mle(&output_padded);
+        let log_rows = output_padded.rows.ilog2() as usize;
+        let log_cols = output_padded.cols.ilog2() as usize;
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0xB002);
+        let r_out = prover_channel.draw_qm31s(log_rows + log_cols);
+        let output_value = evaluate_mle(&output_mle, &r_out);
+        let output_claim = GKRClaim {
+            point: r_out,
+            value: output_value,
+        };
+
+        let (proof, _) = reduce_attention_layer(
+            &output_claim,
+            &input,
+            &weights,
+            &config,
+            &mut prover_channel,
+        )
+        .unwrap();
+
+        match proof {
+            LayerProof::Attention {
+                sub_proofs,
+                sub_claim_values,
+                mut softmax_sum_proofs,
+                ..
+            } => {
+                assert!(!softmax_sum_proofs.is_empty());
+                // Tamper: corrupt final_exp_eval
+                softmax_sum_proofs[0].final_exp_eval =
+                    softmax_sum_proofs[0].final_exp_eval + SecureField::one();
+
+                let mut verifier_channel = PoseidonChannel::new();
+                verifier_channel.mix_u64(0xB002);
+                let _ = verifier_channel.draw_qm31s(log_rows + log_cols);
+
+                let result = verify_attention_reduction_for_test(
+                    &output_claim,
+                    &config,
+                    &sub_proofs,
+                    &sub_claim_values,
+                    &softmax_sum_proofs,
+                    0,
+                    &mut verifier_channel,
+                );
+                assert!(
+                    result.is_err(),
+                    "tampered final_exp_eval should fail verification"
+                );
+            }
+            _ => panic!("expected Attention proof"),
+        }
+    }
+
+    #[test]
+    fn test_1c_rope_constraint_present_in_model() {
+        // Phase 1C hardening: verify that a model with RoPE layers
+        // compiles to LayerType::RoPE (not Identity) in the circuit.
+        use crate::gkr::circuit::{LayerType, LayeredCircuit};
+        use crate::compiler::graph::{ComputationGraph, GraphBuilder, GraphOp};
+        use crate::components::rope::RoPEConfig;
+
+        let mut builder = GraphBuilder::new((4, 8));
+        builder.linear(8);
+        // Add RoPE node via graph operation
+        let rope_config = RoPEConfig::new(4, 8);
+        let rope_id = builder.graph.add_node(
+            GraphOp::RoPE { config: rope_config },
+            vec![builder.last_node.unwrap()],
+            (4, 8),
+        );
+        builder.last_node = Some(rope_id);
+        builder.linear(8);
+        let graph = builder.build();
+
+        let circuit = LayeredCircuit::from_graph(&graph).unwrap();
+
+        let rope_count = circuit
+            .layers
+            .iter()
+            .filter(|l| matches!(l.layer_type, LayerType::RoPE { .. }))
+            .count();
+        assert!(
+            rope_count > 0,
+            "circuit should contain at least one RoPE layer (not Identity)"
+        );
+    }
+
+    #[test]
+    fn test_1b_multi_row_softmax_sum_binding() {
+        // Phase 1B hardening: test with seq_len=2 (multi-row softmax)
+        // to verify row-sum binding works for matrices with multiple rows.
+        use crate::components::attention::{attention_forward, MultiHeadAttentionConfig};
+        use crate::gkr::verifier::verify_attention_reduction_for_test;
+
+        let mut config = MultiHeadAttentionConfig::new(1, 4, 4);
+        config.seq_len = 2; // 2 tokens → 2×2 score matrix → multi-row softmax
+        let weights = make_attn_test_weights(4, 123);
+        let input = make_attn_test_input(2, 4); // 2 tokens, 4 dims
+
+        let intermediates = attention_forward(&input, &weights, &config, false);
+        let output = &intermediates.final_output;
+        let output_padded = pad_matrix_pow2(output);
+        let output_mle = matrix_to_mle(&output_padded);
+        let log_rows = output_padded.rows.ilog2() as usize;
+        let log_cols = output_padded.cols.ilog2() as usize;
+
+        let mut prover_channel = PoseidonChannel::new();
+        prover_channel.mix_u64(0xB003);
+        let r_out = prover_channel.draw_qm31s(log_rows + log_cols);
+        let output_value = evaluate_mle(&output_mle, &r_out);
+        let output_claim = GKRClaim {
+            point: r_out,
+            value: output_value,
+        };
+
+        let (proof, input_claim) = reduce_attention_layer(
+            &output_claim,
+            &input,
+            &weights,
+            &config,
+            &mut prover_channel,
+        )
+        .unwrap();
+
+        match &proof {
+            LayerProof::Attention {
+                sub_proofs,
+                sub_claim_values,
+                ref softmax_sum_proofs,
+                ..
+            } => {
+                // Verify: each head should have a softmax sum proof
+                // with multiple row sums (seq_len=4)
+                assert_eq!(softmax_sum_proofs.len(), 1, "1 head = 1 softmax proof");
+                assert_eq!(
+                    softmax_sum_proofs[0].row_sums.len(),
+                    2,
+                    "seq_len=2 → 2 row sums"
+                );
+
+                let mut verifier_channel = PoseidonChannel::new();
+                verifier_channel.mix_u64(0xB003);
+                let _ = verifier_channel.draw_qm31s(log_rows + log_cols);
+
+                let verified_claim = verify_attention_reduction_for_test(
+                    &output_claim,
+                    &config,
+                    sub_proofs,
+                    sub_claim_values,
+                    softmax_sum_proofs,
+                    0,
+                    &mut verifier_channel,
+                )
+                .unwrap();
+
+                assert_eq!(verified_claim.point, input_claim.point);
+                assert_eq!(verified_claim.value, input_claim.value);
+            }
+            _ => panic!("expected Attention proof"),
+        }
+    }
+
     // ===== SIMD Attention Test Helpers =====
 
     /// CPU degree-2 matmul sumcheck on pre-restricted SecureField vectors.
