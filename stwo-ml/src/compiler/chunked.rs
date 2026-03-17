@@ -811,6 +811,7 @@ where
         &fwd.embedding_layers,
         &fwd.quantize_layers,
         &fwd.dequantize_layers,
+        &[], // rope: not collected in chunked path
     )?;
 
     Ok(AggregatedModelProofOnChain {

@@ -758,6 +758,27 @@ pub(crate) struct RMSNormLayerData {
     pub(crate) log_size: u32,
 }
 
+/// Collected RoPE layer data for unified STARK aggregation.
+pub(crate) struct RoPELayerData {
+    pub(crate) node_id: usize,
+    /// Input x values (first element of each pair).
+    pub(crate) input_x: Vec<M31>,
+    /// Input y values (second element of each pair).
+    pub(crate) input_y: Vec<M31>,
+    /// cos values used (from precomputed table).
+    pub(crate) cos_vals: Vec<M31>,
+    /// sin values used (from precomputed table).
+    pub(crate) sin_vals: Vec<M31>,
+    /// Output x values (rotated).
+    pub(crate) output_x: Vec<M31>,
+    /// Output y values (rotated).
+    pub(crate) output_y: Vec<M31>,
+    /// Precomputed lookup table for LogUp verification.
+    pub(crate) table: PrecomputedTable,
+    /// Log2 of padded trace size.
+    pub(crate) log_size: u32,
+}
+
 /// Collected Attention layer data for aggregation.
 struct AttentionLayerData {
     node_id: usize,
@@ -3569,6 +3590,7 @@ where
     );
     let t_stark = std::time::Instant::now();
 
+    let no_rope: Vec<RoPELayerData> = Vec::new();
     let result = build_unified_stark::<SimdBackend>(
         &activation_layers,
         &add_layers,
@@ -3578,6 +3600,7 @@ where
         &embedding_layers,
         &quantize_layers,
         &dequantize_layers,
+        &no_rope,
     )?;
 
     eprintln!(
@@ -4275,6 +4298,7 @@ where
     let mut embedding_layers: Vec<EmbeddingLayerData> = Vec::new();
     let mut quantize_layers: Vec<QuantizeLayerData> = Vec::new();
     let mut dequantize_layers: Vec<DequantizeLayerData> = Vec::new();
+    let mut rope_layers: Vec<RoPELayerData> = Vec::new();
 
     let topo = graph.topological_order();
     let total_nodes = topo.len();
@@ -4645,8 +4669,40 @@ where
                     rope_cfg.max_seq_len = rope_offset + current.rows;
                 }
                 let table = crate::components::rope::build_rope_table(&rope_cfg);
-                let (rotated, _cos_used, _sin_used) =
+                let (rotated, cos_used, sin_used) =
                     crate::components::rope::apply_rope(&current, &table, rope_offset);
+
+                // Collect RoPE intermediates for unified STARK verification.
+                // Decompose input/output matrices into (x,y) pairs for the constraint.
+                let n_pairs = rope_cfg.num_pairs();
+                let seq_len = current.rows;
+                let total_pairs = seq_len * n_pairs;
+                let mut input_x = Vec::with_capacity(total_pairs);
+                let mut input_y = Vec::with_capacity(total_pairs);
+                let mut output_x = Vec::with_capacity(total_pairs);
+                let mut output_y = Vec::with_capacity(total_pairs);
+                for pos in 0..seq_len {
+                    for j in 0..n_pairs {
+                        input_x.push(current.data[pos * current.cols + 2 * j]);
+                        input_y.push(current.data[pos * current.cols + 2 * j + 1]);
+                        output_x.push(rotated.data[pos * rotated.cols + 2 * j]);
+                        output_y.push(rotated.data[pos * rotated.cols + 2 * j + 1]);
+                    }
+                }
+                let lookup_table = crate::components::rope::build_rope_lookup_table(&rope_cfg);
+                let log_size = data_log_size(total_pairs.max(lookup_table.size()));
+                rope_layers.push(RoPELayerData {
+                    node_id: node.id,
+                    input_x,
+                    input_y,
+                    cos_vals: cos_used,
+                    sin_vals: sin_used,
+                    output_x,
+                    output_y,
+                    table: lookup_table,
+                    log_size,
+                });
+
                 intermediates.push((node.id, current.clone()));
                 node_outputs.insert(node.id, rotated.clone());
                 current = rotated;
@@ -5046,6 +5102,7 @@ where
         &embedding_layers,
         &quantize_layers,
         &dequantize_layers,
+        &rope_layers,
     )?;
 
     eprintln!(
@@ -5829,6 +5886,7 @@ pub(crate) fn build_unified_stark<B>(
     embedding_layers: &[EmbeddingLayerData],
     quantize_layers: &[QuantizeLayerData],
     dequantize_layers: &[DequantizeLayerData],
+    rope_layers: &[RoPELayerData],
 ) -> Result<UnifiedStarkOutput, AggregationError>
 where
     B: BackendForChannel<Blake2sMerkleChannel> + PolyOps + ColumnOps<BaseField>,
@@ -5872,10 +5930,11 @@ where
         || !rmsnorm_layers.is_empty()
         || !embedding_layers.is_empty()
         || !quantize_layers.is_empty()
-        || !dequantize_layers.is_empty();
+        || !dequantize_layers.is_empty()
+        || !rope_layers.is_empty();
     let t_unified = std::time::Instant::now();
     eprintln!(
-        "  [Unified STARK] components: act={} add={} mul={} ln={} rn={} emb={} q={} dq={} (logup={})",
+        "  [Unified STARK] components: act={} add={} mul={} ln={} rn={} emb={} q={} dq={} rope={} (logup={})",
         activation_layers.len(),
         add_layers.len(),
         mul_layers.len(),
@@ -5884,6 +5943,7 @@ where
         embedding_layers.len(),
         quantize_layers.len(),
         dequantize_layers.len(),
+        rope_layers.len(),
         has_logup,
     );
 
