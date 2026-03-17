@@ -28,7 +28,16 @@
 
 ### 1A. LayerNorm/RMSNorm Mean & Variance Verification
 
-**Status**: CRITICAL GAP — prover can claim arbitrary mean (mu) and variance (sigma^2).
+**Status**: CLOSED (verified March 2026, confirmed March 16 2026).
+
+The prover implements a 3-part protocol:
+- Part 0: Plain sumcheck binding mean/variance to input (Σx/n for mean, Σ(x-μ)²/n for variance)
+- Part 1: eq-sumcheck for output = (input - mean) * rsqrt
+- Part 2: LogUp eq-sumcheck for (variance, rsqrt) table lookup
+
+Tamper tests confirm: `test_layernorm_multi_row_tampered_mean_rejected`, `test_rmsnorm_multi_row_tampered_rms_sq_rejected`, `test_layernorm_logup_none_rejected`.
+
+**No further work needed.** Previously listed as a gap in the paper — paper corrected.
 
 **Current behavior**: LayerNorm reduction accepts mean and variance as trace inputs without constraining them to equal the actual statistics of the input vector.
 

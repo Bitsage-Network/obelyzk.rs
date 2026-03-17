@@ -144,8 +144,13 @@
     the full Fiat-Shamir transcript via a 10-round-hardened
     replay verifier covering all 12 GKR layer tags,
     deferred proofs, and weight binding.
-    LayerNorm/RMSNorm mean/variance remain unconstrained;
-    we discuss the path to full inference verification.
+    LayerNorm/RMSNorm mean and variance are verified via
+    plain sumcheck binding (mean derived from $\Sigma x_i / n$,
+    variance from $\Sigma (x_i - \mu)^2 / n$, with rsqrt
+    table lookup verified via range-reduced LogUp).
+    The remaining gaps are RoPE position encoding (compiled
+    as identity) and softmax normalization sum; we discuss
+    the path to closing these.
   \end{minipage}
 
   \vspace{8pt}
@@ -226,7 +231,7 @@ IO commitment, and weight binding with $q\!=\!10$ MLE queries
 (130-bit opening security).
 Activation inputs are masked to table range ($2^{16}$--$2^{20}$
 entries) before proving; see \Cref{sec:limitations} for the
-remaining gap (LayerNorm/RMSNorm mean/variance).
+remaining gaps (RoPE position encoding, softmax normalization sum).
 
 \begin{table}[t]
   \centering\scriptsize
@@ -1876,9 +1881,12 @@ defense-in-depth, independently checking the full channel
 transcript---all 12 layer tags, deferred proofs, IO commitment,
 and weight binding---before on-chain submission, with $q\!=\!10$
 MLE queries providing 130-bit opening security.
-The remaining gap is LayerNorm/RMSNorm mean/variance computation;
-with norm statistics verification the system would achieve
-full inference verification.
+LayerNorm/RMSNorm mean and variance are now fully verified via
+plain sumcheck binding with multi-row support.
+The remaining gaps are RoPE position encoding (currently compiled
+as identity with no rotation constraint) and softmax normalization
+sum verification; closing these would achieve full inference
+verification for the linear arithmetic trace.
 
 The mathematical foundation---GKR sumcheck over the M31 field tower,
 composed with Circle STARKs---is architecturally native to Starknet
