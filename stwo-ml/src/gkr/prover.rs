@@ -9488,6 +9488,7 @@ fn reduce_attention_layer_simd_gpu(
             seq_len: config.seq_len as u32,
             d_model: config.d_model as u32,
             causal: config.causal,
+            softmax_sum_proofs: Vec::new(), // TODO(Phase 1B): softmax sum verification
         },
         final_input_claim,
     ))
@@ -9692,6 +9693,7 @@ fn reduce_attention_layer(
             seq_len: config.seq_len as u32,
             d_model: config.d_model as u32,
             causal: config.causal,
+            softmax_sum_proofs: Vec::new(), // TODO(Phase 1B): softmax sum verification
         },
         final_input_claim,
     ))

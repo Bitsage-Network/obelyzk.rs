@@ -12,6 +12,30 @@ use crate::crypto::poseidon_channel::{securefield_to_felt, PoseidonChannel};
 /// QM31 is the secure (extension) field used throughout stwo-ml.
 pub type SecureField = QM31;
 
+/// Proof that the softmax normalization sum is correct for one attention head.
+///
+/// For a score matrix of shape (seq_len × seq_len), proves that for each row r:
+///   sum_exp[r] = Σ_{col} exp(scores[r][col])
+///
+/// Uses a plain sumcheck over the exp MLE, with eq-weighting to bind
+/// per-row sums to the claimed sum_exp values. The verifier can then
+/// confirm that `softmax_weight[i] = exp[i] / sum_exp[row_of_i]`.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SoftmaxSumProof {
+    /// Round polynomials from the plain sumcheck proving Σ exp = sum_exp.
+    /// Length = log(seq_len) (number of column variables).
+    pub round_polys: Vec<RoundPoly>,
+    /// Final evaluation of the exp MLE at the sumcheck challenge point.
+    pub final_exp_eval: SecureField,
+    /// Final evaluation of the sum_exp MLE (broadcast per row) at the challenge point.
+    pub final_sum_eval: SecureField,
+    /// Total claimed sum (before eq-weighting).
+    pub claimed_sum: SecureField,
+    /// Per-row sum_exp values (M31), used for verification binding.
+    pub row_sums: Vec<M31>,
+}
+
 /// A claim in the GKR protocol: "the MLE evaluated at `point` equals `value`."
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -436,6 +460,10 @@ pub enum LayerProof {
         d_model: u32,
         /// Whether causal masking is applied (mixed into channel for replay).
         causal: bool,
+        /// Per-head softmax normalization sum proofs.
+        /// Each entry proves: sum_exp[row] = Σ_col exp(scores[row][col]) for one head.
+        /// Without this, the prover could claim arbitrary softmax weights.
+        softmax_sum_proofs: Vec<SoftmaxSumProof>,
     },
 
     /// Attention decode step (cached KV, sub-matmuls have asymmetric dims).

@@ -1489,6 +1489,7 @@ pub fn serialize_gkr_model_proof(proof: &crate::gkr::GKRProof, output: &mut Vec<
                 seq_len,
                 d_model,
                 causal,
+                ..
             } => {
                 serialize_u32(5, output); // tag: Attention
                 serialize_u32(*num_heads, output);
@@ -1973,6 +1974,7 @@ pub fn serialize_gkr_proof_data_only(proof: &crate::gkr::GKRProof, output: &mut 
                 seq_len,
                 d_model,
                 causal,
+                ..
             } => {
                 serialize_u32(5, output);
                 serialize_u32(*num_heads, output);
@@ -2427,6 +2429,7 @@ fn serialize_layer_proof_packed_inner(
             seq_len,
             d_model,
             causal,
+            ..
         } => {
             serialize_u32(5, output);
             serialize_u32(*num_heads, output);
@@ -2923,6 +2926,7 @@ fn serialize_layer_proof_double_packed_inner(
             seq_len,
             d_model,
             causal,
+            ..
         } => {
             serialize_u32(5, output);
             serialize_u32(*num_heads, output);

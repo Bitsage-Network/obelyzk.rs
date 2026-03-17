@@ -849,18 +849,36 @@ fn isqrt(n: usize) -> u32 {
 /// Softmax over a single row in M31 arithmetic.
 ///
 /// 1. Apply softmax_exp element-wise
-/// 2. Sum the row
+/// 2. Sum the row (reduced mod P)
 /// 3. Multiply each element by modular inverse of the sum
+///
+/// # Panics
+/// Panics if the sum of exponentials is zero mod P. This is cryptographically
+/// negligible (probability 2^{-31}) and indicates a degenerate input.
 pub fn softmax_row_m31(row: &[M31]) -> Vec<M31> {
     let exp_vals: Vec<M31> = row.iter().map(|&x| softmax_exp(x)).collect();
     let sum: u64 = exp_vals.iter().map(|v| v.0 as u64).sum();
-    // Clamp sum into M31 range
-    let sum_m31 = (sum % ((1u64 << 31) - 1)) as u32;
-    if sum_m31 == 0 {
-        return exp_vals;
-    }
-    let inv_sum = m31_mod_inverse(sum_m31);
+    // Reduce sum into M31 range
+    let sum_m31 = M31::from((sum % ((1u64 << 31) - 1)) as u32);
+    assert!(
+        sum_m31 != M31::from(0u32),
+        "softmax sum is zero mod P — degenerate input (probability 2^{{-31}})"
+    );
+    let inv_sum = m31_mod_inverse(sum_m31.0);
     exp_vals.iter().map(|&v| v * inv_sum).collect()
+}
+
+/// Compute the per-row softmax exp sums for an entire matrix.
+/// Returns one M31 sum per row.
+pub fn softmax_row_sums(matrix: &M31Matrix) -> Vec<M31> {
+    (0..matrix.rows)
+        .map(|i| {
+            let sum: u64 = (0..matrix.cols)
+                .map(|j| softmax_exp(matrix.get(i, j)).0 as u64)
+                .sum();
+            M31::from((sum % ((1u64 << 31) - 1)) as u32)
+        })
+        .collect()
 }
 
 /// Apply softmax row-wise to an entire matrix.
