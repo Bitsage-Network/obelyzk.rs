@@ -558,7 +558,15 @@ pub struct GKRProof {
     /// Aggregated weight binding proof (mode = AggregatedOracleSumcheck).
     /// When present, `weight_openings` is empty — all claims are proven
     /// in one shot via a mismatch sumcheck + single MLE opening.
+    /// For ≤ GROUP_SIZE matrices, this holds the single binding proof.
     pub aggregated_binding: Option<AggregatedWeightBindingProof>,
+
+    /// Grouped binding proofs for large models (> GROUP_SIZE matrices).
+    /// Each group covers one transformer layer's weight matrices (typically 4).
+    /// When non-empty, `aggregated_binding` is None — the verifier uses
+    /// these groups instead, verifying each independently through the same
+    /// Fiat-Shamir channel.
+    pub binding_groups: Vec<AggregatedWeightBindingProof>,
 
     /// KV-cache commitment (Poseidon hash of current KV state after this inference).
     /// Present when the proof covers a model with KV-cache (autoregressive decoding).

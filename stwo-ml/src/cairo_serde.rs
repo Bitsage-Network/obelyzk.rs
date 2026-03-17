@@ -5936,6 +5936,7 @@ mod tests {
             io_commitment: FieldElement::ZERO,
             deferred_proofs: vec![],
             aggregated_binding: None,
+            binding_groups: Vec::new(),
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
         };

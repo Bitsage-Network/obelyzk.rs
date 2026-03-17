@@ -355,6 +355,12 @@ impl<'a> WeightSource for GraphWeightSource<'a> {
 ///
 /// Returns (weight_commitments, weight_claims, proof). The `deferred_proofs`
 /// are updated in-place with the correct weight commitments.
+/// Maximum number of matrices per binding group. Groups of 4 (one transformer
+/// layer) produce a 2^30 virtual MLE (~17 GB) that fits in GPU VRAM.
+/// Models with ≤ BINDING_GROUP_SIZE matrices use a single binding proof;
+/// larger models are split into ceil(N / BINDING_GROUP_SIZE) groups.
+pub const BINDING_GROUP_SIZE: usize = 4;
+
 fn apply_aggregated_oracle_sumcheck(
     weight_data: &[(usize, Vec<SecureField>, SecureField)],
     deferred_weight_claims_data: &[(usize, Vec<SecureField>, SecureField)],
@@ -365,9 +371,10 @@ fn apply_aggregated_oracle_sumcheck(
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
 ) -> Result<
     (
-        Vec<starknet_ff::FieldElement>,
-        Vec<super::types::WeightClaim>,
-        Option<crate::crypto::aggregated_opening::AggregatedWeightBindingProof>,
+        Vec<starknet_ff::FieldElement>,                                          // weight_commitments
+        Vec<super::types::WeightClaim>,                                          // weight_claims
+        Option<crate::crypto::aggregated_opening::AggregatedWeightBindingProof>, // single (small model)
+        Vec<crate::crypto::aggregated_opening::AggregatedWeightBindingProof>,    // groups (large model)
     ),
     GKRError,
 > {
@@ -1198,44 +1205,113 @@ fn apply_aggregated_oracle_sumcheck(
         }
     }
 
-    // RLC binding (fast path, default) vs full aggregated binding proof (streaming).
+    // Full aggregated binding proof (streaming) vs RLC binding (fast path).
     //
-    // Full binding: prove_aggregated_binding_streaming loads weight MLEs on demand
-    // from GraphWeights, keeping peak memory at ~4 GB (single largest matrix) instead
-    // of ~640 GB (all 160 matrices as SecureField MLEs simultaneously).
+    // For models with ≤ BINDING_GROUP_SIZE matrices: single binding proof.
+    // For larger models: split into groups of BINDING_GROUP_SIZE and prove
+    // each group independently. Each group produces a ~17 GB virtual MLE
+    // (fits in GPU VRAM) instead of a single 1+ TB MLE that can't fit anywhere.
     //
-    // RLC binding achieves 2^-128 security in ~10ms by combining expected values into
-    // a single scalar. For on-chain verification, the commitments (mixed into Fiat-Shamir)
-    // provide the binding; the full opening proof is only needed for trustless mode.
-    let binding_proof = if !agg_claims.is_empty() {
+    // Fiat-Shamir ordering: groups are proved sequentially through the same
+    // channel, so each group's proof depends on all previous groups' state.
+    let (binding_proof, binding_groups) = if !agg_claims.is_empty() {
         if need_full_binding {
             let source = GraphWeightSource {
                 weights,
-                claim_node_ids,
+                claim_node_ids: claim_node_ids.clone(),
             };
-            // Clone channel BEFORE proving so we can self-verify the binding proof.
-            let mut verify_channel = channel.clone();
-            let proof =
-                prove_aggregated_binding_streaming(&agg_claims, &source, channel);
-            eprintln!(
-                "  [{log_tag}] aggregated oracle sumcheck: {} claims, ~{} felts calldata (full binding proof, streaming)",
-                agg_claims.len(),
-                proof.estimated_calldata_felts(),
-            );
-            // Self-verify: the verifier replays the same channel ops as the prover.
-            if !crate::crypto::aggregated_opening::verify_aggregated_binding(
-                &proof,
-                &agg_claims,
-                &mut verify_channel,
-            ) {
-                panic!(
-                    "[{}] BINDING SELF-VERIFY FAILED: aggregated binding proof does not verify. \
-                     This is a prover bug.",
-                    log_tag,
+
+            if agg_claims.len() <= BINDING_GROUP_SIZE {
+                // Small model: single binding proof (original path)
+                let mut verify_channel = channel.clone();
+                let proof =
+                    prove_aggregated_binding_streaming(&agg_claims, &source, channel);
+                eprintln!(
+                    "  [{log_tag}] aggregated oracle sumcheck: {} claims, ~{} felts calldata (full binding proof, streaming)",
+                    agg_claims.len(),
+                    proof.estimated_calldata_felts(),
                 );
+                if !crate::crypto::aggregated_opening::verify_aggregated_binding(
+                    &proof,
+                    &agg_claims,
+                    &mut verify_channel,
+                ) {
+                    panic!(
+                        "[{}] BINDING SELF-VERIFY FAILED: aggregated binding proof does not verify. \
+                         This is a prover bug.",
+                        log_tag,
+                    );
+                }
+                eprintln!("  [{log_tag}] binding self-verify: PASSED");
+                (Some(proof), Vec::new())
+            } else {
+                // Large model: split into groups, prove each independently
+                let n_groups = (agg_claims.len() + BINDING_GROUP_SIZE - 1) / BINDING_GROUP_SIZE;
+                eprintln!(
+                    "  [{log_tag}] grouped binding: {} claims → {} groups of ≤{} matrices",
+                    agg_claims.len(), n_groups, BINDING_GROUP_SIZE,
+                );
+                let mut verify_channel = channel.clone();
+                let mut groups = Vec::with_capacity(n_groups);
+                let t_groups = std::time::Instant::now();
+
+                for (g, chunk_start) in (0..agg_claims.len())
+                    .step_by(BINDING_GROUP_SIZE)
+                    .enumerate()
+                {
+                    let chunk_end = (chunk_start + BINDING_GROUP_SIZE).min(agg_claims.len());
+                    let group_claims = &agg_claims[chunk_start..chunk_end];
+                    let group_node_ids = &claim_node_ids[chunk_start..chunk_end];
+
+                    let group_source = GraphWeightSource {
+                        weights,
+                        claim_node_ids: group_node_ids.to_vec(),
+                    };
+
+                    let group_proof =
+                        prove_aggregated_binding_streaming(group_claims, &group_source, channel);
+
+                    if (g + 1) % 10 == 0 || g + 1 == n_groups {
+                        eprintln!(
+                            "  [{log_tag}] group {}/{}: {} claims, ~{} felts ({:.1}s elapsed)",
+                            g + 1, n_groups, group_claims.len(),
+                            group_proof.estimated_calldata_felts(),
+                            t_groups.elapsed().as_secs_f64(),
+                        );
+                    }
+
+                    groups.push(group_proof);
+                }
+
+                eprintln!(
+                    "  [{log_tag}] all {} groups proved in {:.1}s, total ~{} felts calldata",
+                    n_groups,
+                    t_groups.elapsed().as_secs_f64(),
+                    groups.iter().map(|g| g.estimated_calldata_felts()).sum::<usize>(),
+                );
+
+                // Self-verify all groups sequentially through the same channel
+                for (g, (group_proof, chunk_start)) in groups
+                    .iter()
+                    .zip((0..agg_claims.len()).step_by(BINDING_GROUP_SIZE))
+                    .enumerate()
+                {
+                    let chunk_end = (chunk_start + BINDING_GROUP_SIZE).min(agg_claims.len());
+                    let group_claims = &agg_claims[chunk_start..chunk_end];
+                    if !crate::crypto::aggregated_opening::verify_aggregated_binding(
+                        group_proof,
+                        group_claims,
+                        &mut verify_channel,
+                    ) {
+                        panic!(
+                            "[{}] BINDING GROUP {}/{} SELF-VERIFY FAILED",
+                            log_tag, g + 1, n_groups,
+                        );
+                    }
+                }
+                eprintln!("  [{log_tag}] binding self-verify: PASSED ({n_groups} groups)");
+                (None, groups)
             }
-            eprintln!("  [{log_tag}] binding self-verify: PASSED");
-            Some(proof)
         } else {
             // RLC binding: draw random weight, combine all expected values, mix into channel.
             let rho = channel.draw_qm31();
@@ -1250,13 +1326,13 @@ fn apply_aggregated_oracle_sumcheck(
                 "  [{log_tag}] aggregated oracle sumcheck: {} claims, RLC binding (fast path)",
                 agg_claims.len(),
             );
-            None
+            (None, Vec::new())
         }
     } else {
-        None
+        (None, Vec::new())
     };
 
-    Ok((weight_commitments, weight_claims, binding_proof))
+    Ok((weight_commitments, weight_claims, binding_proof, binding_groups))
 }
 
 /// Apply aggregated RLC weight binding.
@@ -1874,6 +1950,7 @@ pub fn prove_gkr_with_cache(
     let mut weight_openings = Vec::with_capacity(weight_data.len());
     let mut weight_opening_transcript_mode = WeightOpeningTranscriptMode::Sequential;
     let mut aggregated_binding_proof = None;
+    let mut binding_groups_vec: Vec<crate::crypto::aggregated_opening::AggregatedWeightBindingProof> = Vec::new();
 
     let use_aggregated_oracle_sumcheck = gkr_aggregated_oracle_sumcheck_enabled()
         && (!weight_data.is_empty() || !deferred_weight_claims_data.is_empty());
@@ -1886,7 +1963,7 @@ pub fn prove_gkr_with_cache(
 
     if use_aggregated_oracle_sumcheck {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::AggregatedOracleSumcheck;
-        let (wc, claims, proof) = apply_aggregated_oracle_sumcheck(
+        let (wc, claims, proof, groups) = apply_aggregated_oracle_sumcheck(
             &weight_data,
             &deferred_weight_claims_data,
             &mut deferred_proofs,
@@ -1898,6 +1975,7 @@ pub fn prove_gkr_with_cache(
         weight_commitments_new = wc;
         weight_claims = claims;
         aggregated_binding_proof = proof;
+        binding_groups_vec = groups;
     } else if aggregate_weight_binding {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::BatchedRlcDirectEvalV1;
         weight_claims =
@@ -2032,6 +2110,7 @@ pub fn prove_gkr_with_cache(
         io_commitment,
         deferred_proofs,
         aggregated_binding: aggregated_binding_proof,
+        binding_groups: binding_groups_vec,
         kv_cache_commitment: None,
         prev_kv_cache_commitment: None,
     };
@@ -2469,6 +2548,7 @@ pub fn prove_gkr_decode(
     let mut weight_openings = Vec::with_capacity(weight_data.len());
     let mut weight_opening_transcript_mode = WeightOpeningTranscriptMode::Sequential;
     let mut aggregated_binding_proof = None;
+    let mut binding_groups_vec: Vec<crate::crypto::aggregated_opening::AggregatedWeightBindingProof> = Vec::new();
 
     let use_aggregated_oracle_sumcheck = gkr_aggregated_oracle_sumcheck_enabled()
         && (!weight_data.is_empty() || !deferred_weight_claims_data.is_empty());
@@ -2481,13 +2561,14 @@ pub fn prove_gkr_decode(
 
     if use_aggregated_oracle_sumcheck {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::AggregatedOracleSumcheck;
-        let (wc, claims, proof) = apply_aggregated_oracle_sumcheck(
+        let (wc, claims, proof, groups) = apply_aggregated_oracle_sumcheck(
             &weight_data, &deferred_weight_claims_data, &mut deferred_proofs,
             weights, channel, "GKR-decode", weight_cache,
         )?;
         weight_commitments_new = wc;
         weight_claims = claims;
         aggregated_binding_proof = proof;
+        binding_groups_vec = groups;
     } else if aggregate_weight_binding {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::BatchedRlcDirectEvalV1;
         weight_claims =
@@ -2549,6 +2630,7 @@ pub fn prove_gkr_decode(
         io_commitment,
         deferred_proofs,
         aggregated_binding: aggregated_binding_proof,
+        binding_groups: binding_groups_vec,
         kv_cache_commitment: None,
         prev_kv_cache_commitment: None,
     })
@@ -3175,6 +3257,7 @@ pub fn prove_gkr_gpu_with_cache(
     let mut weight_claims = Vec::with_capacity(weight_data.len());
     let mut weight_opening_transcript_mode = WeightOpeningTranscriptMode::Sequential;
     let mut aggregated_binding_proof = None;
+    let mut binding_groups_vec: Vec<crate::crypto::aggregated_opening::AggregatedWeightBindingProof> = Vec::new();
     let total_openings = weight_data.len();
     let t_openings = std::time::Instant::now();
     let openings_progress_every = std::env::var("STWO_GKR_OPENINGS_PROGRESS_EVERY")
@@ -3197,7 +3280,7 @@ pub fn prove_gkr_gpu_with_cache(
     let weight_commitments_new;
     if use_aggregated_oracle_sumcheck {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::AggregatedOracleSumcheck;
-        let (wc, claims, proof) = apply_aggregated_oracle_sumcheck(
+        let (wc, claims, proof, groups) = apply_aggregated_oracle_sumcheck(
             &weight_data,
             &deferred_weight_claims_data,
             &mut deferred_proofs,
@@ -3209,6 +3292,7 @@ pub fn prove_gkr_gpu_with_cache(
         weight_commitments_new = wc;
         weight_claims = claims;
         aggregated_binding_proof = proof;
+        binding_groups_vec = groups;
     } else if aggregate_weight_binding {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::BatchedRlcDirectEvalV1;
         weight_claims =
@@ -3564,6 +3648,7 @@ pub fn prove_gkr_gpu_with_cache(
         io_commitment,
         deferred_proofs,
         aggregated_binding: aggregated_binding_proof,
+        binding_groups: binding_groups_vec,
         kv_cache_commitment: None,
         prev_kv_cache_commitment: None,
     };
@@ -4149,6 +4234,7 @@ pub fn prove_gkr_decode_gpu_with_cache(
     let mut weight_claims = Vec::with_capacity(weight_data.len());
     let mut weight_opening_transcript_mode = WeightOpeningTranscriptMode::Sequential;
     let mut aggregated_binding_proof = None;
+    let mut binding_groups_vec: Vec<crate::crypto::aggregated_opening::AggregatedWeightBindingProof> = Vec::new();
 
     let use_aggregated_oracle_sumcheck = gkr_aggregated_oracle_sumcheck_enabled()
         && (!weight_data.is_empty() || !deferred_weight_claims_data.is_empty());
@@ -4160,13 +4246,14 @@ pub fn prove_gkr_decode_gpu_with_cache(
     let (weight_commitments_new);
     if use_aggregated_oracle_sumcheck {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::AggregatedOracleSumcheck;
-        let (wc, claims, proof) = apply_aggregated_oracle_sumcheck(
+        let (wc, claims, proof, groups) = apply_aggregated_oracle_sumcheck(
             &weight_data, &deferred_weight_claims_data, &mut deferred_proofs,
             weights, channel, "GKR-decode-GPU", weight_cache,
         )?;
         weight_commitments_new = wc;
         weight_claims = claims;
         aggregated_binding_proof = proof;
+        binding_groups_vec = groups;
     } else if aggregate_weight_binding {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::BatchedRlcDirectEvalV1;
         weight_claims =
@@ -4226,6 +4313,7 @@ pub fn prove_gkr_decode_gpu_with_cache(
         io_commitment,
         deferred_proofs,
         aggregated_binding: aggregated_binding_proof,
+        binding_groups: binding_groups_vec,
         kv_cache_commitment: None,
         prev_kv_cache_commitment: None,
     })
@@ -4869,6 +4957,7 @@ pub fn prove_gkr_simd_gpu_with_cache(
     let mut weight_claims = Vec::with_capacity(weight_data.len());
     let mut weight_opening_transcript_mode = WeightOpeningTranscriptMode::Sequential;
     let mut aggregated_binding_proof = None;
+    let mut binding_groups_vec: Vec<crate::crypto::aggregated_opening::AggregatedWeightBindingProof> = Vec::new();
     let flags = compute_weight_mode_flags();
     let aggregate_weight_binding = flags.aggregate_weight_binding;
     // In aggregated mode, include deferred MatMul weight claims in the same
@@ -5026,7 +5115,7 @@ pub fn prove_gkr_simd_gpu_with_cache(
     let weight_commitments_new;
     if use_aggregated_oracle_sumcheck {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::AggregatedOracleSumcheck;
-        let (wc, claims, proof) = apply_aggregated_oracle_sumcheck(
+        let (wc, claims, proof, groups) = apply_aggregated_oracle_sumcheck(
             &weight_data,
             &deferred_weight_claims_data,
             &mut deferred_proofs,
@@ -5038,6 +5127,7 @@ pub fn prove_gkr_simd_gpu_with_cache(
         weight_commitments_new = wc;
         weight_claims = claims;
         aggregated_binding_proof = proof;
+        binding_groups_vec = groups;
     } else if aggregate_weight_binding {
         weight_opening_transcript_mode = WeightOpeningTranscriptMode::BatchedRlcDirectEvalV1;
         weight_claims =
@@ -5134,6 +5224,7 @@ pub fn prove_gkr_simd_gpu_with_cache(
         io_commitment,
         deferred_proofs,
         aggregated_binding: aggregated_binding_proof,
+        binding_groups: binding_groups_vec,
         kv_cache_commitment: None,
         prev_kv_cache_commitment: None,
     })

@@ -2055,6 +2055,7 @@ pub fn build_streaming_gkr_calldata(
     if proof.weight_opening_transcript_mode
         == crate::gkr::types::WeightOpeningTranscriptMode::AggregatedOracleSumcheck
         && proof.aggregated_binding.is_none()
+        && proof.binding_groups.is_empty()
     {
         return Err(StarknetModelError::SoundnessGate(
             "Streaming GKR requires full aggregated binding proof for on-chain submission. \
@@ -2291,10 +2292,20 @@ fn starknet_weight_binding_data(
                 .collect())
         }
         WeightOpeningTranscriptMode::AggregatedOracleSumcheck => {
-            // Mode 4: full proof payload or RLC-only marker.
+            // Mode 4: full proof payload, grouped proofs, or RLC-only marker.
             if let Some(binding) = proof.aggregated_binding.as_ref() {
+                // Single binding proof (small model)
                 let mut payload = Vec::new();
                 crate::cairo_serde::serialize_aggregated_binding_proof(binding, &mut payload);
+                Ok(payload.into_iter().map(|f| format!("0x{:x}", f)).collect())
+            } else if !proof.binding_groups.is_empty() {
+                // Grouped binding proofs (large model): serialize as
+                // [n_groups, group_0_proof, group_1_proof, ...]
+                let mut payload = Vec::new();
+                payload.push(FieldElement::from(proof.binding_groups.len() as u64));
+                for group in &proof.binding_groups {
+                    crate::cairo_serde::serialize_aggregated_binding_proof(group, &mut payload);
+                }
                 Ok(payload.into_iter().map(|f| format!("0x{:x}", f)).collect())
             } else {
                 // RLC-only: marker tag (0x524C43 = "RLC") + claim count.

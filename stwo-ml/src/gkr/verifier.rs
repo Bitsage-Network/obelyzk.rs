@@ -1205,13 +1205,44 @@ fn verify_gkr_inner(
             }
 
             if let Some(binding_proof) = proof.aggregated_binding.as_ref() {
-                // Full binding proof path
+                // Single binding proof path (small models, ≤ GROUP_SIZE matrices)
                 if !verify_aggregated_binding(binding_proof, &agg_claims, channel) {
                     return Err(GKRError::VerificationError {
                         layer_idx: 0,
                         reason: "aggregated oracle sumcheck weight binding verification failed"
                             .to_string(),
                     });
+                }
+            } else if !proof.binding_groups.is_empty() {
+                // Grouped binding proof path (large models, > GROUP_SIZE matrices)
+                // Each group covers a subset of claims and is verified independently
+                // through the same Fiat-Shamir channel.
+                let group_size = crate::gkr::prover::BINDING_GROUP_SIZE;
+                let expected_groups =
+                    (agg_claims.len() + group_size - 1) / group_size;
+                if proof.binding_groups.len() != expected_groups {
+                    return Err(GKRError::VerificationError {
+                        layer_idx: 0,
+                        reason: format!(
+                            "binding_groups count mismatch: got {}, expected {} ({} claims / {} group_size)",
+                            proof.binding_groups.len(), expected_groups,
+                            agg_claims.len(), group_size,
+                        ),
+                    });
+                }
+                for (g, group_proof) in proof.binding_groups.iter().enumerate() {
+                    let chunk_start = g * group_size;
+                    let chunk_end = (chunk_start + group_size).min(agg_claims.len());
+                    let group_claims = &agg_claims[chunk_start..chunk_end];
+                    if !verify_aggregated_binding(group_proof, group_claims, channel) {
+                        return Err(GKRError::VerificationError {
+                            layer_idx: 0,
+                            reason: format!(
+                                "grouped binding verification failed at group {}/{} (claims {}..{})",
+                                g + 1, expected_groups, chunk_start, chunk_end,
+                            ),
+                        });
+                    }
                 }
             } else {
                 // RLC-only: requires weight matrices for off-chain verification.
@@ -2394,6 +2425,23 @@ fn verify_gkr_simd_inner(
                         reason: "SIMD aggregated oracle sumcheck weight binding verification failed"
                             .to_string(),
                     });
+                }
+            } else if !proof.binding_groups.is_empty() {
+                // Grouped binding: verify each group independently
+                let group_size = crate::gkr::prover::BINDING_GROUP_SIZE;
+                for (g, group_proof) in proof.binding_groups.iter().enumerate() {
+                    let chunk_start = g * group_size;
+                    let chunk_end = (chunk_start + group_size).min(agg_claims.len());
+                    let group_claims = &agg_claims[chunk_start..chunk_end];
+                    if !verify_aggregated_binding(group_proof, group_claims, channel) {
+                        return Err(GKRError::VerificationError {
+                            layer_idx: 0,
+                            reason: format!(
+                                "SIMD grouped binding verification failed at group {}/{}",
+                                g + 1, proof.binding_groups.len(),
+                            ),
+                        });
+                    }
                 }
             } else {
                 let rho = channel.draw_qm31();
