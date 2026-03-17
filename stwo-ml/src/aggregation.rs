@@ -5899,6 +5899,7 @@ where
     FrameworkComponent<EmbeddingEval>: ComponentProver<B>,
     FrameworkComponent<QuantizeEval>: ComponentProver<B>,
     FrameworkComponent<DequantizeEval>: ComponentProver<B>,
+    FrameworkComponent<crate::components::rope::RoPEEval>: ComponentProver<B>,
 {
     let config = PcsConfig::default();
 
@@ -5912,6 +5913,7 @@ where
         .chain(embedding_layers.iter().map(|l| l.log_size))
         .chain(quantize_layers.iter().map(|l| l.log_size))
         .chain(dequantize_layers.iter().map(|l| l.log_size))
+        .chain(rope_layers.iter().map(|l| l.log_size))
         .collect();
     let max_log_size = *all_log_sizes.iter().max().unwrap();
     let max_degree_bound = max_log_size + 1;
@@ -6006,6 +6008,15 @@ where
             let sz = 1usize << layer.log_size;
             let dom = CanonicCoset::new(layer.log_size).circle_domain();
             let (ti, to) = build_table_columns::<SimdBackend>(&table, sz);
+            tree_builder.extend_evals(convert_evaluations::<SimdBackend, B, BaseField>(vec![
+                CircleEvaluation::new(dom, ti),
+                CircleEvaluation::new(dom, to),
+            ]));
+        }
+        for layer in rope_layers {
+            let sz = 1usize << layer.log_size;
+            let dom = CanonicCoset::new(layer.log_size).circle_domain();
+            let (ti, to) = build_table_columns::<SimdBackend>(&layer.table, sz);
             tree_builder.extend_evals(convert_evaluations::<SimdBackend, B, BaseField>(vec![
                 CircleEvaluation::new(dom, ti),
                 CircleEvaluation::new(dom, to),
@@ -6177,6 +6188,23 @@ where
         ]));
         dequantize_mults.push(mults);
     }
+    let mut rope_mults: Vec<Vec<M31>> = Vec::new();
+    for layer in rope_layers {
+        let sz = 1usize << layer.log_size;
+        let dom = CanonicCoset::new(layer.log_size).circle_domain();
+        let (trace_cols, mults) = crate::components::rope::generate_rope_trace::<SimdBackend>(
+            &layer.input_x,
+            &layer.input_y,
+            &layer.cos_vals,
+            &layer.sin_vals,
+            &layer.output_x,
+            &layer.output_y,
+            &layer.table,
+            layer.log_size,
+        );
+        tree_builder.extend_evals(convert_evaluations::<SimdBackend, B, BaseField>(trace_cols));
+        rope_mults.push(mults);
+    }
     tree_builder.commit(channel);
     eprintln!(
         "  [Unified STARK] Tree 1 committed in {:.2}s",
@@ -6192,12 +6220,14 @@ where
     let mut embedding_lookup_rel: Option<EmbeddingRelation> = None;
     let mut quantize_lookup: Option<QuantizeRelation> = None;
     let mut dequantize_lookup: Option<DequantizeRelation> = None;
+    let mut rope_lookup: Option<crate::components::rope::RoPERelation> = None;
     let mut activation_claimed_sums: Vec<SecureField> = Vec::new();
     let mut layernorm_claimed_sums: Vec<SecureField> = Vec::new();
     let mut rmsnorm_claimed_sums: Vec<SecureField> = Vec::new();
     let mut embedding_claimed_sums: Vec<SecureField> = Vec::new();
     let mut quantize_claimed_sums: Vec<SecureField> = Vec::new();
     let mut dequantize_claimed_sums: Vec<SecureField> = Vec::new();
+    let mut rope_claimed_sums: Vec<SecureField> = Vec::new();
 
     if has_logup {
         let t_tree2 = std::time::Instant::now();
@@ -6219,6 +6249,9 @@ where
         }
         if !dequantize_layers.is_empty() {
             dequantize_lookup = Some(DequantizeRelation::draw(channel));
+        }
+        if !rope_layers.is_empty() {
+            rope_lookup = Some(crate::components::rope::RoPERelation::draw(channel));
         }
 
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -6474,6 +6507,46 @@ where
             }
         }
 
+        // RoPE LogUp interaction traces
+        if let Some(ref lookup) = rope_lookup {
+            for (idx, layer) in rope_layers.iter().enumerate() {
+                let sz = 1usize << layer.log_size;
+                let vsz = sz >> LOG_N_LANES;
+                // Build table columns for LogUp denominator
+                let (tic, toc) = build_table_columns::<SimdBackend>(&layer.table, sz);
+                // Build trace cos/sin columns for LogUp numerator
+                let n = layer.cos_vals.len().min(sz);
+                let pad_cos = layer.table.inputs.first().copied().unwrap_or(M31::from(0));
+                let pad_sin = layer.table.outputs.first().copied().unwrap_or(M31::from(0));
+                let mut col_cos = Col::<SimdBackend, BaseField>::zeros(sz);
+                let mut col_sin = Col::<SimdBackend, BaseField>::zeros(sz);
+                for i in 0..n {
+                    col_cos.set(i, layer.cos_vals[i]);
+                    col_sin.set(i, layer.sin_vals[i]);
+                }
+                for i in n..sz {
+                    col_cos.set(i, pad_cos);
+                    col_sin.set(i, pad_sin);
+                }
+                let mut lg = LogupTraceGenerator::new(layer.log_size);
+                let mut cg = lg.new_col();
+                for vr in 0..vsz {
+                    let qt: PackedSecureField = lookup
+                        .lookup_elements()
+                        .combine(&[tic.data[vr], toc.data[vr]]);
+                    let qr: PackedSecureField = lookup
+                        .lookup_elements()
+                        .combine(&[col_cos.data[vr], col_sin.data[vr]]);
+                    let mp = pack_multiplicities(&rope_mults[idx], vr);
+                    cg.write_frac(vr, qt - mp * qr, qt * qr);
+                }
+                cg.finalize_col();
+                let (it, cs) = lg.finalize_last();
+                tree_builder.extend_evals(convert_evaluations::<SimdBackend, B, BaseField>(it));
+                rope_claimed_sums.push(cs);
+            }
+        }
+
         tree_builder.commit(channel);
         eprintln!(
             "  [Unified STARK] Tree 2 committed in {:.2}s",
@@ -6494,6 +6567,7 @@ where
     let mut rmsnorm_claims: Vec<LayerClaim> = Vec::new();
     let mut embedding_claims: Vec<LayerClaim> = Vec::new();
     let mut quantize_claims: Vec<LayerClaim> = Vec::new();
+    let mut rope_claims: Vec<LayerClaim> = Vec::new();
 
     if let Some(ref lookup) = activation_lookup {
         for (idx, layer) in activation_layers.iter().enumerate() {
@@ -6642,6 +6716,25 @@ where
                 cs,
             )));
             dequantize_claims.push(LayerClaim {
+                layer_index: layer.node_id,
+                claimed_sum: cs,
+                trace_rows: 1 << layer.log_size,
+            });
+        }
+    }
+    if let Some(ref lookup) = rope_lookup {
+        for (idx, layer) in rope_layers.iter().enumerate() {
+            let cs = rope_claimed_sums[idx];
+            comp_storage.push(Box::new(FrameworkComponent::new(
+                &mut allocator,
+                crate::components::rope::RoPEEval {
+                    log_n_rows: layer.log_size,
+                    lookup_elements: lookup.clone(),
+                    claimed_sum: cs,
+                },
+                cs,
+            )));
+            rope_claims.push(LayerClaim {
                 layer_index: layer.node_id,
                 claimed_sum: cs,
                 trace_rows: 1 << layer.log_size,

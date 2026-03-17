@@ -690,6 +690,8 @@ where
         stwo::prover::ComponentProver<B>,
     stwo_constraint_framework::FrameworkComponent<crate::components::rmsnorm::RMSNormEval>:
         stwo::prover::ComponentProver<B>,
+    stwo_constraint_framework::FrameworkComponent<crate::components::rope::RoPEEval>:
+        stwo::prover::ComponentProver<B>,
 {
     use crate::aggregation::{
         build_unified_stark, collect_forward_pass_layer_data, compute_io_commitment,
