@@ -4162,7 +4162,7 @@ pub fn prove_gkr_decode_gpu_with_cache(
                     kind: super::types::DeferredProofKind::Weightless,
                 });
             }
-            LayerType::Identity | LayerType::Input => {
+            LayerType::Identity | LayerType::RoPE { .. } | LayerType::Input => {
                 mix_secure_field(channel, deferred_claim.value);
                 let lhs_eval = deferred_claim.value;
                 let rhs_eval = SecureField::zero();
