@@ -36,10 +36,11 @@ pub fn verify_recursive(
     let pcs_config = PcsConfig::default();
 
     // Build evaluator from public inputs
+    let zero_limbs = super::air::felt252_to_limbs(&starknet_ff::FieldElement::ZERO);
     let eval = RecursiveVerifierEval {
         log_n_rows: log_size,
-        initial_digest: M31::from_u32_unchecked(0),
-        final_digest: M31::from_u32_unchecked(0), // TODO: wire actual final digest
+        initial_digest_limbs: zero_limbs,
+        final_digest_limbs: zero_limbs, // TODO: wire actual final digest
     };
 
     // Build dummy component to get trace_log_degree_bounds

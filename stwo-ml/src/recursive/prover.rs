@@ -143,14 +143,16 @@ pub fn prove_recursive(
 
     let domain = CanonicCoset::new(log_size).circle_domain();
 
-    // Tree 0: Preprocessed columns (is_first, is_last)
+    // Tree 0: Preprocessed columns (is_first, is_last, is_chain)
     {
         let mut tree_builder = commitment_scheme.tree_builder();
         let is_first_col = simd_column_from_vec(&trace_data.preprocessed_is_first);
         let is_last_col = simd_column_from_vec(&trace_data.preprocessed_is_last);
+        let is_chain_col = simd_column_from_vec(&trace_data.preprocessed_is_chain);
         let simd_evals = vec![
             CircleEvaluation::new(domain, is_first_col),
             CircleEvaluation::new(domain, is_last_col),
+            CircleEvaluation::new(domain, is_chain_col),
         ];
         tree_builder.extend_evals(
             convert_evaluations::<SimdBackend, SimdBackend, M31>(simd_evals),
@@ -178,10 +180,16 @@ pub fn prove_recursive(
     // ── Step 4: Prove ────────────────────────────────────────────────
     eprintln!("  [Recursive] Step 4/4: Proving (STARK)...");
 
+    // Compute initial/final digest limbs from the production verifier's channel state.
+    // Initial = zero (fresh channel), final = digest after all verifier operations.
+    let zero_limbs = super::air::felt252_to_limbs(&starknet_ff::FieldElement::ZERO);
+    // TODO: capture actual final digest from production verifier channel
+    let final_limbs = zero_limbs;
+
     let eval = RecursiveVerifierEval {
         log_n_rows: log_size,
-        initial_digest: M31::from_u32_unchecked(0),
-        final_digest: M31::from_u32_unchecked(0), // TODO: wire actual final digest
+        initial_digest_limbs: zero_limbs,
+        final_digest_limbs: final_limbs,
     };
 
     let component = FrameworkComponent::new(
