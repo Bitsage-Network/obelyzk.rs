@@ -141,8 +141,8 @@ mod unit_tests {
 
         let ops: Vec<WitnessOp> = vec![
             WitnessOp::HadesPerm {
-                input: [M31::from(0); 16],
-                output: [M31::from(1); 16],
+                input: [starknet_ff::FieldElement::ZERO; 3],
+                output: [starknet_ff::FieldElement::ONE; 3],
             },
             WitnessOp::SumcheckRoundDeg2 {
                 round_poly: RoundPoly { c0: zero, c1: zero, c2: zero },

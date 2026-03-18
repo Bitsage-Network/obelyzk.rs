@@ -2046,14 +2046,29 @@ fn main() {
             let circuit = stwo_ml::gkr::LayeredCircuit::from_graph(&model.graph)
                 .expect("circuit compile for recursive");
 
-            let zero_qm31 = stwo::core::fields::qm31::QM31::default();
+            // Compute real public inputs for the recursive proof
+            let recursive_io = compute_io_commitment(&input, &proof.execution.output);
+            let recursive_io_qm31 = stwo_ml::crypto::poseidon_channel::felt_to_securefield(recursive_io);
+            // Weight super root: hash of all weight commitment roots
+            let recursive_weight_root = if !gkr.weight_claims.is_empty() {
+                // Hash weight claims into a single QM31 via the circuit hash mechanism
+                let mut hasher = stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
+                hasher.mix_u64(gkr.weight_claims.len() as u64);
+                for wc in &gkr.weight_claims {
+                    hasher.mix_felt(stwo_ml::crypto::poseidon_channel::securefield_to_felt(wc.expected_value));
+                }
+                hasher.draw_qm31()
+            } else {
+                stwo::core::fields::qm31::QM31::default()
+            };
+
             match stwo_ml::recursive::prove_recursive(
                 &circuit,
                 gkr,
                 &proof.execution.output,
                 &model.weights,
-                zero_qm31, // weight_super_root — TODO: wire from compute_weight_commitment
-                zero_qm31, // io_commitment — TODO: wire from compute_io_commitment
+                recursive_weight_root,
+                recursive_io_qm31,
                 prove_elapsed.as_secs_f64(),
             ) {
                 Ok(recursive_proof) => {

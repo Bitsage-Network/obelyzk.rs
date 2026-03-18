@@ -114,36 +114,54 @@ impl InstrumentedChannel {
         )
     }
 
-    // ── Channel operations (delegate to inner + record) ──────────────
+    // ── Channel operations (delegate to inner + record Hades states) ──
+
+    /// Perform a Hades permutation and record input/output.
+    fn record_hades(&mut self, input: [FieldElement; 3]) -> [FieldElement; 3] {
+        let mut state = input;
+        crate::crypto::hades::hades_permutation(&mut state);
+        self.ops.push(WitnessOp::HadesPerm {
+            input,
+            output: state,
+        });
+        self.n_poseidon_perms += 1;
+        state
+    }
 
     /// Mix a u64 value into the channel. Records the Hades permutation.
     pub fn mix_u64(&mut self, value: u64) {
-        self.inner.mix_u64(value);
-        self.ops.push(WitnessOp::ChannelMix {
-            value: SecureField::from(M31::from(value as u32)),
-        });
-        self.n_poseidon_perms += 1;
+        self.mix_felt(FieldElement::from(value));
     }
 
-    /// Mix a felt252 value into the channel.
+    /// Mix a felt252 value into the channel. Records Hades input/output.
     pub fn mix_felt(&mut self, value: FieldElement) {
+        let input = [self.inner.digest(), value, FieldElement::TWO];
+        let output = self.record_hades(input);
+        // Keep inner channel in sync
         self.inner.mix_felt(value);
-        self.n_poseidon_perms += 1;
+        // Verify consistency
+        debug_assert_eq!(self.inner.digest(), output[0]);
     }
 
     /// Mix a SecureField (QM31) into the channel.
     pub fn mix_securefield(&mut self, value: SecureField) {
         let felt = securefield_to_felt(value);
-        self.inner.mix_felt(felt);
-        self.ops.push(WitnessOp::ChannelMix { value });
-        self.n_poseidon_perms += 1;
+        self.mix_felt(felt);
     }
 
-    /// Draw a QM31 from the channel.
+    /// Draw a QM31 from the channel. Records Hades input/output.
     pub fn draw_qm31(&mut self) -> SecureField {
+        // Record the Hades call that draw_felt252 makes
+        let input = [
+            self.inner.digest(),
+            FieldElement::from(self.inner.n_draws() as u64),
+            FieldElement::THREE,
+        ];
+        let _output = self.record_hades(input);
+
+        // Use the inner channel to produce the actual QM31 (handles extraction)
         let result = self.inner.draw_qm31();
         self.ops.push(WitnessOp::ChannelDraw { result });
-        self.n_poseidon_perms += 1;
         result
     }
 
@@ -159,6 +177,8 @@ impl InstrumentedChannel {
         c1: SecureField,
         c2: SecureField,
     ) {
+        // mix_poly_coeffs uses poseidon_hash_many which is multiple Hades calls.
+        // Record via the inner channel + count the permutation.
         self.inner.mix_poly_coeffs(c0, c1, c2);
         self.n_poseidon_perms += 1;
     }

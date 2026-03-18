@@ -3,6 +3,7 @@
 //! These types represent the recursive composition output — a STARK proof
 //! attesting that the GKR verifier accepted the original proof.
 
+use starknet_ff::FieldElement;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 
@@ -16,11 +17,12 @@ use crate::gkr::types::{RoundPolyDeg3, SecureField};
 /// the execution trace rows in the recursive STARK.
 #[derive(Debug, Clone)]
 pub enum WitnessOp {
-    /// Hades permutation: `state = [a, b, c]; hades(&state);`
-    /// Records the full input and output state for Poseidon2 AIR constraints.
+    /// Hades permutation over felt252: `state = [digest, value, capacity]; hades(&state);`
+    /// Records the full 3-element input and output state.
+    /// This is Starknet's Poseidon (felt252 Hades), NOT the M31 Poseidon2.
     HadesPerm {
-        input: [M31; 16],
-        output: [M31; 16],
+        input: [FieldElement; 3],
+        output: [FieldElement; 3],
     },
 
     /// Sumcheck round verification (degree-2, MatMul layers).
