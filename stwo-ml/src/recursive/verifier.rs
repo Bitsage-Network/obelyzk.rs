@@ -9,7 +9,7 @@ use stwo::core::channel::MerkleChannel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+use stwo::core::vcs_lifted::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
 use stwo::core::verifier::verify as stwo_verify;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
@@ -27,9 +27,7 @@ use super::types::RecursivePublicInputs;
 ///
 /// If this passes, the proof is valid and can be submitted on-chain.
 pub fn verify_recursive(
-    stark_proof: &stwo::core::proof::StarkProof<
-        stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher,
-    >,
+    stark_proof: &stwo::core::proof::StarkProof<Poseidon252MerkleHasher>,
     public_inputs: &RecursivePublicInputs,
     log_size: u32,
 ) -> Result<(), RecursiveError> {
@@ -50,8 +48,8 @@ pub fn verify_recursive(
     let bounds = Component::trace_log_degree_bounds(&dummy_component);
 
     // Set up channel and commitment scheme verifier
-    let channel = &mut <Blake2sMerkleChannel as MerkleChannel>::C::default();
-    let mut commitment_scheme = CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(pcs_config);
+    let channel = &mut <Poseidon252MerkleChannel as MerkleChannel>::C::default();
+    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(pcs_config);
 
     // Replay commitments (Tree 0 = preprocessed, Tree 1 = execution)
     if stark_proof.commitments.len() < 2 {
@@ -68,7 +66,7 @@ pub fn verify_recursive(
     let component = FrameworkComponent::new(&mut allocator, eval, SecureField::zero());
 
     // Verify
-    stwo_verify::<Blake2sMerkleChannel>(
+    stwo_verify::<Poseidon252MerkleChannel>(
         &[&component as &dyn Component],
         channel,
         &mut commitment_scheme,

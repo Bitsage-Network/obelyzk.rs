@@ -22,6 +22,7 @@ use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+use stwo::core::vcs_lifted::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::{Col, Column};
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
@@ -137,9 +138,13 @@ pub fn prove_recursive(
             .half_coset,
     );
 
-    let channel = &mut <Blake2sMerkleChannel as MerkleChannel>::C::default();
+    // Use Poseidon252MerkleChannel so the STARK is verifiable by stwo-cairo-verifier
+    // (Cairo's native Poseidon). This eliminates the need to constrain felt252 Hades
+    // in the M31 AIR — the STARK proof itself uses Poseidon252 for Fiat-Shamir and
+    // Merkle commitments, matching what the Cairo verifier expects.
+    let channel = &mut <Poseidon252MerkleChannel as MerkleChannel>::C::default();
     let mut commitment_scheme =
-        CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
 
     let domain = CanonicCoset::new(log_size).circle_domain();
 
@@ -197,7 +202,7 @@ pub fn prove_recursive(
     );
 
     let stark_proof =
-        prove::<SimdBackend, Blake2sMerkleChannel>(&[&component], channel, commitment_scheme)
+        prove::<SimdBackend, Poseidon252MerkleChannel>(&[&component], channel, commitment_scheme)
             .map_err(|e| RecursiveError::ProvingFailed(format!("{e:?}")))?;
 
     let recursive_prove_time = t_start.elapsed().as_secs_f64();
@@ -239,15 +244,13 @@ fn simd_column_from_vec(data: &[M31]) -> Col<SimdBackend, M31> {
     col
 }
 
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
-
 /// Rough estimate of serialized proof size.
-fn estimate_proof_size(_proof: &StarkProof<Blake2sMerkleHasher>) -> usize {
+fn estimate_proof_size(_proof: &StarkProof<Poseidon252MerkleHasher>) -> usize {
     4096 // placeholder
 }
 
 /// Serialize a STARK proof to bytes (placeholder — binary format in Phase 2D).
-fn serialize_stark_proof(_proof: &StarkProof<Blake2sMerkleHasher>) -> Vec<u8> {
+fn serialize_stark_proof(_proof: &StarkProof<Poseidon252MerkleHasher>) -> Vec<u8> {
     Vec::new()
 }
 
