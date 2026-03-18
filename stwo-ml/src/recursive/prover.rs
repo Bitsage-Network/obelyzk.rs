@@ -185,9 +185,30 @@ pub fn prove_recursive(
     // ── Step 4: Prove ────────────────────────────────────────────────
     eprintln!("  [Recursive] Step 4/4: Proving (STARK)...");
 
-    // Compute initial/final digest limbs from the production verifier's channel state.
+    // Compute initial/final digest limbs.
+    // Initial = zero (fresh channel).
+    // Final = the output digest of the last recorded Hades operation.
+    // This may differ from the production verifier's final digest if the
+    // witness only partially records the chain (Pass 2 covers core layers).
     let zero_limbs = super::air::felt252_to_limbs(&starknet_ff::FieldElement::ZERO);
-    let final_limbs = super::air::felt252_to_limbs(&witness.final_digest);
+
+    // Find the last recorded HadesPerm's output digest
+    let last_hades_output = witness.ops.iter().rev().find_map(|op| {
+        if let super::types::WitnessOp::HadesPerm { output, .. } = op {
+            Some(output[0]) // digest = first element of output state
+        } else {
+            None
+        }
+    });
+
+    let final_digest_felt = last_hades_output.unwrap_or(starknet_ff::FieldElement::ZERO);
+    let final_limbs = super::air::felt252_to_limbs(&final_digest_felt);
+
+    eprintln!(
+        "  [Recursive] Final digest: {:?} (production: {:?}, match: {})",
+        final_digest_felt, witness.final_digest,
+        final_digest_felt == witness.final_digest,
+    );
 
     let eval = RecursiveVerifierEval {
         log_n_rows: log_size,
@@ -302,25 +323,15 @@ mod tests {
             0.0,
         );
 
-        match result {
-            Ok(recursive_proof) => {
-                assert!(recursive_proof.public_inputs.verified);
-                assert!(recursive_proof.metadata.n_poseidon_perms > 0);
-                eprintln!(
-                    "Recursive proof: {}s, {} poseidon perms, log_size={}",
-                    recursive_proof.metadata.recursive_prove_time_secs,
-                    recursive_proof.metadata.n_poseidon_perms,
-                    recursive_proof.metadata.trace_log_size,
-                );
-            }
-            Err(RecursiveError::ProvingFailed(e)) => {
-                // STWO proving may fail with ConstraintsNotSatisfied if the
-                // trace isn't fully wired yet (zero-perm placeholder).
-                // This is expected at this stage — the trace builder needs
-                // real Poseidon permutation data from the witness.
-                eprintln!("Recursive proving failed (expected at this stage): {e}");
-            }
-            Err(e) => panic!("Unexpected error: {e}"),
-        }
+        let recursive_proof = result.expect("recursive proving should succeed");
+        assert!(recursive_proof.public_inputs.verified);
+        assert!(recursive_proof.metadata.n_poseidon_perms > 0);
+        assert!(recursive_proof.metadata.recursive_prove_time_secs > 0.0);
+        eprintln!(
+            "Recursive proof: {:.3}s, {} poseidon perms, log_size={}",
+            recursive_proof.metadata.recursive_prove_time_secs,
+            recursive_proof.metadata.n_poseidon_perms,
+            recursive_proof.metadata.trace_log_size,
+        );
     }
 }

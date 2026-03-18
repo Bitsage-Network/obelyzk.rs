@@ -116,18 +116,6 @@ impl InstrumentedChannel {
 
     // ── Channel operations (delegate to inner + record Hades states) ──
 
-    /// Perform a Hades permutation and record input/output.
-    fn record_hades(&mut self, input: [FieldElement; 3]) -> [FieldElement; 3] {
-        let mut state = input;
-        crate::crypto::hades::hades_permutation(&mut state);
-        self.ops.push(WitnessOp::HadesPerm {
-            input,
-            output: state,
-        });
-        self.n_poseidon_perms += 1;
-        state
-    }
-
     /// Mix a u64 value into the channel. Records the Hades permutation.
     pub fn mix_u64(&mut self, value: u64) {
         self.mix_felt(FieldElement::from(value));
@@ -135,10 +123,19 @@ impl InstrumentedChannel {
 
     /// Mix a felt252 value into the channel. Records Hades input/output.
     pub fn mix_felt(&mut self, value: FieldElement) {
-        let input = [self.inner.digest(), value, FieldElement::TWO];
-        let output = self.record_hades(input);
-        // Keep inner channel in sync
+        // Capture state before inner advances
+        let digest_before = self.inner.digest();
+        let input = [digest_before, value, FieldElement::TWO];
+        let mut output = input;
+        crate::crypto::hades::hades_permutation(&mut output);
+
+        // Record
+        self.ops.push(WitnessOp::HadesPerm { input, output });
+        self.n_poseidon_perms += 1;
+
+        // Advance inner channel
         self.inner.mix_felt(value);
+
         // Verify consistency
         debug_assert_eq!(self.inner.digest(), output[0]);
     }
@@ -151,16 +148,19 @@ impl InstrumentedChannel {
 
     /// Draw a QM31 from the channel. Records Hades input/output.
     pub fn draw_qm31(&mut self) -> SecureField {
-        // Record the Hades call that draw_felt252 makes
-        let input = [
-            self.inner.digest(),
-            FieldElement::from(self.inner.n_draws() as u64),
-            FieldElement::THREE,
-        ];
-        let _output = self.record_hades(input);
+        // Capture state BEFORE the inner channel advances
+        let digest = self.inner.digest();
+        let n_draws = self.inner.n_draws();
 
-        // Use the inner channel to produce the actual QM31 (handles extraction)
+        // Use the inner channel to produce the actual QM31
         let result = self.inner.draw_qm31();
+
+        // Record the Hades call that draw_felt252 made internally
+        let input = [digest, FieldElement::from(n_draws as u64), FieldElement::THREE];
+        let mut output = input;
+        crate::crypto::hades::hades_permutation(&mut output);
+        self.ops.push(WitnessOp::HadesPerm { input, output });
+        self.n_poseidon_perms += 1;
         self.ops.push(WitnessOp::ChannelDraw { result });
         result
     }
@@ -171,19 +171,63 @@ impl InstrumentedChannel {
     }
 
     /// Mix degree-2 polynomial coefficients (3 QM31s).
+    ///
+    /// Replicates the Hades calls from `poseidon_hash_many([digest, felt1, felt2])`.
+    /// This is: hash(digest, felt1) → intermediate, then hash(intermediate, felt2) → new_digest.
+    /// Each `hash(a, b)` = `hades([a, b, 2])[0]`, so 2 Hades calls total.
     pub fn mix_poly_coeffs(
         &mut self,
         c0: SecureField,
         c1: SecureField,
         c2: SecureField,
     ) {
-        // mix_poly_coeffs uses poseidon_hash_many which is multiple Hades calls.
-        // Record via the inner channel + count the permutation.
+        use crate::crypto::poseidon_channel::pack_m31s;
+        let m31s: Vec<M31> = vec![
+            c0.0 .0, c0.0 .1, c0.1 .0, c0.1 .1, c1.0 .0, c1.0 .1, c1.1 .0, c1.1 .1, c2.0 .0,
+            c2.0 .1, c2.1 .0, c2.1 .1,
+        ];
+        let felt1 = pack_m31s(&m31s[..8]);
+        let felt2 = pack_m31s(&m31s[8..]);
+
+        // poseidon_hash_many([digest, felt1, felt2]) internally:
+        // state = [digest, felt1, 2]; hades(&state); → state[0]
+        // state = [state[0], felt2, 2]; hades(&state); → state[0]
+        // Then final padding: state = [state[0], 1, 2]; hades(&state); → result
+        // (poseidon_hash_many pads with 1 and applies one more hades)
+        let digest_before = self.inner.digest();
         self.inner.mix_poly_coeffs(c0, c1, c2);
+        let digest_after = self.inner.digest();
+
+        // Record the composite operation (we record the outer hash result)
+        // The individual Hades calls within poseidon_hash_many are:
+        // Call 1: [digest, felt1, 2]
+        let input1 = [digest_before, felt1, FieldElement::TWO];
+        let mut state1 = input1;
+        crate::crypto::hades::hades_permutation(&mut state1);
+        self.ops.push(WitnessOp::HadesPerm { input: input1, output: state1 });
         self.n_poseidon_perms += 1;
+
+        // Call 2: [state1[0], felt2, 2]
+        let input2 = [state1[0], felt2, FieldElement::TWO];
+        let mut state2 = input2;
+        crate::crypto::hades::hades_permutation(&mut state2);
+        self.ops.push(WitnessOp::HadesPerm { input: input2, output: state2 });
+        self.n_poseidon_perms += 1;
+
+        // poseidon_hash_many also applies a padding hades:
+        // [state2[0], 1, 2]
+        let input3 = [state2[0], FieldElement::ONE, FieldElement::TWO];
+        let mut state3 = input3;
+        crate::crypto::hades::hades_permutation(&mut state3);
+        self.ops.push(WitnessOp::HadesPerm { input: input3, output: state3 });
+        self.n_poseidon_perms += 1;
+
+        // Verify our decomposition matches
+        debug_assert_eq!(self.inner.digest(), digest_after);
     }
 
     /// Mix degree-3 polynomial coefficients (4 QM31s).
+    /// Same as mix_poly_coeffs but with 16 M31s → 2 felt252s.
     pub fn mix_poly_coeffs_deg3(
         &mut self,
         c0: SecureField,
@@ -191,15 +235,51 @@ impl InstrumentedChannel {
         c2: SecureField,
         c3: SecureField,
     ) {
+        use crate::crypto::poseidon_channel::pack_m31s;
+        let m31s: Vec<M31> = vec![
+            c0.0 .0, c0.0 .1, c0.1 .0, c0.1 .1, c1.0 .0, c1.0 .1, c1.1 .0, c1.1 .1, c2.0 .0,
+            c2.0 .1, c2.1 .0, c2.1 .1, c3.0 .0, c3.0 .1, c3.1 .0, c3.1 .1,
+        ];
+        let felt1 = pack_m31s(&m31s[..8]);
+        let felt2 = pack_m31s(&m31s[8..]);
+
+        let digest_before = self.inner.digest();
         self.inner.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+        let digest_after = self.inner.digest();
+
+        // Decompose poseidon_hash_many([digest, felt1, felt2]) into individual Hades calls
+        let input1 = [digest_before, felt1, FieldElement::TWO];
+        let mut state1 = input1;
+        crate::crypto::hades::hades_permutation(&mut state1);
+        self.ops.push(WitnessOp::HadesPerm { input: input1, output: state1 });
         self.n_poseidon_perms += 1;
+
+        let input2 = [state1[0], felt2, FieldElement::TWO];
+        let mut state2 = input2;
+        crate::crypto::hades::hades_permutation(&mut state2);
+        self.ops.push(WitnessOp::HadesPerm { input: input2, output: state2 });
+        self.n_poseidon_perms += 1;
+
+        let input3 = [state2[0], FieldElement::ONE, FieldElement::TWO];
+        let mut state3 = input3;
+        crate::crypto::hades::hades_permutation(&mut state3);
+        self.ops.push(WitnessOp::HadesPerm { input: input3, output: state3 });
+        self.n_poseidon_perms += 1;
+
+        debug_assert_eq!(self.inner.digest(), digest_after);
     }
 
     /// Draw a raw felt252.
     pub fn draw_felt252(&mut self) -> FieldElement {
-        let result = self.inner.draw_felt252();
+        let digest = self.inner.digest();
+        let n_draws = self.inner.n_draws();
+        let input = [digest, FieldElement::from(n_draws as u64), FieldElement::THREE];
+        let mut output = input;
+        crate::crypto::hades::hades_permutation(&mut output);
+        self.ops.push(WitnessOp::HadesPerm { input, output });
         self.n_poseidon_perms += 1;
-        result
+
+        self.inner.draw_felt252()
     }
 
     // ── Arithmetic recording (called by the verifier replay) ─────────

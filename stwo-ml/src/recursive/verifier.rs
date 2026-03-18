@@ -125,25 +125,11 @@ mod tests {
             &circuit, gkr, &proof.execution.output, &weights, zero, zero, 0.0,
         );
 
-        match recursive_result {
-            Ok(_recursive_proof) => {
-                // The proof was produced — now we'd verify it.
-                // However, prove_recursive returns serialized bytes, not the
-                // StarkProof directly. For the full roundtrip, we need to
-                // store the StarkProof in the RecursiveProof struct.
-                // This will be wired when we add serialization support.
-                eprintln!(
-                    "Recursive proof produced successfully (log_size={}, {} poseidon perms)",
-                    log_size, witness.n_poseidon_perms,
-                );
-            }
-            Err(crate::recursive::RecursiveError::ProvingFailed(e)) => {
-                // Proving may fail with ConstraintsNotSatisfied if the trace
-                // isn't fully populated with real Poseidon data yet.
-                // This is expected until the trace builder wires real witness data.
-                eprintln!("Recursive proving failed (expected at this stage): {e}");
-            }
-            Err(e) => panic!("Unexpected error: {e}"),
-        }
+        let recursive_proof = recursive_result.expect("recursive proving should succeed");
+        eprintln!(
+            "Recursive proof produced (log_size={}, {} poseidon perms, {:.3}s)",
+            log_size, witness.n_poseidon_perms,
+            recursive_proof.metadata.recursive_prove_time_secs,
+        );
     }
 }
