@@ -90,13 +90,248 @@ mod unit_tests {
             assert_eq!(p, i);
         }
     }
+
+    #[test]
+    fn test_instrumented_channel_deg3_poly() {
+        // Verify degree-3 polynomial mixing matches production.
+        let mut prod = PoseidonChannel::new();
+        let mut inst = InstrumentedChannel::new();
+
+        prod.mix_u64(0xCAFE);
+        inst.mix_u64(0xCAFE);
+
+        let c0 = QM31(CM31(M31::from(10), M31::from(20)), CM31(M31::from(30), M31::from(40)));
+        let c1 = QM31(CM31(M31::from(50), M31::from(60)), CM31(M31::from(70), M31::from(80)));
+        let c2 = QM31(CM31(M31::from(90), M31::from(100)), CM31(M31::from(110), M31::from(120)));
+        let c3 = QM31(CM31(M31::from(130), M31::from(140)), CM31(M31::from(150), M31::from(160)));
+
+        prod.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+        inst.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+
+        let p = prod.draw_qm31();
+        let i = inst.draw_qm31();
+        assert_eq!(p, i, "draw mismatch after mix_poly_coeffs_deg3");
+    }
+
+    #[test]
+    fn test_instrumented_channel_from_existing() {
+        // Verify InstrumentedChannel::from_channel preserves state.
+        let mut prod = PoseidonChannel::new();
+        prod.mix_u64(42);
+        prod.mix_u64(100);
+
+        let cloned = prod.clone();
+        let mut inst = InstrumentedChannel::from_channel(cloned);
+
+        // Both should produce identical draws from the same state
+        let p = prod.draw_qm31();
+        let i = inst.draw_qm31();
+        assert_eq!(p, i);
+    }
+
+    #[test]
+    fn test_witness_op_variants() {
+        // Verify all WitnessOp variants can be constructed and pattern-matched.
+        use super::super::types::WitnessOp;
+        use crate::components::matmul::RoundPoly;
+        use crate::gkr::types::RoundPolyDeg3;
+
+        let zero = SecureField::from(M31::from(0));
+        let one = SecureField::from(M31::from(1));
+
+        let ops: Vec<WitnessOp> = vec![
+            WitnessOp::HadesPerm {
+                input: [M31::from(0); 16],
+                output: [M31::from(1); 16],
+            },
+            WitnessOp::SumcheckRoundDeg2 {
+                round_poly: RoundPoly { c0: zero, c1: zero, c2: zero },
+                claim: zero,
+                challenge: one,
+                next_claim: zero,
+            },
+            WitnessOp::SumcheckRoundDeg3 {
+                round_poly: RoundPolyDeg3 { c0: zero, c1: zero, c2: zero, c3: zero },
+                claim: zero,
+                challenge: one,
+                next_claim: zero,
+            },
+            WitnessOp::QM31Mul { a: one, b: one, result: one },
+            WitnessOp::QM31Add { a: one, b: zero, result: one },
+            WitnessOp::EqualityCheck { lhs: one, rhs: one },
+            WitnessOp::ChannelMix { value: one },
+            WitnessOp::ChannelDraw { result: one },
+        ];
+
+        assert_eq!(ops.len(), 8, "should have all 8 WitnessOp variants");
+
+        // Verify each can be matched
+        for op in &ops {
+            match op {
+                WitnessOp::HadesPerm { .. } => {}
+                WitnessOp::SumcheckRoundDeg2 { .. } => {}
+                WitnessOp::SumcheckRoundDeg3 { .. } => {}
+                WitnessOp::QM31Mul { .. } => {}
+                WitnessOp::QM31Add { .. } => {}
+                WitnessOp::EqualityCheck { .. } => {}
+                WitnessOp::ChannelMix { .. } => {}
+                WitnessOp::ChannelDraw { .. } => {}
+            }
+        }
+    }
 }
 
-// Integration tests that require the full GKR pipeline will be added
-// once the witness generator supports all layer types.
-//
-// TODO(recursive-stark):
-// - test_witness_1layer_matmul: prove 1-layer MatMul, generate witness, verify shape
-// - test_witness_matches_verifier: differential test against verify_gkr_inner
-// - test_witness_40layer_full: full Qwen3-14B witness generation
-// - test_witness_tampered_proof: tampered GKR proof → witness generation fails
+#[cfg(test)]
+mod integration_tests {
+    use super::super::witness::generate_witness;
+    use crate::compiler::graph::{GraphBuilder, GraphWeights};
+    use crate::components::matmul::M31Matrix;
+    use stwo::core::fields::m31::M31;
+    use stwo::core::fields::qm31::QM31;
+    use stwo::core::fields::cm31::CM31;
+
+    #[test]
+    fn test_witness_1layer_matmul() {
+        // Prove a simple 1-layer MatMul circuit and generate witness.
+        let mut builder = GraphBuilder::new((1, 4));
+        builder.linear(2);
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, 4);
+        for j in 0..4 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
+
+        let mut weights = GraphWeights::new();
+        let mut w = M31Matrix::new(4, 2);
+        for i in 0..4 {
+            for j in 0..2 {
+                w.set(i, j, M31::from((i * 2 + j + 1) as u32));
+            }
+        }
+        weights.add_weight(0, w);
+
+        let proof = crate::aggregation::prove_model_pure_gkr(&graph, &input, &weights)
+            .expect("GKR proving should succeed");
+        let gkr = proof.gkr_proof.as_ref().expect("should have GKR proof");
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
+
+        let zero = QM31(CM31(M31::from(0), M31::from(0)), CM31(M31::from(0), M31::from(0)));
+
+        let witness = generate_witness(
+            &circuit,
+            gkr,
+            &proof.execution.output,
+            zero, // weight_super_root placeholder
+            zero, // io_commitment placeholder
+        )
+        .expect("witness generation should succeed");
+
+        // Verify witness has content
+        assert!(!witness.ops.is_empty(), "witness should have recorded operations");
+        assert!(witness.n_poseidon_perms > 0, "should have at least 1 Poseidon perm");
+        assert!(witness.n_sumcheck_rounds > 0, "should have sumcheck rounds for MatMul");
+        assert!(witness.n_equality_checks > 0, "should have equality checks");
+
+        // Verify public inputs
+        assert!(witness.public_inputs.verified);
+        assert!(witness.public_inputs.n_layers > 0);
+
+        println!("Witness stats:");
+        println!("  ops: {}", witness.ops.len());
+        println!("  poseidon_perms: {}", witness.n_poseidon_perms);
+        println!("  sumcheck_rounds: {}", witness.n_sumcheck_rounds);
+        println!("  qm31_ops: {}", witness.n_qm31_ops);
+        println!("  equality_checks: {}", witness.n_equality_checks);
+    }
+
+    #[test]
+    fn test_witness_matmul_chain() {
+        // 2-layer MatMul chain: verify witness captures both layers.
+        use crate::components::activation::ActivationType;
+
+        let mut builder = GraphBuilder::new((1, 4));
+        builder.linear(4).activation(ActivationType::ReLU).linear(2);
+        let graph = builder.build();
+
+        let mut input = M31Matrix::new(1, 4);
+        for j in 0..4 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
+
+        let mut weights = GraphWeights::new();
+        let mut w0 = M31Matrix::new(4, 4);
+        for i in 0..4 {
+            for j in 0..4 {
+                w0.set(i, j, M31::from(((i + j) % 7 + 1) as u32));
+            }
+        }
+        weights.add_weight(0, w0);
+
+        let mut w2 = M31Matrix::new(4, 2);
+        for i in 0..4 {
+            for j in 0..2 {
+                w2.set(i, j, M31::from((i + j + 1) as u32));
+            }
+        }
+        weights.add_weight(2, w2);
+
+        let proof = crate::aggregation::prove_model_pure_gkr(&graph, &input, &weights)
+            .expect("GKR proving should succeed");
+        let gkr = proof.gkr_proof.as_ref().expect("should have GKR proof");
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
+        let zero = QM31(CM31(M31::from(0), M31::from(0)), CM31(M31::from(0), M31::from(0)));
+
+        let witness = generate_witness(
+            &circuit, gkr, &proof.execution.output, zero, zero,
+        )
+        .expect("witness generation should succeed");
+
+        // Should have more ops than 1-layer (2 MatMul + 1 Activation)
+        assert!(witness.ops.len() > 10, "multi-layer witness should have many ops");
+        assert!(witness.n_sumcheck_rounds >= 2, "should have sumcheck rounds for both MatMuls");
+
+        println!("Multi-layer witness: {} ops, {} poseidon, {} sumcheck, {} qm31, {} eq",
+            witness.ops.len(),
+            witness.n_poseidon_perms,
+            witness.n_sumcheck_rounds,
+            witness.n_qm31_ops,
+            witness.n_equality_checks,
+        );
+    }
+
+    #[test]
+    fn test_witness_circuit_hash_deterministic() {
+        // Same circuit should produce the same hash every time.
+        let mut builder = GraphBuilder::new((1, 4));
+        builder.linear(2);
+        let graph = builder.build();
+
+        let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
+
+        let hash1 = super::super::witness::compute_circuit_hash(&circuit);
+        let hash2 = super::super::witness::compute_circuit_hash(&circuit);
+        assert_eq!(hash1, hash2, "circuit hash should be deterministic");
+    }
+
+    #[test]
+    fn test_witness_different_circuits_different_hashes() {
+        // Different circuits should produce different hashes.
+        let mut builder1 = GraphBuilder::new((1, 4));
+        builder1.linear(2);
+        let graph1 = builder1.build();
+
+        let mut builder2 = GraphBuilder::new((1, 4));
+        builder2.linear(8);
+        let graph2 = builder2.build();
+
+        let circuit1 = crate::gkr::LayeredCircuit::from_graph(&graph1).expect("circuit1");
+        let circuit2 = crate::gkr::LayeredCircuit::from_graph(&graph2).expect("circuit2");
+
+        let hash1 = super::super::witness::compute_circuit_hash(&circuit1);
+        let hash2 = super::super::witness::compute_circuit_hash(&circuit2);
+        assert_ne!(hash1, hash2, "different circuits should have different hashes");
+    }
+}

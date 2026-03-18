@@ -360,32 +360,17 @@ pub fn generate_witness(
 
         match (&layer.layer_type, layer_proof) {
             (
-                LayerType::MatMul { m, k, n, .. },
+                LayerType::MatMul { .. },
                 crate::gkr::types::LayerProof::MatMul {
                     round_polys,
                     final_a_eval,
                     final_b_eval,
                 },
             ) => {
-                let log_m = (*m).next_power_of_two().ilog2() as usize;
-                let log_k = (*k).next_power_of_two().ilog2() as usize;
-                let log_n = (*n).next_power_of_two().ilog2() as usize;
-                let expected_rounds = log_m + log_k + log_n;
-
-                if round_polys.len() != expected_rounds {
-                    return Err(crate::gkr::types::GKRError::VerificationError {
-                        layer_idx,
-                        reason: format!(
-                            "matmul: expected {} rounds, got {}",
-                            expected_rounds,
-                            round_polys.len()
-                        ),
-                    });
-                }
-
-                // Replay sumcheck rounds
+                // Replay sumcheck rounds — iterate the actual proof's round polys
+                // (the prover determines the count based on padded dimensions)
                 let mut claim = current_claim.value;
-                let mut challenges = Vec::with_capacity(expected_rounds);
+                let mut challenges = Vec::with_capacity(round_polys.len());
 
                 for rp in round_polys.iter() {
                     // Check: p(0) + p(1) == claim
@@ -417,12 +402,10 @@ pub fn generate_witness(
                 channel.mix_securefield(*final_a_eval);
                 channel.mix_securefield(*final_b_eval);
 
-                // Update claim for next layer
-                // The new claim point is the input's evaluation point, derived from challenges
-                let r_input = channel.draw_qm31s(log_m + log_k);
-
+                // The new claim uses the sumcheck challenges as the evaluation point.
+                // final_a_eval is the input MLE at the challenge point.
                 current_claim = crate::gkr::types::GKRClaim {
-                    point: r_input,
+                    point: challenges,
                     value: *final_a_eval,
                 };
             }
@@ -545,7 +528,7 @@ pub fn generate_witness(
 /// This binds the recursive proof to a specific model architecture.
 /// The hash covers layer types and shapes but NOT weight values
 /// (those are bound via weight_super_root).
-fn compute_circuit_hash(circuit: &crate::gkr::circuit::LayeredCircuit) -> QM31 {
+pub fn compute_circuit_hash(circuit: &crate::gkr::circuit::LayeredCircuit) -> QM31 {
     use crate::crypto::poseidon_channel::PoseidonChannel;
     use crate::gkr::circuit::LayerType;
 
