@@ -26,6 +26,7 @@
 //! - `src/gkr/verifier.rs` — the verifier being arithmetized
 
 pub mod air;
+pub mod prover;
 pub mod types;
 pub mod witness;
 
@@ -36,5 +37,6 @@ pub use air::{
     build_recursive_trace, RecursiveTraceData, RecursiveVerifierComponent, RecursiveVerifierEval,
     COLS_PER_ROW,
 };
+pub use prover::{prove_recursive, RecursiveError};
 pub use types::{GkrVerifierWitness, RecursiveProof, RecursivePublicInputs, WitnessOp};
 pub use witness::{generate_witness, InstrumentedChannel};
