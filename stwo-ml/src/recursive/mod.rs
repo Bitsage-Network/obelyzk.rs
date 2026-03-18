@@ -25,14 +25,16 @@
 //! - `docs/RECURSIVE_STARK.md` — full design document
 //! - `src/gkr/verifier.rs` — the verifier being arithmetized
 
+pub mod air;
 pub mod types;
 pub mod witness;
-// pub mod air;       // Step 2: AIR circuit (week 2-3)
-// pub mod prover;    // Step 3: Recursive STARK prover (week 3-4)
-// pub mod verifier;  // Step 4: Rust-side verification (week 3-4)
 
 #[cfg(test)]
 mod tests;
 
+pub use air::{
+    build_recursive_trace, RecursiveTraceData, RecursiveVerifierComponent, RecursiveVerifierEval,
+    COLS_PER_ROW,
+};
 pub use types::{GkrVerifierWitness, RecursiveProof, RecursivePublicInputs, WitnessOp};
 pub use witness::{generate_witness, InstrumentedChannel};
