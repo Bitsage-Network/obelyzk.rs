@@ -1222,7 +1222,10 @@ pub fn load_hf_model_full(
         layers, hf_config.num_hidden_layers,
     );
 
-    let graph = build_hf_full_graph(&transformer_config, &hf_config, layers, seq_len);
+    // Build with embedding node — proves token→embedding lookup via LogUp
+    let graph = build_hf_full_graph_with_options(
+        &transformer_config, &hf_config, layers, seq_len, true,
+    );
 
     // Use the decode weight mapping (which handles Q/K/V/O + FFN)
     let shard_paths = discover_shards(model_dir, "model")
@@ -1299,7 +1302,47 @@ pub fn load_hf_model_full(
         }
     }
 
-    eprintln!("  All weights loaded (FFN + Attention) ✓");
+    // Load embedding table for the Embedding node (if present in graph)
+    // This enables LogUp proof of token→embedding lookup
+    let embed_node_id = graph.nodes.iter()
+        .find(|n| matches!(&n.op, GraphOp::Embedding { .. }))
+        .map(|n| n.id);
+
+    if let Some(embed_id) = embed_node_id {
+        eprintln!("  Loading embedding table for LogUp proof...");
+        // Load the full embedding table (vocab_size × hidden_size)
+        for sp in &shard_paths {
+            let file = std::fs::File::open(sp)
+                .map_err(|e| OnnxError::IoError(e.to_string()))?;
+            let mmap = unsafe { memmap2::Mmap::map(&file) }
+                .map_err(|e| OnnxError::IoError(e.to_string()))?;
+            let tensors = safetensors::SafeTensors::deserialize(&mmap)
+                .map_err(|e| OnnxError::WeightError(e.to_string()))?;
+
+            for &name in EMBED_CANDIDATES {
+                if let Ok(tensor) = tensors.tensor(name) {
+                    let shape = tensor.shape();
+                    if shape.len() == 2 {
+                        let data_f32 = tensor_to_f32(tensor.data(), tensor.dtype());
+                        let (matrix, _) = quantize_weight_matrix(
+                            &data_f32, shape[0], shape[1], QuantStrategy::Symmetric8,
+                        );
+                        weights.add_weight(embed_id, matrix);
+                        eprintln!(
+                            "  Embedding table loaded: {} ({}x{}) for node {}",
+                            name, shape[0], shape[1], embed_id,
+                        );
+                        break;
+                    }
+                }
+            }
+            if weights.get_weight(embed_id).is_some() {
+                break;
+            }
+        }
+    }
+
+    eprintln!("  All weights loaded (FFN + Attention + Embedding) ✓");
 
     let num_params: usize = weights.weights.iter().map(|(_, w)| w.rows * w.cols).sum::<usize>()
         + weights.named_weights.iter().map(|(_, _, w)| w.rows * w.cols).sum::<usize>();
