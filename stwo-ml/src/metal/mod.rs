@@ -41,5 +41,6 @@
 pub mod device;
 pub mod dispatch;
 pub mod matmul;
+pub mod sumcheck;
 
 pub use dispatch::matmul_m31_auto;
