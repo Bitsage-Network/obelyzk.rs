@@ -77,6 +77,9 @@ pub mod audit;
 #[cfg(feature = "cuda-runtime")]
 pub mod gpu_sumcheck;
 
+#[cfg(feature = "metal")]
+pub mod metal;
+
 #[cfg(feature = "multi-gpu")]
 pub mod multi_gpu;
 
