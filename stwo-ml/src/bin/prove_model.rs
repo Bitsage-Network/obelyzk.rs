@@ -4574,6 +4574,72 @@ fn run_capture_command(cmd: &CaptureCmd) {
 
         let t_conv_start = Instant::now();
 
+        // ── Batched token proving ────────────────────────────────────
+        // Collect ALL response tokens from ALL turns into one batch.
+        // This enables proving ALL tokens in ONE forward pass via GKR,
+        // where cost scales as log(N) instead of N.
+        let all_response_tokens: Vec<u32> = conv.turns.iter()
+            .flat_map(|t| t.response.tokens.iter().copied())
+            .collect();
+
+        if !all_response_tokens.is_empty() {
+            let t_batch = Instant::now();
+            eprintln!(
+                "\n  Batched token proving: {} response tokens across {} turns",
+                all_response_tokens.len(), conv.turns.len(),
+            );
+
+            match stwo_ml::compiler::hf_loader::load_embedding_batch(
+                model_dir, input_cols, &all_response_tokens,
+            ) {
+                Ok(batch_embedding) => {
+                    // Run ONE batched forward pass for all tokens
+                    match execute_forward_pass(graph, &batch_embedding, weights) {
+                        Ok(batch_output) => {
+                            let batch_ms = t_batch.elapsed().as_millis() as u64;
+                            eprintln!(
+                                "  Batched forward pass: {}x{} → {}x{} in {}ms ({} tokens)",
+                                batch_embedding.rows, batch_embedding.cols,
+                                batch_output.rows, batch_output.cols,
+                                batch_ms, all_response_tokens.len(),
+                            );
+
+                            // Record the batched inference as an additional log entry
+                            let now_ns = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos() as u64;
+
+                            let batch_job = CaptureJob {
+                                input_tokens: all_response_tokens.clone(),
+                                output_tokens: vec![],
+                                input_m31: batch_embedding,
+                                output_m31: batch_output,
+                                timestamp_ns: now_ns,
+                                latency_ms: batch_ms,
+                                gpu_device: "cpu".to_string(),
+                                tee_report_hash: "0x0".to_string(),
+                                task_category: Some("batched_tokens".to_string()),
+                                input_preview: Some(format!(
+                                    "[batch: {} tokens from {} turns]",
+                                    all_response_tokens.len(), conv.turns.len(),
+                                )),
+                                output_preview: Some(format!(
+                                    "batched forward pass ({}x{})",
+                                    all_response_tokens.len(), input_cols,
+                                )),
+                            };
+
+                            hook.record(batch_job);
+                        }
+                        Err(e) => eprintln!("  Batched forward pass failed: {e} (continuing with per-turn)"),
+                    }
+                }
+                Err(e) => eprintln!("  Batch embedding load failed: {e} (continuing with per-turn)"),
+            }
+        }
+
+        // ── Per-turn proving (original flow) ─────────────────────────
         for turn in &conv.turns {
             let t_turn = Instant::now();
 

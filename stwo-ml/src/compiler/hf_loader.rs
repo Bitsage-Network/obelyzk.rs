@@ -19,6 +19,7 @@ use crate::compiler::quantize_weights::quantize_weight_matrix;
 use crate::compiler::safetensors::{discover_shards, list_tensors_sharded, tensor_to_f32};
 use crate::components::activation::ActivationType;
 use crate::components::matmul::M31Matrix;
+use stwo::core::fields::m31::M31;
 use crate::gadgets::quantize::QuantStrategy;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1425,6 +1426,97 @@ pub fn load_embedding_row(
         "Embedding tensor not found. Searched for: {}",
         EMBED_CANDIDATES.join(", "),
     )))
+}
+
+/// Load embeddings for a batch of token IDs and stack into (N × hidden_size) matrix.
+///
+/// This is the key function for batched proving: instead of proving N separate
+/// forward passes for N tokens, we stack all embeddings into a single matrix
+/// and prove ONE batched forward pass. GKR cost scales as log(N), not N.
+pub fn load_embedding_batch(
+    model_dir: &Path,
+    hidden_size: usize,
+    token_ids: &[u32],
+) -> Result<M31Matrix, OnnxError> {
+    let n = token_ids.len();
+    if n == 0 {
+        return Err(OnnxError::WeightError("Empty token list".to_string()));
+    }
+
+    let shard_paths = discover_shards(model_dir, "model")
+        .map_err(|e| OnnxError::WeightError(format!("Cannot discover shards: {e}")))?;
+
+    for path in &shard_paths {
+        let file = std::fs::File::open(path)
+            .map_err(|e| OnnxError::IoError(format!("Cannot open {}: {e}", path.display())))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| OnnxError::IoError(format!("Cannot mmap {}: {e}", path.display())))?;
+        let tensors = safetensors::SafeTensors::deserialize(&mmap)
+            .map_err(|e| OnnxError::WeightError(format!("Cannot parse {}: {e}", path.display())))?;
+
+        for &name in EMBED_CANDIDATES {
+            if let Ok(tensor) = tensors.tensor(name) {
+                let shape = tensor.shape();
+                if shape.len() != 2 {
+                    continue;
+                }
+                let vocab_size = shape[0];
+                let embed_dim = shape[1];
+                if embed_dim != hidden_size {
+                    return Err(OnnxError::WeightError(format!(
+                        "Embedding dim mismatch: tensor has {}, config has {}",
+                        embed_dim, hidden_size,
+                    )));
+                }
+
+                let bw = dtype_byte_width(tensor.dtype());
+                let row_bytes = embed_dim * bw;
+                let raw = tensor.data();
+
+                // Build stacked (N × hidden_size) matrix
+                let mut batch = M31Matrix::new(n, hidden_size);
+
+                for (row_idx, &tid) in token_ids.iter().enumerate() {
+                    let tid = tid as usize;
+                    if tid >= vocab_size {
+                        return Err(OnnxError::WeightError(format!(
+                            "token_id {} exceeds vocab_size {}",
+                            tid, vocab_size,
+                        )));
+                    }
+
+                    let offset = tid * row_bytes;
+                    let row_slice = &raw[offset..offset + row_bytes];
+                    let row_f32 = tensor_to_f32(row_slice, tensor.dtype());
+
+                    // Quantize each element to M31
+                    for (col, &val) in row_f32.iter().enumerate() {
+                        let quantized = quantize_single_m31(val);
+                        batch.set(row_idx, col, quantized);
+                    }
+                }
+
+                eprintln!(
+                    "  Embedding batch: {} tokens from '{}' ({}x{} → {}x{})",
+                    n, name, vocab_size, embed_dim, n, hidden_size,
+                );
+                return Ok(batch);
+            }
+        }
+    }
+
+    Err(OnnxError::WeightError(format!(
+        "Embedding tensor not found. Searched for: {}",
+        EMBED_CANDIDATES.join(", "),
+    )))
+}
+
+/// Quantize a single f32 value to M31.
+fn quantize_single_m31(val: f32) -> M31 {
+    const P: u32 = (1u32 << 31) - 1; // M31 prime
+    let scale = 127.0; // symmetric 8-bit scale
+    let quantized = (val * scale).round().clamp(0.0, (P - 1) as f32);
+    M31::from(quantized as u32)
 }
 
 #[cfg(test)]
