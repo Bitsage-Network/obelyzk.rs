@@ -130,13 +130,15 @@ prove_conversation() {
     echo ""
 
     # ── Step 1: Capture ───────────────────────────────────────────
+    # Per-turn proving only (no giant batch — batch of N tokens creates N×896
+    # matrices that are too expensive for CPU sumcheck).
     echo -e "${YELLOW}[1/4]${RESET} ${WHITE}Capturing M31 forward passes (24 layers, 96 weights)${RESET}"
-    "$PROVE_BIN" capture \
+    STWO_SKIP_BATCH_TOKENS=1 "$PROVE_BIN" capture \
         --model-dir "$MODEL_DIR" \
         --log-dir "$LOG_DIR/logs" \
         --conversation "$CONV_FILE" \
         --model-name "qwen2-0.5b" \
-        2>&1 | grep -E "weight_commitment:|Batched|batch|turn|Embedding|complete|entries"
+        2>&1 | grep -E "weight_commitment:|turn|complete|entries"
 
     # ── Step 2: Audit + Prove ─────────────────────────────────────
     echo ""

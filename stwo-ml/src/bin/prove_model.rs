@@ -4609,15 +4609,20 @@ fn run_capture_command(cmd: &CaptureCmd) {
 
         let t_conv_start = Instant::now();
 
-        // ── Batched token proving ────────────────────────────────────
-        // Collect ALL response tokens from ALL turns into one batch.
-        // This enables proving ALL tokens in ONE forward pass via GKR,
-        // where cost scales as log(N) instead of N.
-        let all_response_tokens: Vec<u32> = conv.turns.iter()
-            .flat_map(|t| t.response.tokens.iter().copied())
-            .collect();
+        // ── Batched token proving (optional) ─────────────────────────
+        // Collect response tokens into a batch. For large conversations this
+        // creates very large matrices (N×d_model) that are expensive to prove.
+        // Gate behind STWO_SKIP_BATCH_TOKENS=1 to disable for the demo.
+        let skip_batch = std::env::var("STWO_SKIP_BATCH_TOKENS").is_ok();
+        let all_response_tokens: Vec<u32> = if skip_batch {
+            Vec::new()
+        } else {
+            conv.turns.iter()
+                .flat_map(|t| t.response.tokens.iter().copied())
+                .collect()
+        };
 
-        if !all_response_tokens.is_empty() {
+        if !all_response_tokens.is_empty() && !skip_batch {
             let t_batch = Instant::now();
             eprintln!(
                 "\n  Batched token proving: {} response tokens across {} turns",
