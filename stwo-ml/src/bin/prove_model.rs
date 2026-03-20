@@ -448,6 +448,12 @@ struct AuditCmd {
     /// uses AggregatedOracleSumcheck mode 4), "sequential" (legacy mode 0).
     #[arg(long, default_value = "aggregated")]
     weight_binding: String,
+
+    /// Use full attention graph (Q/K/V/O + softmax + attention matmul + embedding).
+    /// Must match the --full-attention flag used in the capture step.
+    /// Without this, only linear projections are proven (4 of 7 weights per layer).
+    #[arg(long)]
+    full_attention: bool,
 }
 
 /// CLI arguments for the `retrieve` subcommand.
@@ -5028,7 +5034,20 @@ fn run_audit_command(cmd: &AuditCmd, _cli: &Cli) {
     }
 
     // ── Load model ───────────────────────────────────────────────────────
-    let onnx = if let Some(ref model_dir) = cmd.model_dir {
+    let onnx = if cmd.full_attention {
+        let model_dir = cmd.model_dir.as_ref().unwrap_or_else(|| {
+            eprintln!("Error: --full-attention requires --model-dir");
+            process::exit(1);
+        });
+        eprintln!("Loading model: {} (full attention)", model_dir.display());
+        // Determine seq_len from the inference log entries
+        let seq_len = 1; // per-turn proving uses seq_len=1
+        stwo_ml::compiler::hf_loader::load_hf_model_full(model_dir, cmd.layers, seq_len)
+            .unwrap_or_else(|e| {
+                eprintln!("Error loading full attention model: {e}");
+                process::exit(1);
+            })
+    } else if let Some(ref model_dir) = cmd.model_dir {
         eprintln!("Loading model: {} (HuggingFace)", model_dir.display());
         stwo_ml::compiler::hf_loader::load_hf_model(model_dir, cmd.layers).unwrap_or_else(|e| {
             eprintln!("Error loading model directory: {e}");

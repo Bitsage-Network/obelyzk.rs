@@ -402,6 +402,7 @@ fn run_prove_pipeline(
         .args(["capture", "--model-dir", model_dir,
                "--log-dir", &format!("{tmp_dir}/logs"),
                "--conversation", &conv_file,
+               "--full-attention",
                "--model-name", "qwen2-0.5b"])
         .env("STWO_SKIP_BATCH_TOKENS", "1")
         .stderr(Stdio::piped())
@@ -444,7 +445,7 @@ fn run_prove_pipeline(
     let t_prove = Instant::now();
     let audit = Command::new(prove_bin)
         .args(["audit", "--log-dir", &format!("{tmp_dir}/logs"),
-               "--model-dir", model_dir, "--dry-run",
+               "--model-dir", model_dir, "--full-attention", "--dry-run",
                "--output", &format!("{tmp_dir}/audit_report.json")])
         .stderr(Stdio::piped())
         .stdout(Stdio::null())

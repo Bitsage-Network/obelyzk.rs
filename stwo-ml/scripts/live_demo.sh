@@ -86,27 +86,29 @@ echo -e "${W}══════════════════════�
 echo -e "${W}  Proving $N_TURNS conversation turns${X}"
 echo -e "${W}═══════════════════════════════════════════════════${X}"
 
-# Step 1: Capture
+# Step 1: Capture (full attention: Q/K/V/O + softmax + embedding)
 echo ""
-echo -e "${Y}[1/4]${X} Capture M31 forward passes (24 layers, 96 weights)"
+echo -e "${Y}[1/4]${X} Capture M31 forward passes (full attention, all layers)"
 STWO_SKIP_BATCH_TOKENS=1 "$PROVE_BIN" capture \
     --model-dir "$MODEL_DIR" \
     --log-dir "$LOG_DIR/logs" \
     --conversation "$CONV_FILE" \
+    --full-attention \
     --model-name "qwen2-0.5b" \
-    2>&1 | grep -E "weight_commitment:|turn |complete" || true
+    2>&1 | grep -E "weight_commitment:|Weight mapping|turn |complete|Attention|Embedding" || true
 echo -e "  ${G}Done${X}"
 
-# Step 2: Audit (parallel)
+# Step 2: Audit (parallel, full attention graph to match capture)
 echo ""
-echo -e "${Y}[2/4]${X} GKR sumcheck proofs (96 matmuls × 24 layers, parallel)"
+echo -e "${Y}[2/4]${X} GKR sumcheck proofs (full attention, parallel)"
 T_AUDIT=$(date +%s)
 "$PROVE_BIN" audit \
     --log-dir "$LOG_DIR/logs" \
     --model-dir "$MODEL_DIR" \
+    --full-attention \
     --dry-run \
     --output "$LOG_DIR/audit_report.json" \
-    2>&1 | grep -E "Parallel|Completed|PASS|Weight.*0x" | head -5 || true
+    2>&1 | grep -E "Parallel|Completed|PASS|Weight.*0x|Attention" | head -5 || true
 AUDIT_TIME=$(($(date +%s) - T_AUDIT))
 echo -e "  ${G}Done (${AUDIT_TIME}s)${X}"
 
