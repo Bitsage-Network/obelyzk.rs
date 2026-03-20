@@ -19,9 +19,9 @@ use ratatui::{
 // Hierarchy through brightness, not hue variety.
 // Hashes get their own violet treatment — they're the proof.
 
-const BG:          Color = Color::Rgb(8, 8, 12);       // Near-black void
-const BG_RAISED:   Color = Color::Rgb(14, 14, 20);     // Slightly raised panels
-const BG_ACTIVE:   Color = Color::Rgb(20, 20, 28);     // Active/hover state
+const BG:          Color = Color::Reset;                // Use terminal default background
+const BG_RAISED:   Color = Color::Rgb(25, 25, 35);     // Slightly raised panels
+const BG_ACTIVE:   Color = Color::Rgb(35, 35, 50);     // Active/hover state
 
 const LIME:        Color = Color::Rgb(163, 230, 53);    // Primary signal — ObelyZK lime
 const LIME_DIM:    Color = Color::Rgb(80, 120, 20);     // Subdued lime
@@ -34,7 +34,7 @@ const VIOLET_DIM:  Color = Color::Rgb(100, 80, 160);    // Subdued violet
 const WHITE:       Color = Color::Rgb(250, 250, 250);   // Maximum contrast text
 const SILVER:      Color = Color::Rgb(161, 161, 170);   // Secondary text
 const SLATE:       Color = Color::Rgb(100, 100, 115);   // Tertiary text
-const GHOST:       Color = Color::Rgb(55, 55, 65);      // Nearly invisible — borders, gutters
+const GHOST:       Color = Color::Rgb(80, 80, 95);      // Subtle but visible — borders, gutters
 
 const RED:         Color = Color::Rgb(248, 113, 113);    // Danger — but rare
 const RED_DIM:     Color = Color::Rgb(80, 30, 30);       // Danger border
