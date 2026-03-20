@@ -255,7 +255,7 @@ fn render_gutter(frame: &mut Frame, area: Rect) {
 
 // ── Pipeline column ─────────────────────────────────────────────────
 
-fn render_pipeline(frame: &mut Frame, area: Rect, state: &DashboardState) {
+pub fn render_pipeline(frame: &mut Frame, area: Rect, state: &DashboardState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -374,7 +374,7 @@ fn render_step(
 
 // ── Crypto column ───────────────────────────────────────────────────
 
-fn render_crypto(frame: &mut Frame, area: Rect, state: &DashboardState) {
+pub fn render_crypto(frame: &mut Frame, area: Rect, state: &DashboardState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

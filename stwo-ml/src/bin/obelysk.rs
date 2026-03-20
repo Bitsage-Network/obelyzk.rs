@@ -645,8 +645,8 @@ fn render_app(frame: &mut ratatui::Frame, state: &AppState) {
         .split(main_layout[1]);
 
     render_chat_messages(frame, body_cols[0], state);
-    render_pipeline_section(frame, body_cols[1], &ds);
-    render_crypto_section(frame, body_cols[2], &ds);
+    dashboard::render_pipeline(frame, body_cols[1], &ds);
+    dashboard::render_crypto(frame, body_cols[2], &ds);
 
     // Input field — full width, always visible
     render_input(frame, main_layout[2], state);
@@ -721,18 +721,6 @@ fn render_chat_messages(frame: &mut ratatui::Frame, area: ratatui::layout::Rect,
     let visible_lines: Vec<Line> = lines.into_iter().skip(offset).collect();
 
     frame.render_widget(Paragraph::new(visible_lines).block(block).wrap(Wrap { trim: false }), area);
-}
-
-#[cfg(feature = "tui")]
-fn render_pipeline_section(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, ds: &stwo_ml::tui::dashboard::DashboardState) {
-    use stwo_ml::tui::dashboard;
-    // Render pipeline column from the dashboard
-    dashboard::render(frame, ds);
-}
-
-#[cfg(feature = "tui")]
-fn render_crypto_section(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, ds: &stwo_ml::tui::dashboard::DashboardState) {
-    // Crypto is part of the dashboard render — handled by render_pipeline_section
 }
 
 #[cfg(feature = "tui")]
