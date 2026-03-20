@@ -81,6 +81,7 @@ pub struct DashboardState {
     pub contract: String,
     pub network: String,
     pub verification_count: Option<u64>,
+    pub tx_hash: Option<String>,
     pub tamper_io: Option<bool>,
     pub tamper_weight: Option<bool>,
     pub tamper_output: Option<bool>,
@@ -115,6 +116,7 @@ impl Default for DashboardState {
             contract: "0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005".into(),
             network: "Starknet Sepolia".into(),
             verification_count: None,
+            tx_hash: Some("0x2859e0605bd41bed34f65240e2e243cbfeb6c81f4dc60d7d431034f23fd2308".into()),
             tamper_io: None, tamper_weight: None, tamper_output: None,
             turns: Vec::new(), logs: Vec::new(),
         }
@@ -389,7 +391,7 @@ pub fn render_crypto(frame: &mut Frame, area: Rect, state: &DashboardState) {
             Constraint::Length(1),   // Spacer
             Constraint::Length(1),   // On-chain header
             Constraint::Length(1),   // Spacer
-            Constraint::Length(8),   // On-chain details (expanded)
+            Constraint::Length(12),  // On-chain details (with TX hash)
             Constraint::Length(1),   // Spacer
             Constraint::Length(1),   // Tamper header
             Constraint::Min(4),     // Tamper results
@@ -420,7 +422,7 @@ pub fn render_crypto(frame: &mut Frame, area: Rect, state: &DashboardState) {
 
     // Show full contract address across two lines
     let contract_mid = state.contract.len() / 2;
-    let onchain = vec![
+    let mut onchain = vec![
         Line::from(vec![
             Span::styled(" verifier ", Style::default().fg(GHOST)),
         ]),
@@ -446,6 +448,18 @@ pub fn render_crypto(frame: &mut Frame, area: Rect, state: &DashboardState) {
             Span::styled(" explorer ", Style::default().fg(GHOST)),
             Span::styled("sepolia.voyager.online", Style::default().fg(VIOLET)),
         ]),
+    ];
+
+    if let Some(ref tx) = state.tx_hash {
+        let tx_mid = tx.len() / 2;
+        onchain.push(Line::from(Span::styled(" tx hash  ", Style::default().fg(GHOST))));
+        onchain.push(Line::from(Span::styled(
+            format!("  {}", &tx[..tx_mid.min(tx.len())]), Style::default().fg(EMERALD))));
+        onchain.push(Line::from(Span::styled(
+            format!("  {}", &tx[tx_mid.min(tx.len())..]), Style::default().fg(EMERALD))));
+    }
+
+    let _: Vec<Line> = vec![
     ];
     frame.render_widget(Paragraph::new(onchain), layout[8]);
 
