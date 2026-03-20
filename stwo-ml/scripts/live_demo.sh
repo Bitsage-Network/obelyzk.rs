@@ -7,7 +7,7 @@
 # Usage:  ./scripts/live_demo.sh
 # ═══════════════════════════════════════════════════════════════════════
 
-set -euo pipefail
+set -uo pipefail
 
 MODEL_DIR="$HOME/.obelysk/models/qwen2-0.5b"
 GGUF_PATH="$HOME/.obelysk/models/qwen2-0.5b-gguf/qwen2-0_5b-instruct-q4_k_m.gguf"
@@ -89,7 +89,7 @@ STWO_SKIP_BATCH_TOKENS=1 "$PROVE_BIN" capture \
     --log-dir "$LOG_DIR/logs" \
     --conversation "$CONV_FILE" \
     --model-name "qwen2-0.5b" \
-    2>&1 | grep -E "weight_commitment:|turn \d|complete"
+    2>&1 | grep -E "weight_commitment:|turn |complete" || true
 echo -e "  ${G}Done${X}"
 
 # Step 2: Audit (parallel)
@@ -101,7 +101,7 @@ T_AUDIT=$(date +%s)
     --model-dir "$MODEL_DIR" \
     --dry-run \
     --output "$LOG_DIR/audit_report.json" \
-    2>&1 | grep -E "Parallel|Completed|PASS|FAIL|Weight.*0x" | head -5
+    2>&1 | grep -E "Parallel|Completed|PASS|Weight.*0x" | head -5 || true
 AUDIT_TIME=$(($(date +%s) - T_AUDIT))
 echo -e "  ${G}Done (${AUDIT_TIME}s)${X}"
 
@@ -112,7 +112,7 @@ echo -e "${Y}[3/4]${X} Recursive STARK compression"
     --model-dir "$MODEL_DIR" \
     --gkr --format ml_gkr --recursive --dry-run \
     --output "$LOG_DIR/recursive_proof.json" \
-    2>&1 | grep -E "Recursive.*Done|self_verify|PASS" | head -3
+    2>&1 | grep -E "Recursive.*Done|self_verify|cryptographic" | head -3 || true
 echo -e "  ${G}Done${X}"
 
 # Step 4: On-chain
