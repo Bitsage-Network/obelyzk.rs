@@ -403,7 +403,7 @@ fn run_prove_pipeline(
                "--log-dir", &format!("{tmp_dir}/logs"),
                "--conversation", &conv_file,
                "--model-name", "qwen2-0.5b",
-               "--skip-commitment"])
+               "--model-name", "qwen2-0.5b"])
         .env("STWO_SKIP_BATCH_TOKENS", "1")
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
@@ -547,7 +547,7 @@ fn run_prove_pipeline(
         s.pipeline_status[3].done = true;
         s.mode = Mode::Complete;
         s.logs.push("Verification complete ✓".into());
-        s.messages.push(("system".into(), "All proofs verified. Every computation is cryptographically proven.".into()));
+        s.messages.push(("system".into(), "All proofs verified ✓".into()));
     }
 }
 

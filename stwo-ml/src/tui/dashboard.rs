@@ -28,16 +28,16 @@ const LIME_DIM:    Color = Color::Rgb(80, 120, 20);     // Subdued lime
 const LIME_GLOW:   Color = Color::Rgb(190, 242, 100);   // Bright lime for emphasis
 
 const EMERALD:     Color = Color::Rgb(52, 211, 153);    // Secondary — verified/success
-const VIOLET:      Color = Color::Rgb(167, 139, 250);   // Tertiary — hashes/crypto
-const VIOLET_DIM:  Color = Color::Rgb(100, 80, 160);    // Subdued violet
+const VIOLET:      Color = Color::Rgb(130, 200, 160);   // Muted teal — hashes/crypto
+const VIOLET_DIM:  Color = Color::Rgb(80, 140, 110);    // Subdued teal
 
 const WHITE:       Color = Color::Rgb(250, 250, 250);   // Maximum contrast text
 const SILVER:      Color = Color::Rgb(161, 161, 170);   // Secondary text
 const SLATE:       Color = Color::Rgb(100, 100, 115);   // Tertiary text
 const GHOST:       Color = Color::Rgb(80, 80, 95);      // Subtle but visible — borders, gutters
 
-const RED:         Color = Color::Rgb(248, 113, 113);    // Danger — but rare
-const RED_DIM:     Color = Color::Rgb(80, 30, 30);       // Danger border
+const RED:         Color = Color::Rgb(220, 160, 80);     // Warm amber for integrity
+const RED_DIM:     Color = Color::Rgb(100, 70, 30);      // Subdued amber
 
 // ── Box-drawing characters for custom borders ───────────────────────
 const H_LINE: &str = "─";
