@@ -438,8 +438,8 @@ fn run_prove_pipeline(
     {
         let mut s = state.lock().unwrap();
         s.pipeline_step = 1;
-        s.pipeline_status[1].progress = 0.1;
-        s.logs.push("GKR sumcheck proving...".into());
+        s.pipeline_status[1].progress = 0.01;
+        s.logs.push("GKR proving (full attention, ~2 min)…".into());
     }
 
     let t_prove = Instant::now();
@@ -456,11 +456,24 @@ fn run_prove_pipeline(
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
                 let mut s = state.lock().unwrap();
-                if line.contains("Phase 2") { s.pipeline_status[1].progress = 0.3; }
-                if line.contains("Phase 3") { s.pipeline_status[1].progress = 0.7; }
+                if line.contains("Phase 1") { s.pipeline_status[1].progress = 0.05; }
+                if line.contains("Phase 2") { s.pipeline_status[1].progress = 0.1; }
+                if line.contains("Phase 3") { s.pipeline_status[1].progress = 0.85; }
                 if line.contains("Completed") { s.pipeline_status[1].progress = 1.0; }
-                if line.contains("[CPU]") && line.contains("done") {
-                    s.pipeline_status[1].progress = (s.pipeline_status[1].progress + 0.01).min(0.95);
+                // Each matmul completion ticks progress forward
+                // Full attention has ~144 matmuls in Phase 2 (0.1 → 0.85 = 0.75 range)
+                if line.contains("done in") && (line.contains("[CPU]") || line.contains("MatMul")) {
+                    let current = s.pipeline_status[1].progress;
+                    if current < 0.85 {
+                        s.pipeline_status[1].progress = (current + 0.005).min(0.85);
+                    }
+                }
+                // Forward pass nodes
+                if line.contains("forward pass") && !line.contains("Phase") {
+                    let current = s.pipeline_status[1].progress;
+                    if current < 0.1 {
+                        s.pipeline_status[1].progress = (current + 0.001).min(0.1);
+                    }
                 }
                 s.logs.push(truncate(&line, 50));
             }
