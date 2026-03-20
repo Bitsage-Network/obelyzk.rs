@@ -79,6 +79,7 @@ fn main() {
         logs: vec!["Starting ObelyZK...".into()],
         should_quit: false,
         server_pid: None,
+        prove_started_at: None,
     }));
 
     // ── Start llama.cpp server ──────────────────────────────────────
@@ -275,6 +276,7 @@ struct AppState {
     logs: Vec<String>,
     should_quit: bool,
     server_pid: Option<u32>,
+    prove_started_at: Option<Instant>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -439,6 +441,7 @@ fn run_prove_pipeline(
         let mut s = state.lock().unwrap();
         s.pipeline_step = 1;
         s.pipeline_status[1].progress = 0.01;
+        s.prove_started_at = Some(Instant::now());
         s.logs.push("GKR proving (full attention, ~2 min)…".into());
     }
 
@@ -776,18 +779,21 @@ fn render_footer_section(frame: &mut ratatui::Frame, area: ratatui::layout::Rect
         Mode::Proving => Color::Indexed(118),
         _ => Color::Indexed(245),
     };
+    let elapsed = state.prove_started_at
+        .map(|t| t.elapsed().as_secs())
+        .unwrap_or(0);
     let status_text = match state.mode {
-        Mode::Complete => "VERIFIED ✓",
-        Mode::Proving => "PROVING...",
-        Mode::Loading => "LOADING...",
-        Mode::Chat => "READY",
+        Mode::Complete => "VERIFIED ✓".to_string(),
+        Mode::Proving => format!("PROVING  {}s elapsed", elapsed),
+        Mode::Loading => "LOADING...".to_string(),
+        Mode::Chat => "READY".to_string(),
     };
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ObelyZK ", Style::default().fg(Color::Black).bg(Color::Indexed(118)).add_modifier(Modifier::BOLD)),
             Span::raw("  "),
-            Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::styled(&status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
             Span::raw("                              "),
             Span::styled("Ctrl+C", Style::default().fg(Color::Indexed(118))),
             Span::styled(" exit", Style::default().fg(Color::Indexed(240))),
