@@ -1,25 +1,59 @@
-//! ObelyZK Proof Dashboard — terminal visualization of verifiable ML inference.
+//! ObelyZK Proof Dashboard — "Cipher Noir" aesthetic.
+//!
+//! Design: high-contrast dark field, surgical precision typography,
+//! cryptographic data rendered as classified intel. Every element
+//! communicates: this is real, this is verified, this cannot be faked.
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, Padding, Paragraph, Wrap},
     Frame,
 };
 
-// ── ObelyZK Brand Colors ────────────────────────────────────────────
-const BRAND:      Color = Color::Rgb(163, 230, 53);   // Lime green
-const BRAND_DIM:  Color = Color::Rgb(101, 163, 13);   // Dark lime
-const ACCENT:     Color = Color::Rgb(52, 211, 153);    // Emerald
-const SURFACE:    Color = Color::Rgb(18, 18, 26);      // Dark surface
-const TEXT:       Color = Color::Rgb(244, 244, 245);   // Zinc 100
-const TEXT_DIM:   Color = Color::Rgb(113, 113, 122);   // Zinc 500
-const TEXT_MUTED: Color = Color::Rgb(63, 63, 70);      // Zinc 700
-const DANGER:     Color = Color::Rgb(239, 68, 68);     // Red
-const SUCCESS:    Color = Color::Rgb(34, 197, 94);     // Green
-const WARN:       Color = Color::Rgb(250, 204, 21);    // Yellow
-const HASH_COLOR: Color = Color::Rgb(139, 92, 246);    // Violet
+// ── Palette: Cipher Noir ────────────────────────────────────────────
+//
+// Dominant: near-black background with lime signal color.
+// Hierarchy through brightness, not hue variety.
+// Hashes get their own violet treatment — they're the proof.
+
+const BG:          Color = Color::Rgb(8, 8, 12);       // Near-black void
+const BG_RAISED:   Color = Color::Rgb(14, 14, 20);     // Slightly raised panels
+const BG_ACTIVE:   Color = Color::Rgb(20, 20, 28);     // Active/hover state
+
+const LIME:        Color = Color::Rgb(163, 230, 53);    // Primary signal — ObelyZK lime
+const LIME_DIM:    Color = Color::Rgb(80, 120, 20);     // Subdued lime
+const LIME_GLOW:   Color = Color::Rgb(190, 242, 100);   // Bright lime for emphasis
+
+const EMERALD:     Color = Color::Rgb(52, 211, 153);    // Secondary — verified/success
+const VIOLET:      Color = Color::Rgb(167, 139, 250);   // Tertiary — hashes/crypto
+const VIOLET_DIM:  Color = Color::Rgb(100, 80, 160);    // Subdued violet
+
+const WHITE:       Color = Color::Rgb(250, 250, 250);   // Maximum contrast text
+const SILVER:      Color = Color::Rgb(161, 161, 170);   // Secondary text
+const SLATE:       Color = Color::Rgb(100, 100, 115);   // Tertiary text
+const GHOST:       Color = Color::Rgb(55, 55, 65);      // Nearly invisible — borders, gutters
+
+const RED:         Color = Color::Rgb(248, 113, 113);    // Danger — but rare
+const RED_DIM:     Color = Color::Rgb(80, 30, 30);       // Danger border
+
+// ── Box-drawing characters for custom borders ───────────────────────
+const H_LINE: &str = "─";
+const V_LINE: &str = "│";
+const TL: &str = "┌"; const TR: &str = "┐";
+const BL: &str = "└"; const BR: &str = "┘";
+const T_DOWN: &str = "┬"; const T_UP: &str = "┴";
+const DOT: &str = "·";
+const BLOCK_FULL: &str = "█";
+const BLOCK_MED:  &str = "▓";
+const BLOCK_LOW:  &str = "░";
+const ARROW_R: &str = "▸";
+const CHECK: &str = "✓";
+const CROSS: &str = "✗";
+const DIAMOND: &str = "◆";
+const SHIELD: &str = "⊕";
 
 /// Dashboard state.
 #[derive(Debug, Clone)]
@@ -30,42 +64,29 @@ pub struct DashboardState {
     pub num_turns: usize,
     pub tokens_in: usize,
     pub tokens_out: usize,
-
     pub step: PipelineStep,
     pub capture_progress: f64,
     pub prove_progress: f64,
     pub recursive_progress: f64,
     pub verify_progress: f64,
-
     pub capture_time: Option<f64>,
     pub prove_time: Option<f64>,
     pub recursive_time: Option<f64>,
-
     pub weight_commitment: Option<String>,
     pub io_root: Option<String>,
     pub report_hash: Option<String>,
-
     pub contract: String,
     pub network: String,
     pub verification_count: Option<u64>,
-
     pub tamper_io: Option<bool>,
     pub tamper_weight: Option<bool>,
     pub tamper_output: Option<bool>,
-
     pub turns: Vec<(String, String)>,
     pub logs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PipelineStep {
-    Idle,
-    Capture,
-    Prove,
-    Recursive,
-    Verify,
-    Complete,
-}
+pub enum PipelineStep { Idle, Capture, Prove, Recursive, Verify, Complete }
 
 impl PipelineStep {
     pub fn as_u8(&self) -> u8 {
@@ -98,338 +119,462 @@ impl Default for DashboardState {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Render
+// Main render
 // ═══════════════════════════════════════════════════════════════════════
 
 pub fn render(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
+    frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-    // Clear background
-    frame.render_widget(Block::default().style(Style::default().bg(SURFACE)), area);
-
-    let main = Layout::default()
+    let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Header
-            Constraint::Min(12),   // Body
-            Constraint::Length(3), // Footer
+            Constraint::Length(6),  // Header
+            Constraint::Length(1),  // Divider
+            Constraint::Min(10),   // Body
+            Constraint::Length(1),  // Divider
+            Constraint::Length(2),  // Footer
         ])
         .split(area);
 
-    render_header(frame, main[0], state);
-    render_body(frame, main[1], state);
-    render_footer(frame, main[2], state);
+    render_header(frame, outer[0], state);
+    render_divider(frame, outer[1], LIME_DIM);
+    render_body(frame, outer[2], state);
+    render_divider(frame, outer[3], GHOST);
+    render_footer(frame, outer[4], state);
 }
+
+fn render_divider(frame: &mut Frame, area: Rect, color: Color) {
+    let line = H_LINE.repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Span::styled(line, Style::default().fg(color))),
+        area,
+    );
+}
+
+// ── Header ──────────────────────────────────────────────────────────
 
 fn render_header(frame: &mut Frame, area: Rect, state: &DashboardState) {
+    let layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(46), Constraint::Min(20)])
+        .split(area);
+
+    // Logo — left side
     let logo = vec![
+        Line::from(Span::styled("", Style::default())),
         Line::from(vec![
-            Span::styled("  ▗▄▖ ▗▄▄▖ ▗▄▄▄▖▗▖  ▗▖ ▗▖ ▗▖▗▄▄▄▖▗▖ ▗▖", Style::default().fg(BRAND)),
+            Span::styled("  ╔═╗╔╗  ╔═╗╦  ╦ ╦╔═╗╦╔═", Style::default().fg(LIME)),
         ]),
         Line::from(vec![
-            Span::styled(" ▐▌ ▐▌▐▌ ▐▌▐▌   ▐▌  ▝▜▌▐▛▘   ▄▄▄▘▐▌▗▞▘", Style::default().fg(BRAND)),
-            Span::raw("    "),
-            Span::styled("Verifiable ML Inference", Style::default().fg(TEXT).bold()),
+            Span::styled("  ║ ║╠╩╗ ╠═ ║  ╚╦╝╔═╝╠╩╗", Style::default().fg(LIME)),
         ]),
         Line::from(vec![
-            Span::styled(" ▐▌ ▐▌▐▛▀▚▖▐▛▀▀▘▐▌   ▐▌▐▌  ▗▄▄▄▖ ▐▛▚▖", Style::default().fg(BRAND_DIM)),
-            Span::raw("    "),
-            Span::styled(&state.model_name, Style::default().fg(ACCENT)),
-            Span::styled(
-                format!(" • {} params • {} layers", state.model_params, state.model_layers),
-                Style::default().fg(TEXT_DIM),
-            ),
+            Span::styled("  ╚═╝╚═╝ ╚═╝╩═╝ ╩ ╚═╝╩ ╩", Style::default().fg(LIME_DIM)),
         ]),
         Line::from(vec![
-            Span::styled(" ▝▚▄▞▘▐▙▄▞▘▐▙▄▄▖▐▙▄▄▖▐▌▐▌  ▐▌  ▐▌▐▌ ▐▌", Style::default().fg(BRAND_DIM)),
-            Span::raw("    "),
-            Span::styled("Powered by STWO", Style::default().fg(TEXT_MUTED)),
+            Span::styled("  VERIFIABLE ML INFERENCE", Style::default().fg(SLATE)),
         ]),
     ];
 
-    let header = Paragraph::new(logo)
-        .block(Block::default().style(Style::default().bg(SURFACE)));
-    frame.render_widget(header, area);
+    frame.render_widget(
+        Paragraph::new(logo).style(Style::default().bg(BG)),
+        layout[0],
+    );
+
+    // Model info — right side
+    let is_complete = state.step == PipelineStep::Complete;
+    let status_color = if is_complete { EMERALD } else { LIME };
+    let status_text = if is_complete { "VERIFIED" } else { "PROVING" };
+
+    let info = vec![
+        Line::from(Span::styled("", Style::default())),
+        Line::from(vec![
+            Span::styled("  MODEL  ", Style::default().fg(SLATE)),
+            Span::styled(&state.model_name, Style::default().fg(WHITE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ARCH   ", Style::default().fg(SLATE)),
+            Span::styled(
+                format!("{} params {} layers", state.model_params, state.model_layers),
+                Style::default().fg(SILVER),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  STATUS ", Style::default().fg(SLATE)),
+            Span::styled(
+                format!("{DIAMOND} {status_text}"),
+                Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {} turns  {}→{} tokens",
+                    state.num_turns, state.tokens_in, state.tokens_out),
+                Style::default().fg(SLATE),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  ENGINE ", Style::default().fg(SLATE)),
+            Span::styled("STWO ", Style::default().fg(LIME_DIM)),
+            Span::styled("GKR sumcheck + Poseidon252 STARK", Style::default().fg(GHOST)),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(info).style(Style::default().bg(BG)),
+        layout[1],
+    );
 }
+
+// ── Body ────────────────────────────────────────────────────────────
 
 fn render_body(frame: &mut Frame, area: Rect, state: &DashboardState) {
-    let body = Layout::default()
+    let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(38),  // Pipeline
+            Constraint::Length(1),        // Gutter
+            Constraint::Percentage(32),  // Crypto
+            Constraint::Length(1),        // Gutter
+            Constraint::Percentage(30),  // Conversation
+        ])
         .split(area);
 
-    render_left(frame, body[0], state);
-    render_right(frame, body[1], state);
+    render_pipeline(frame, cols[0], state);
+    render_gutter(frame, cols[1]);
+    render_crypto(frame, cols[2], state);
+    render_gutter(frame, cols[3]);
+    render_conversation(frame, cols[4], state);
 }
 
-fn render_left(frame: &mut Frame, area: Rect, state: &DashboardState) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(14), // Pipeline
-            Constraint::Min(4),    // Logs
-        ])
-        .split(area);
-
-    // Pipeline block
-    let pipeline_block = Block::default()
-        .title(Span::styled(" Proving Pipeline ", Style::default().fg(BRAND).bold()))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(BRAND_DIM))
-        .style(Style::default().bg(SURFACE))
-        .padding(Padding::new(1, 1, 1, 0));
-
-    let pipeline_inner = pipeline_block.inner(layout[0]);
-    frame.render_widget(pipeline_block, layout[0]);
-
-    let steps = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(1), // spacer
-            Constraint::Min(1),   // coverage
-        ])
-        .split(pipeline_inner);
-
-    render_pipeline_step(frame, steps[0], "1", "Capture",
-        "M31 forward passes (24 layers)", state.capture_progress,
-        state.capture_time, state.step.as_u8() >= PipelineStep::Capture.as_u8());
-
-    render_pipeline_step(frame, steps[1], "2", "GKR Prove",
-        "96 matmul sumchecks", state.prove_progress,
-        state.prove_time, state.step.as_u8() >= PipelineStep::Prove.as_u8());
-
-    render_pipeline_step(frame, steps[2], "3", "Recursive",
-        "STARK compression → 1 TX", state.recursive_progress,
-        state.recursive_time, state.step.as_u8() >= PipelineStep::Recursive.as_u8());
-
-    render_pipeline_step(frame, steps[3], "4", "Verify",
-        "Self-verify + on-chain", state.verify_progress,
-        None, state.step.as_u8() >= PipelineStep::Verify.as_u8());
-
-    // Coverage summary
-    let coverage = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("  96", Style::default().fg(BRAND).bold()),
-            Span::styled(" MatMul  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("24", Style::default().fg(BRAND).bold()),
-            Span::styled(" SiLU  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("49", Style::default().fg(BRAND).bold()),
-            Span::styled(" RMSNorm", Style::default().fg(TEXT_DIM)),
-        ]),
-    ]);
-    frame.render_widget(coverage, steps[5]);
-
-    // Logs
-    let log_items: Vec<ListItem> = state.logs.iter().rev().take(6).map(|l| {
-        ListItem::new(Span::styled(l.clone(), Style::default().fg(TEXT_MUTED)))
+fn render_gutter(frame: &mut Frame, area: Rect) {
+    let lines: Vec<Line> = (0..area.height).map(|_| {
+        Line::from(Span::styled(V_LINE, Style::default().fg(GHOST)))
     }).collect();
-    let logs = List::new(log_items)
-        .block(Block::default()
-            .title(Span::styled(" Log ", Style::default().fg(TEXT_DIM)))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(TEXT_MUTED))
-            .style(Style::default().bg(SURFACE)));
-    frame.render_widget(logs, layout[1]);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_pipeline_step(
-    frame: &mut Frame, area: Rect,
-    num: &str, name: &str, desc: &str,
-    progress: f64, time: Option<f64>, active: bool,
-) {
-    let (color, icon) = if progress >= 1.0 {
-        (SUCCESS, "✓")
-    } else if active && progress > 0.0 {
-        (BRAND, "▸")
-    } else {
-        (TEXT_MUTED, "·")
-    };
+// ── Pipeline column ─────────────────────────────────────────────────
 
-    let time_str = time.map(|t| format!(" {:.1}s", t)).unwrap_or_default();
-
-    let label = Line::from(vec![
-        Span::styled(format!(" {icon} "), Style::default().fg(color)),
-        Span::styled(format!("[{num}] "), Style::default().fg(TEXT_DIM)),
-        Span::styled(name, Style::default().fg(TEXT).bold()),
-        Span::styled(format!("  {desc}"), Style::default().fg(TEXT_DIM)),
-        Span::styled(time_str, Style::default().fg(ACCENT)),
-    ]);
-
-    frame.render_widget(Paragraph::new(label), area);
-
-    // Progress bar on second line
-    if area.height > 1 {
-        let bar_area = Rect { y: area.y + 1, height: 1, ..area };
-        let gauge = Gauge::default()
-            .gauge_style(Style::default().fg(color).bg(Color::Rgb(30, 30, 40)))
-            .ratio(progress.clamp(0.0, 1.0))
-            .label("");
-        frame.render_widget(gauge, bar_area);
-    }
-}
-
-fn render_right(frame: &mut Frame, area: Rect, state: &DashboardState) {
+fn render_pipeline(frame: &mut Frame, area: Rect, state: &DashboardState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(10), // Commitments + on-chain
-            Constraint::Length(7),  // Tamper
-            Constraint::Min(4),    // Conversation
+            Constraint::Length(1),  // Section header
+            Constraint::Length(1),  // Spacer
+            Constraint::Length(3),  // Step 1
+            Constraint::Length(3),  // Step 2
+            Constraint::Length(3),  // Step 3
+            Constraint::Length(3),  // Step 4
+            Constraint::Length(1),  // Spacer
+            Constraint::Min(2),    // Coverage
         ])
         .split(area);
 
-    // Commitments
-    let mut lines = vec![
-        hash_line("Weight", &state.weight_commitment),
-        hash_line("IO Root", &state.io_root),
-        hash_line("Report", &state.report_hash),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("  Verifier  ", Style::default().fg(TEXT_DIM)),
-            Span::styled(
-                truncate_hash(&state.contract, 24),
-                Style::default().fg(ACCENT),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Network   ", Style::default().fg(TEXT_DIM)),
-            Span::styled(&state.network, Style::default().fg(TEXT)),
-        ]),
-    ];
+    // Section header
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  PROOF PIPELINE", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
+        ])),
+        layout[0],
+    );
 
-    if let Some(count) = state.verification_count {
-        lines.push(Line::from(vec![
-            Span::styled("  On-chain  ", Style::default().fg(TEXT_DIM)),
-            Span::styled(
-                format!("{count} verified"),
-                Style::default().fg(SUCCESS).bold(),
-            ),
-        ]));
-    }
+    render_step(frame, layout[2], 1, "CAPTURE",
+        "M31 forward pass · 24 layers",
+        state.capture_progress, state.capture_time,
+        state.step.as_u8() >= PipelineStep::Capture.as_u8());
 
-    let commits = Paragraph::new(lines)
-        .block(Block::default()
-            .title(Span::styled(" Cryptographic Commitments ", Style::default().fg(HASH_COLOR).bold()))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(HASH_COLOR))
-            .style(Style::default().bg(SURFACE))
-            .padding(Padding::horizontal(0)));
-    frame.render_widget(commits, layout[0]);
+    render_step(frame, layout[3], 2, "GKR PROVE",
+        "96 matmul sumchecks",
+        state.prove_progress, state.prove_time,
+        state.step.as_u8() >= PipelineStep::Prove.as_u8());
 
-    // Tamper detection
-    let tamper_lines = vec![
-        tamper_line("IO commitment", state.tamper_io),
-        tamper_line("Weight commitment", state.tamper_weight),
-        tamper_line("Inference output", state.tamper_output),
+    render_step(frame, layout[4], 3, "RECURSIVE",
+        "STARK compress → 1 TX",
+        state.recursive_progress, state.recursive_time,
+        state.step.as_u8() >= PipelineStep::Recursive.as_u8());
+
+    render_step(frame, layout[5], 4, "VERIFY",
+        "Self-verify + on-chain",
+        state.verify_progress, None,
+        state.step.as_u8() >= PipelineStep::Verify.as_u8());
+
+    // Coverage
+    let coverage = vec![
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled("56 adversarial tests", Style::default().fg(SUCCESS)),
-            Span::styled(" in test suite", Style::default().fg(TEXT_DIM)),
+            Span::styled("96", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
+            Span::styled(" matmul ", Style::default().fg(SLATE)),
+            Span::styled("24", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
+            Span::styled(" silu ", Style::default().fg(SLATE)),
+            Span::styled("49", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
+            Span::styled(" rmsnorm", Style::default().fg(SLATE)),
+        ]),
+        Line::from(vec![
+            Span::styled("  per turn · poseidon merkle · io binding", Style::default().fg(GHOST)),
         ]),
     ];
+    frame.render_widget(Paragraph::new(coverage), layout[7]);
+}
 
-    let tamper = Paragraph::new(tamper_lines)
-        .block(Block::default()
-            .title(Span::styled(" Tamper Detection ", Style::default().fg(DANGER).bold()))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(127, 29, 29)))
-            .style(Style::default().bg(SURFACE))
-            .padding(Padding::new(1, 1, 1, 0)));
-    frame.render_widget(tamper, layout[1]);
+fn render_step(
+    frame: &mut Frame, area: Rect,
+    num: u8, name: &str, desc: &str,
+    progress: f64, time: Option<f64>, active: bool,
+) {
+    let done = progress >= 1.0;
+    let running = active && !done && progress > 0.0;
 
-    // Conversation
-    let mut conv_lines: Vec<Line> = Vec::new();
-    for (user, ai) in state.turns.iter().rev().take(4) {
-        conv_lines.push(Line::from(vec![
-            Span::styled("  You ", Style::default().fg(BRAND).bold()),
-            Span::styled(truncate_str(user, 40), Style::default().fg(TEXT)),
+    let (icon_color, icon) = if done {
+        (EMERALD, CHECK)
+    } else if running {
+        (LIME, ARROW_R)
+    } else if active {
+        (LIME_DIM, ARROW_R)
+    } else {
+        (GHOST, DOT)
+    };
+
+    let name_color = if done { EMERALD } else if active { WHITE } else { SLATE };
+    let time_str = time.map(|t| format!(" {:.1}s", t)).unwrap_or_default();
+
+    // Line 1: icon + number + name + desc + time
+    let line1 = Line::from(vec![
+        Span::styled(format!("  {icon} "), Style::default().fg(icon_color)),
+        Span::styled(format!("{num}"), Style::default().fg(if active { LIME } else { GHOST })),
+        Span::styled(" ", Style::default()),
+        Span::styled(name, Style::default().fg(name_color).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {desc}"), Style::default().fg(GHOST)),
+    ]);
+
+    // Line 2: custom progress bar
+    let bar_width = (area.width as usize).saturating_sub(6);
+    let filled = ((progress * bar_width as f64) as usize).min(bar_width);
+    let empty = bar_width.saturating_sub(filled);
+
+    let bar_color = if done { EMERALD } else if active { LIME } else { GHOST };
+    let bar_bg = if active { BG_ACTIVE } else { BG };
+
+    let bar_str = format!(
+        "    {}{}{}",
+        BLOCK_FULL.repeat(filled),
+        if !done && active && filled < bar_width { BLOCK_LOW } else { "" },
+        " ".repeat(empty.saturating_sub(if !done && active && filled < bar_width { 1 } else { 0 })),
+    );
+
+    let line2 = Line::from(vec![
+        Span::styled(bar_str, Style::default().fg(bar_color)),
+        Span::styled(time_str, Style::default().fg(EMERALD)),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(vec![line1, line2]).style(Style::default().bg(BG)),
+        area,
+    );
+}
+
+// ── Crypto column ───────────────────────────────────────────────────
+
+fn render_crypto(frame: &mut Frame, area: Rect, state: &DashboardState) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),   // Header
+            Constraint::Length(1),   // Spacer
+            Constraint::Length(2),   // Weight
+            Constraint::Length(2),   // IO
+            Constraint::Length(2),   // Report
+            Constraint::Length(1),   // Spacer
+            Constraint::Length(1),   // On-chain header
+            Constraint::Length(1),   // Spacer
+            Constraint::Length(4),   // On-chain details
+            Constraint::Length(1),   // Spacer
+            Constraint::Length(1),   // Tamper header
+            Constraint::Min(4),     // Tamper results
+        ])
+        .split(area);
+
+    // Section header
+    frame.render_widget(
+        Paragraph::new(Span::styled(" COMMITMENTS", Style::default().fg(VIOLET).add_modifier(Modifier::BOLD))),
+        layout[0],
+    );
+
+    render_hash_field(frame, layout[2], "WEIGHT", &state.weight_commitment);
+    render_hash_field(frame, layout[3], "IO", &state.io_root);
+    render_hash_field(frame, layout[4], "REPORT", &state.report_hash);
+
+    // On-chain header
+    frame.render_widget(
+        Paragraph::new(Span::styled(" ON-CHAIN", Style::default().fg(EMERALD).add_modifier(Modifier::BOLD))),
+        layout[6],
+    );
+
+    // On-chain details
+    let verified_str = state.verification_count
+        .map(|c| format!("{c} verified"))
+        .unwrap_or_else(|| "pending".into());
+    let verified_color = if state.verification_count.is_some() { EMERALD } else { SLATE };
+
+    let onchain = vec![
+        Line::from(vec![
+            Span::styled(" contract ", Style::default().fg(GHOST)),
+            Span::styled(truncate_hash(&state.contract, 22), Style::default().fg(EMERALD)),
+        ]),
+        Line::from(vec![
+            Span::styled(" network  ", Style::default().fg(GHOST)),
+            Span::styled(&state.network, Style::default().fg(SILVER)),
+        ]),
+        Line::from(vec![
+            Span::styled(" proofs   ", Style::default().fg(GHOST)),
+            Span::styled(&verified_str, Style::default().fg(verified_color).add_modifier(Modifier::BOLD)),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(onchain), layout[8]);
+
+    // Tamper header
+    frame.render_widget(
+        Paragraph::new(Span::styled(" INTEGRITY", Style::default().fg(RED).add_modifier(Modifier::BOLD))),
+        layout[10],
+    );
+
+    // Tamper results
+    let tamper = vec![
+        tamper_line("io commitment", state.tamper_io),
+        tamper_line("weight commitment", state.tamper_weight),
+        tamper_line("inference output", state.tamper_output),
+        Line::from(vec![
+            Span::styled(format!(" {SHIELD} "), Style::default().fg(EMERALD)),
+            Span::styled("56 adversarial tests", Style::default().fg(EMERALD)),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(tamper), layout[11]);
+}
+
+fn render_hash_field(frame: &mut Frame, area: Rect, label: &str, value: &Option<String>) {
+    let placeholder = "··················································";
+    let hash = value.as_deref().unwrap_or(placeholder);
+    let display = if hash.len() > 30 {
+        format!("{}…{}", &hash[..16], &hash[hash.len()-10..])
+    } else {
+        hash.to_string()
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(format!(" {label:<7}"), Style::default().fg(SLATE)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!(" {display}"), Style::default().fg(VIOLET)),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+// ── Conversation column ─────────────────────────────────────────────
+
+fn render_conversation(frame: &mut Frame, area: Rect, state: &DashboardState) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),  // Header
+            Constraint::Length(1),  // Spacer
+            Constraint::Min(4),    // Turns
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(" INFERENCE LOG", Style::default().fg(LIME).add_modifier(Modifier::BOLD))),
+        layout[0],
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, (user, ai)) in state.turns.iter().enumerate() {
+        let idx = format!("#{:<2}", i);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {idx}"), Style::default().fg(GHOST)),
+            Span::styled(" YOU ", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
+            Span::styled(truncate_str(user, 24), Style::default().fg(WHITE)),
         ]));
-        conv_lines.push(Line::from(vec![
-            Span::styled("  AI  ", Style::default().fg(ACCENT).bold()),
-            Span::styled(truncate_str(ai, 40), Style::default().fg(TEXT_DIM)),
+        lines.push(Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled(" AI  ", Style::default().fg(EMERALD)),
+            Span::styled(truncate_str(ai, 24), Style::default().fg(SLATE)),
         ]));
+        lines.push(Line::from(Span::styled("", Style::default())));
     }
 
-    let conv = Paragraph::new(conv_lines)
-        .block(Block::default()
-            .title(Span::styled(" Conversation ", Style::default().fg(BRAND).bold()))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(BRAND_DIM))
-            .style(Style::default().bg(SURFACE))
-            .padding(Padding::horizontal(0)));
-    frame.render_widget(conv, layout[2]);
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(" awaiting input…", Style::default().fg(GHOST))));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), layout[2]);
 }
+
+// ── Footer ──────────────────────────────────────────────────────────
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &DashboardState) {
     let status = match state.step {
-        PipelineStep::Idle => ("READY", TEXT_DIM),
-        PipelineStep::Capture => ("CAPTURING", WARN),
-        PipelineStep::Prove => ("PROVING", BRAND),
-        PipelineStep::Recursive => ("COMPRESSING", ACCENT),
-        PipelineStep::Verify => ("VERIFYING", HASH_COLOR),
-        PipelineStep::Complete => ("VERIFIED ✓", SUCCESS),
+        PipelineStep::Idle =>      ("IDLE",       GHOST),
+        PipelineStep::Capture =>   ("CAPTURING",  LIME),
+        PipelineStep::Prove =>     ("PROVING",    LIME),
+        PipelineStep::Recursive => ("COMPRESS",   EMERALD),
+        PipelineStep::Verify =>    ("VERIFYING",  VIOLET),
+        PipelineStep::Complete =>  ("VERIFIED",   EMERALD),
     };
 
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(" ObelyZK ", Style::default().fg(Color::Black).bg(BRAND).bold()),
-        Span::raw("  "),
-        Span::styled(status.0, Style::default().fg(status.1).bold()),
-        Span::raw("  "),
+    let footer = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(" ObelyZK ", Style::default().fg(BG).bg(LIME).add_modifier(Modifier::BOLD)),
+        Span::styled("  ", Style::default()),
+        Span::styled(status.0, Style::default().fg(status.1).add_modifier(Modifier::BOLD)),
+        Span::styled("  ", Style::default()),
         Span::styled(
-            format!("{} turns  {}→{}",
-                state.num_turns, state.tokens_in, state.tokens_out),
-            Style::default().fg(TEXT_DIM),
+            format!("{}in {}out  ", state.tokens_in, state.tokens_out),
+            Style::default().fg(SLATE),
         ),
-        Span::raw("  "),
-        Span::styled("q to exit", Style::default().fg(TEXT_MUTED)),
-    ]))
-    .block(Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(TEXT_MUTED))
-        .style(Style::default().bg(SURFACE)));
-    frame.render_widget(footer, area);
+        Span::styled(
+            format!("{} turns", state.num_turns),
+            Style::default().fg(SLATE),
+        ),
+        Span::styled("                    ", Style::default()),
+        Span::styled("q", Style::default().fg(LIME)),
+        Span::styled(" exit", Style::default().fg(GHOST)),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(footer).style(Style::default().bg(BG)),
+        area,
+    );
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn hash_line<'a>(label: &'a str, value: &Option<String>) -> Line<'a> {
-    let hash_str = value.as_deref().unwrap_or("pending...");
-    Line::from(vec![
-        Span::styled(format!("  {label:<8}"), Style::default().fg(TEXT_DIM)),
-        Span::styled(truncate_hash(hash_str, 32), Style::default().fg(HASH_COLOR)),
-    ])
-}
-
 fn tamper_line(name: &str, result: Option<bool>) -> Line<'static> {
     match result {
         Some(true) => Line::from(vec![
-            Span::styled("  ✓ ", Style::default().fg(SUCCESS)),
-            Span::styled(name.to_string(), Style::default().fg(TEXT)),
-            Span::styled(" → ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("REJECTED", Style::default().fg(SUCCESS).bold()),
+            Span::styled(format!(" {CHECK} "), Style::default().fg(EMERALD)),
+            Span::styled(name.to_string(), Style::default().fg(SILVER)),
+            Span::styled(" REJECTED", Style::default().fg(EMERALD).add_modifier(Modifier::BOLD)),
         ]),
         Some(false) => Line::from(vec![
-            Span::styled("  ✗ ", Style::default().fg(DANGER)),
-            Span::styled(name.to_string(), Style::default().fg(TEXT)),
-            Span::styled(" → NOT DETECTED", Style::default().fg(DANGER).bold()),
+            Span::styled(format!(" {CROSS} "), Style::default().fg(RED)),
+            Span::styled(name.to_string(), Style::default().fg(SILVER)),
+            Span::styled(" LEAKED", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
         ]),
         None => Line::from(vec![
-            Span::styled("  · ", Style::default().fg(TEXT_MUTED)),
-            Span::styled(name.to_string(), Style::default().fg(TEXT_MUTED)),
+            Span::styled(format!(" {DOT} "), Style::default().fg(GHOST)),
+            Span::styled(name.to_string(), Style::default().fg(GHOST)),
         ]),
     }
 }
 
 fn truncate_hash(s: &str, max: usize) -> String {
     if s.len() <= max { return s.to_string(); }
-    format!("{}...{}", &s[..max/2], &s[s.len()-6..])
+    format!("{}…{}", &s[..max/2], &s[s.len()-6..])
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
     if s.chars().count() <= max { return s.to_string(); }
-    s.chars().take(max - 1).collect::<String>() + "…"
+    s.chars().take(max).collect::<String>() + "…"
 }
