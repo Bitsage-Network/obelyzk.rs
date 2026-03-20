@@ -80,6 +80,9 @@ pub mod gpu_sumcheck;
 #[cfg(feature = "metal")]
 pub mod metal;
 
+#[cfg(feature = "tui")]
+pub mod tui;
+
 #[cfg(feature = "multi-gpu")]
 pub mod multi_gpu;
 
