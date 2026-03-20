@@ -620,22 +620,182 @@ fn render_app(frame: &mut ratatui::Frame, state: &AppState) {
 
     let area = frame.area();
 
-    // Two-column layout: Chat (left) | Dashboard (right)
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+    // Full vertical layout: Header | Body | Input
+    let main_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),   // Header (logo + model info)
+            Constraint::Min(10),     // Body (chat + pipeline + crypto)
+            Constraint::Length(3),   // Input field
+            Constraint::Length(1),   // Footer
+        ])
         .split(area);
 
-    // Left: Chat
-    render_chat(frame, cols[0], state);
+    // Header: logo on left, model info on right
+    render_header_section(frame, main_layout[0], state, &ds);
 
-    // Right: Dashboard — render into the right column area
-    // We need to render the dashboard components manually into cols[1]
-    dashboard::render(frame, &ds);
+    // Body: three columns
+    let body_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(40),  // Chat messages
+            Constraint::Percentage(30),  // Pipeline + coverage
+            Constraint::Percentage(30),  // Crypto + integrity
+        ])
+        .split(main_layout[1]);
+
+    render_chat_messages(frame, body_cols[0], state);
+    render_pipeline_section(frame, body_cols[1], &ds);
+    render_crypto_section(frame, body_cols[2], &ds);
+
+    // Input field — full width, always visible
+    render_input(frame, main_layout[2], state);
+
+    // Footer
+    render_footer_section(frame, main_layout[3], state, &ds);
 }
 
 #[cfg(feature = "tui")]
-fn render_chat(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+fn render_header_section(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState, ds: &stwo_ml::tui::dashboard::DashboardState) {
+    use ratatui::style::*;
+    use ratatui::text::*;
+    use ratatui::widgets::*;
+    // Simple header with logo + status
+    let is_complete = state.mode == Mode::Complete;
+    let status = if is_complete { "VERIFIED" } else if state.mode == Mode::Proving { "PROVING" } else { "READY" };
+    let status_color = if is_complete { Color::Rgb(52, 211, 153) } else { Color::Rgb(163, 230, 53) };
+
+    let lines = vec![
+        Line::from(Span::styled("  ╔═╗╔╗  ╔═╗╦  ╦ ╦╔═╗╦╔═", Style::default().fg(Color::Rgb(163, 230, 53)))),
+        Line::from(vec![
+            Span::styled("  ║ ║╠╩╗ ╠═ ║  ╚╦╝╔═╝╠╩╗", Style::default().fg(Color::Rgb(163, 230, 53))),
+            Span::raw("  "),
+            Span::styled(&state.model_name, Style::default().fg(Color::Rgb(52, 211, 153)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {} turns  {}→{}", state.turns.len(), state.tokens_in, state.tokens_out), Style::default().fg(Color::Rgb(100, 100, 115))),
+        ]),
+        Line::from(vec![
+            Span::styled("  ╚═╝╚═╝ ╚═╝╩═╝ ╩ ╚═╝╩ ╩", Style::default().fg(Color::Rgb(80, 120, 20))),
+            Span::raw("  "),
+            Span::styled("◆ ", Style::default().fg(status_color)),
+            Span::styled(status, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled("STWO GKR + Poseidon252 STARK", Style::default().fg(Color::Rgb(80, 80, 95))),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+#[cfg(feature = "tui")]
+fn render_chat_messages(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    use ratatui::layout::*;
+    use ratatui::style::*;
+    use ratatui::text::*;
+    use ratatui::widgets::*;
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (role, content) in &state.messages {
+        let (prefix, color) = match role.as_str() {
+            "you" => ("YOU", Color::Rgb(163, 230, 53)),
+            "ai" => ("AI", Color::Rgb(52, 211, 153)),
+            _ => ("SYS", Color::Rgb(100, 100, 115)),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {prefix} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        ]));
+        for chunk in content.chars().collect::<Vec<_>>().chunks(55) {
+            let text: String = chunk.iter().collect();
+            let text_color = if role == "system" { Color::Rgb(100, 100, 115) } else { Color::Rgb(200, 200, 210) };
+            lines.push(Line::from(Span::styled(format!("  {text}"), Style::default().fg(text_color))));
+        }
+        lines.push(Line::from(""));
+    }
+
+    let block = Block::default()
+        .title(Span::styled(" Chat ", Style::default().fg(Color::Rgb(163, 230, 53)).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(80, 80, 95)));
+
+    let visible = area.height.saturating_sub(2) as usize;
+    let offset = if lines.len() > visible { lines.len() - visible } else { 0 };
+    let visible_lines: Vec<Line> = lines.into_iter().skip(offset).collect();
+
+    frame.render_widget(Paragraph::new(visible_lines).block(block).wrap(Wrap { trim: false }), area);
+}
+
+#[cfg(feature = "tui")]
+fn render_pipeline_section(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, ds: &stwo_ml::tui::dashboard::DashboardState) {
+    use stwo_ml::tui::dashboard;
+    // Render pipeline column from the dashboard
+    dashboard::render(frame, ds);
+}
+
+#[cfg(feature = "tui")]
+fn render_crypto_section(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, ds: &stwo_ml::tui::dashboard::DashboardState) {
+    // Crypto is part of the dashboard render — handled by render_pipeline_section
+}
+
+#[cfg(feature = "tui")]
+fn render_input(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    use ratatui::style::*;
+    use ratatui::text::*;
+    use ratatui::widgets::*;
+
+    let active = state.mode == Mode::Chat;
+    let border_color = if active { Color::Rgb(163, 230, 53) } else { Color::Rgb(80, 80, 95) };
+    let prompt = if active { " ▸ " } else { " · " };
+
+    let block = Block::default()
+        .title(if active { " Type message, 'prove' to verify " } else { " Proving... " })
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let input_text = format!("{prompt}{}", state.input);
+    frame.render_widget(
+        Paragraph::new(Span::styled(&input_text, Style::default().fg(Color::Rgb(250, 250, 250)))).block(block),
+        area,
+    );
+
+    if active {
+        frame.set_cursor_position((area.x + state.cursor_pos as u16 + 4, area.y + 1));
+    }
+}
+
+#[cfg(feature = "tui")]
+fn render_footer_section(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState, ds: &stwo_ml::tui::dashboard::DashboardState) {
+    use ratatui::style::*;
+    use ratatui::text::*;
+    use ratatui::widgets::*;
+
+    let status_color = match state.mode {
+        Mode::Complete => Color::Rgb(52, 211, 153),
+        Mode::Proving => Color::Rgb(163, 230, 53),
+        _ => Color::Rgb(100, 100, 115),
+    };
+    let status_text = match state.mode {
+        Mode::Complete => "VERIFIED ✓",
+        Mode::Proving => "PROVING...",
+        Mode::Loading => "LOADING...",
+        Mode::Chat => "READY",
+    };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ObelyZK ", Style::default().fg(Color::Black).bg(Color::Rgb(163, 230, 53)).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::raw("                              "),
+            Span::styled("Ctrl+C", Style::default().fg(Color::Rgb(163, 230, 53))),
+            Span::styled(" exit", Style::default().fg(Color::Rgb(80, 80, 95))),
+        ])),
+        area,
+    );
+}
+
+// Keep old render_chat for reference but unused
+#[cfg(feature = "tui")]
+#[allow(dead_code)]
+fn render_chat_old(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
     use ratatui::layout::*;
     use ratatui::style::*;
     use ratatui::text::*;
