@@ -21,3 +21,5 @@ pub mod rmsnorm;
 pub mod rope;
 pub mod tiled_matmul;
 pub mod topk;
+#[cfg(test)]
+mod tamper_tests;
