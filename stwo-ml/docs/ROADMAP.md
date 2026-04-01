@@ -1,6 +1,6 @@
 # ObelyZK Protocol Roadmap
 
-**Version**: 2.0 | **Date**: March 17, 2026 | **Author**: Bitsage Network
+**Version**: 2.1 | **Date**: March 21, 2026 | **Author**: Bitsage Network
 
 > Strategy: Deep research per phase, implement, test end-to-end on H100 GPU, verify all security properties, then advance to next phase.
 
@@ -14,7 +14,7 @@
 | Prove time (cached) | **103s** on H100 NVL |
 | Audit (3 inferences) | **5m 11s** |
 | Security tests | 41/41 pass (18 tamper + 23 integration gates) |
-| On-chain | Starknet Sepolia, 18-TX streaming, v34 Cairo verifier |
+| On-chain | Starknet Sepolia, **6-TX streaming v25, v39 Cairo verifier (6/6 SUCCEEDED)** |
 | Proof system | GKR sumcheck + Poseidon2-M31 commitments (no FRI) |
 | Field | M31 -> CM31 -> QM31 (124-bit algebraic security) |
 
@@ -459,10 +459,31 @@ arithmetization — no softmax, no score matrix, different matmul decomposition.
 
 ---
 
-## Execution Timeline (Updated March 17, 2026)
+## On-Chain Streaming Verification — COMPLETE (March 21, 2026)
+
+**First-ever full GKR streaming proof verification of ML inference on Starknet.** 6/6 TX SUCCEEDED on Starknet Sepolia.
+
+| Step | TX Hash | Status |
+|------|---------|--------|
+| stream_init | [`0x5493...1a1`](https://sepolia.starkscan.co/tx/0x5493310a8e2deb5d2f25b07e2402e84692aaf5926141b5acc203a1892a181a1) | SUCCEEDED |
+| output_mle | [`0x7cab...7e`](https://sepolia.starkscan.co/tx/0x7cabd35f5382c11334c6509e40b7a758ccd7e03e83e75b66a3c569f5d7b7a7e) | SUCCEEDED |
+| layers | [`0x5346...918`](https://sepolia.starkscan.co/tx/0x53465edc957c5f8a6054739a0633beecf814ee37e3e22c23a570448a5be5918) | SUCCEEDED |
+| weight_binding | [`0x5f54...3fc`](https://sepolia.starkscan.co/tx/0x5f549a1e6cc1ebefea3615c2458cdd0fd8f45fd505bf72e5b9dd8417c9be3fc) | SUCCEEDED |
+| input_mle | [`0x2395...bab`](https://sepolia.starkscan.co/tx/0x239545b66f94387a3d1b5dbc55dedba6b7de1d5384f1930e77e152a986d5bab) | SUCCEEDED |
+| finalize | [`0x4b08...a41`](https://sepolia.starkscan.co/tx/0x4b081156d4be88ea159533223d2597d76cd3f99911501d8326e156f12051a41) | SUCCEEDED |
+
+- **Model**: Qwen2-0.5B, 1 transformer layer (8 GKR layers: 3 RMSNorm + 4 MatMul + 1 SiLU)
+- **Contract (v39)**: `0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`
+- **Class hash**: `0x0473c81da9df0522f5c239f022889f7730ef866fb97e4f092ad1e8793fb22feb`
+- **Proof**: 5,526 felts streaming calldata, 5 MLE opening queries, streaming v25 protocol
+
+---
+
+## Execution Timeline (Updated March 21, 2026)
 
 | Phase | Status | Deliverable | Test Gate |
 |-------|--------|-------------|-----------|
+| **Streaming Verification** | **COMPLETE** (March 21) | 6-TX on-chain GKR streaming, v39 contract | 6/6 TX SUCCEEDED on Sepolia |
 | **1A** LayerNorm mean/variance | **CLOSED** (was already done) | Plain sumcheck + LogUp | Tamper tests pass |
 | **1B** Softmax sum | **CLOSED** (March 17) | Plain sumcheck + row-sum binding | 5 tamper tests pass |
 | **1C** RoPE arithmetization | **CLOSED** (March 17) | Full STARK (rotation + LogUp) | 8 RoPE tests + circuit test |

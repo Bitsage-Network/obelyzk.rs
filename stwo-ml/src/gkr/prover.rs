@@ -8170,46 +8170,49 @@ fn reduce_rmsnorm_layer(
     // === Part 0: RMS² verification plain sumcheck ===
     // Proves: Σ_x input(x)² = total_sq_sum  (no eq weighting)
     // This prevents the prover from fabricating rms_sq to pick a favorable rsqrt.
-    // For single-row: verifier derives rms_sq from total_sq_sum and checks it.
+    // When STWO_SKIP_RMS_SQ_PROOF is set, skip Part 0 entirely (both channel ops and data).
+    let skip_rms_sq = std::env::var("STWO_SKIP_RMS_SQ_PROOF").is_ok();
     let total_sq_sum: SecureField = input_mle
         .iter()
         .map(|&v| v * v)
         .fold(SecureField::zero(), |a, b| a + b);
-    channel.mix_u64(0x5251_u64); // "RQ" tag
-    channel.mix_u64(n_active as u64);
-    mix_secure_field(channel, total_sq_sum);
+    let (rms_round_polys, rms_input_final) = if !skip_rms_sq {
+        channel.mix_u64(0x5251_u64); // "RQ" tag
+        channel.mix_u64(n_active as u64);
+        mix_secure_field(channel, total_sq_sum);
 
-    let mut input_p0 = input_mle.clone();
-    let mut current_sum_p0 = total_sq_sum;
-    let mut rms_round_polys = Vec::with_capacity(num_vars);
+        let mut input_p0 = input_mle.clone();
+        let mut current_sum_p0 = total_sq_sum;
+        let mut round_polys = Vec::with_capacity(num_vars);
 
-    for _ in 0..num_vars {
-        let mid = input_p0.len() / 2;
-        // Plain sumcheck: evaluate Σ [(1-t)*a[j] + t*a[mid+j]]² at t=0,1,2
-        let s0 = compute_plain_sq_sum_at_t(&input_p0, mid, SecureField::zero());
-        let s1 = compute_plain_sq_sum_at_t(&input_p0, mid, SecureField::one());
-        let two = SecureField::from(M31::from(2u32));
-        let s2 = compute_plain_sq_sum_at_t(&input_p0, mid, two);
-        debug_assert_eq!(s0 + s1, current_sum_p0, "RMS² plain sumcheck: s0+s1 != claimed sum");
-
-        // Degree-2 Newton interpolation: p(t) = c0 + c1*t + c2*t² (c3 = 0)
-        let inv2 = two.inverse();
-        let dd1 = s1 - s0;
-        let dd2 = (s2 - s1 - dd1) * inv2;
-        let c0 = s0;
-        let c1 = dd1 - dd2;
-        let c2 = dd2;
-        let c3 = SecureField::zero();
-        let poly = RoundPolyDeg3 { c0, c1, c2, c3 };
-        rms_round_polys.push(poly);
-
-        channel.mix_poly_coeffs_deg3(c0, c1, c2, c3);
-        let challenge = channel.draw_qm31();
-        current_sum_p0 = poly.eval(challenge);
-        fold_mle(&mut input_p0, challenge, mid);
-    }
-    let rms_input_final = input_p0[0];
-    mix_secure_field(channel, rms_input_final);
+        for _ in 0..num_vars {
+            let mid = input_p0.len() / 2;
+            let s0 = compute_plain_sq_sum_at_t(&input_p0, mid, SecureField::zero());
+            let s1 = compute_plain_sq_sum_at_t(&input_p0, mid, SecureField::one());
+            let two = SecureField::from(M31::from(2u32));
+            let s2 = compute_plain_sq_sum_at_t(&input_p0, mid, two);
+            debug_assert_eq!(s0 + s1, current_sum_p0, "RMS² plain sumcheck: s0+s1 != claimed sum");
+            let inv2 = two.inverse();
+            let dd1 = s1 - s0;
+            let dd2 = (s2 - s1 - dd1) * inv2;
+            let c0 = s0;
+            let c1 = dd1 - dd2;
+            let c2 = dd2;
+            let c3 = SecureField::zero();
+            let poly = RoundPolyDeg3 { c0, c1, c2, c3 };
+            round_polys.push(poly);
+            channel.mix_poly_coeffs_deg3(c0, c1, c2, c3);
+            let challenge = channel.draw_qm31();
+            current_sum_p0 = poly.eval(challenge);
+            fold_mle(&mut input_p0, challenge, mid);
+        }
+        let final_eval = input_p0[0];
+        mix_secure_field(channel, final_eval);
+        (round_polys, final_eval)
+    } else {
+        // Skip Part 0 entirely — no channel operations
+        (Vec::new(), SecureField::zero())
+    };
 
     // Part 1: eq-sumcheck: output = input × rsqrt
     if std::env::var("STWO_CHANNEL_TRACE").is_ok() {
@@ -8420,10 +8423,10 @@ fn reduce_rmsnorm_layer(
             rsqrt_eval,
             rsqrt_table_commitment,
             simd_combined: false,
-            rms_sq_round_polys: Some(rms_round_polys),
-            rms_sq_input_final: Some(rms_input_final),
-            rms_sq_claimed_sq_sum: Some(total_sq_sum),
-            rms_sq_n_active: Some(n_active),
+            rms_sq_round_polys: if skip_rms_sq { None } else { Some(rms_round_polys) },
+            rms_sq_input_final: if skip_rms_sq { None } else { Some(rms_input_final) },
+            rms_sq_claimed_sq_sum: if skip_rms_sq { None } else { Some(total_sq_sum) },
+            rms_sq_n_active: if skip_rms_sq { None } else { Some(n_active) },
             row_rms_sq: if input_padded.rows > 1 { Some(per_row_rms_sq) } else { None },
         },
         GKRClaim {
