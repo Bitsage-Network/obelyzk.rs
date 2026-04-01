@@ -303,39 +303,17 @@ impl PiecewiseLinearCoeffs {
 
 /// Apply activation function to an M31 value, returning the result as u32.
 ///
-/// Interprets the M31 value as a signed integer (values > P/2 are negative),
-/// applies the f64 activation, and maps back to M31.
+/// Uses integer-only arithmetic for platform-deterministic results.
+/// No IEEE 754 floating-point is used — all computation is in M31.
 fn apply_activation_f64(act_type: ActivationType, val: u32) -> u32 {
-    let half_p = M31_P / 2;
-    // Map M31 to signed: values > P/2 are negative
-    let signed = if val <= half_p {
-        val as f64
-    } else {
-        val as f64 - M31_P as f64
+    let tag = match act_type {
+        ActivationType::ReLU => 0u8,
+        ActivationType::GELU => 1,
+        ActivationType::Sigmoid => 2,
+        ActivationType::Softmax => 3,
+        ActivationType::SiLU => 4,
     };
-
-    // Scale down to [-1, 1] range for activation computation
-    let scale = half_p as f64;
-    let x = signed / scale;
-
-    let y = match act_type {
-        ActivationType::ReLU => x.max(0.0),
-        ActivationType::GELU => {
-            // GELU(x) = x * Φ(x) ≈ 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))
-            let inner = (2.0_f64 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
-            0.5 * x * (1.0 + inner.tanh())
-        }
-        ActivationType::Sigmoid => 1.0 / (1.0 + (-x).exp()),
-        ActivationType::Softmax => x.exp(), // element-wise exp component
-        ActivationType::SiLU => x / (1.0 + (-x).exp()), // x * sigmoid(x)
-    };
-
-    // Scale back and map to M31
-    let result = y * scale;
-    let result_i64 = result.round() as i64;
-    // Map to [0, P-1]
-    let result_mod = ((result_i64 % (M31_P as i64)) + M31_P as i64) as u32 % M31_P;
-    result_mod
+    crate::components::integer_math::apply_activation_integer(tag, val)
 }
 
 /// Compute M31 multiplicative inverse via Fermat's little theorem: a^{P-2} mod P.
