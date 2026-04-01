@@ -4718,6 +4718,10 @@ where
                 node_outputs.insert(node.id, current.clone());
                 outer_profiler.record_forward_op("other", _op_start.elapsed());
             }
+
+            GraphOp::MoE { .. } => {
+                todo!("MoE forward pass: decompose into router + TopK + experts")
+            }
         }
     }
 

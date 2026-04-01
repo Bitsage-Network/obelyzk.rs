@@ -488,12 +488,17 @@ arithmetization — no softmax, no score matrix, different matmul decomposition.
 | **1B** Softmax sum | **CLOSED** (March 17) | Plain sumcheck + row-sum binding | 5 tamper tests pass |
 | **1C** RoPE arithmetization | **CLOSED** (March 17) | Full STARK (rotation + LogUp) | 8 RoPE tests + circuit test |
 | **1D** Causal mask | **CLOSED** (March 17) | Fiat-Shamir binding | Causal mismatch test |
-| **1E** f64 elimination | OPEN | Integer-only tables | Cross-platform determinism test |
+| **1E** f64 elimination | **CLOSED** (April 1) | Integer-only cos/sin/exp/sigmoid/gelu/isqrt | 7 integer_math + 7 rope + 48 attention tests |
+| **1F** Attention scale 1/√d | **CLOSED** (April 1) | Integer Newton-Raphson isqrt | 48 attention tests pass |
+| **1G** Softmax sum=0 | **CLOSED** (April 1) | Graceful uniform fallback | No panic on degenerate input |
+| **1H** LayerNorm γ/β affine | **CLOSED** (April 1) | γ commitment + scale_mle prover | 2 RMSNorm gamma tests |
 | **2A** GPU threshold | **CLOSED** (not a bottleneck) | Already on GPU | Confirmed via profiling |
 | **2B** GPU unified STARK | DEFERRED (STWO bug) | Needs STWO library fix | — |
-| **2C-2D** Fused kernels + serialization | OPEN | CUDA + binary | ~7s savings |
+| **2C** Fused kernels | OPEN | CUDA matmul+activation | ~5s savings |
+| **2D** Binary serialization | **CLOSED** (April 1) | bincode OZKP format | 7 binary_serde tests |
+| **2E** Configurable precision | **CLOSED** (April 1) | 16/64/256/1024 segments | 8 activation tests |
 | **3A** SiLU activation | **CLOSED** (March 17) | Native SiLU LogUp | 4 unit tests |
-| **3B** MoE routing (TopK) | **NEXT** | TopK proof + MoE graph | Mixtral/Kimi/GLM-5 proven |
+| **3B** MoE routing (TopK) | **IN PROGRESS** | TopK proof + MoE graph | Mixtral/Kimi/GLM-5 proven |
 | **3C** Lightning Attention | FUTURE | Linear attention protocol | MiniMax-01 proven |
 | **3D** CNN (YOLOv8) | FUTURE | im2col proof | YOLOv8 proven |
 | **3E** Benchmarks | NEXT (after 3B) | 5+ models, comparison table | Published |

@@ -61,6 +61,20 @@ pub enum GraphOp {
     },
     /// Identity / passthrough (for graph structure).
     Identity { size: usize },
+    /// Mixture-of-Experts routing: top-K expert selection from N experts.
+    ///
+    /// Decomposes into: MatMul(router) → TopK selection → per-expert FFN → weighted sum.
+    /// The TopK proof is the new primitive; everything else uses existing operations.
+    MoE {
+        /// Number of total experts.
+        num_experts: usize,
+        /// Number of experts selected per token.
+        top_k: usize,
+        /// Hidden dimension (input to router).
+        hidden_dim: usize,
+        /// FFN intermediate dimension per expert.
+        expert_ffn_dim: usize,
+    },
 }
 
 impl GraphOp {
@@ -117,6 +131,16 @@ impl GraphOp {
                 config.seq_len * config.num_pairs()
             }
             GraphOp::Identity { .. } => 0,
+            GraphOp::MoE { num_experts, top_k, hidden_dim, expert_ffn_dim } => {
+                // Router MatMul + TopK selection + top_k expert FFNs + weighted sum
+                // Router: hidden_dim × num_experts
+                let router = hidden_dim * num_experts;
+                // Each expert FFN: hidden_dim → expert_ffn_dim → hidden_dim (2 matmuls)
+                let per_expert = hidden_dim * expert_ffn_dim * 2;
+                // TopK selection: N logits, comparison proof
+                let topk = *num_experts;
+                router + top_k * per_expert + topk
+            }
         }
     }
 }

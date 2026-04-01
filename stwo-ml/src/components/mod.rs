@@ -20,3 +20,4 @@ pub mod range_check;
 pub mod rmsnorm;
 pub mod rope;
 pub mod tiled_matmul;
+pub mod topk;
