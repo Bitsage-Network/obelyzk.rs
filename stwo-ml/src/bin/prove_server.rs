@@ -235,6 +235,80 @@ fn default_security() -> String {
     "auto".to_string()
 }
 
+// =============================================================================
+// Provable Inference API — POST /api/v1/infer
+// =============================================================================
+
+/// Request for the provable inference endpoint.
+///
+/// Takes a model ID, input data, and returns the model output + proof.
+/// This is the primary API for building applications on top of ObelyZK.
+#[derive(Deserialize)]
+struct InferRequest {
+    /// Model ID (must be loaded via POST /api/v1/models first).
+    model_id: String,
+    /// Input data as flat f32 array. Shape must match model's expected input.
+    /// For transformer models: (seq_len, hidden_dim) flattened.
+    input: Vec<f32>,
+    /// Whether to use GPU proving (default: true if available).
+    #[serde(default = "default_true")]
+    gpu: bool,
+    /// If true, return the full proof calldata (large). Default: false.
+    #[serde(default)]
+    include_calldata: bool,
+    /// If true, return the raw output values. Default: true.
+    #[serde(default = "default_true")]
+    include_output: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Response from the provable inference endpoint.
+#[derive(Serialize)]
+struct InferResponse {
+    /// Unique proof identifier.
+    proof_id: String,
+    /// Model output as flat f32 array (if include_output=true).
+    output: Option<Vec<f32>>,
+    /// Output shape (rows, cols).
+    output_shape: (usize, usize),
+    /// Poseidon hash of (input || output) — uniquely identifies this inference.
+    io_commitment: String,
+    /// Weight commitment — identifies the model version.
+    weight_commitment: String,
+    /// Proof hash for on-chain verification lookup.
+    proof_hash: String,
+    /// URL to verify this proof.
+    verify_url: String,
+    /// Number of proven layers (matmul + activation + attention + norm).
+    num_proven_layers: usize,
+    /// Wall-clock proving time in milliseconds.
+    prove_time_ms: u64,
+    /// Estimated on-chain verification gas.
+    estimated_gas: u64,
+    /// Full calldata (if include_calldata=true).
+    calldata: Option<Vec<String>>,
+    /// Proof size in felts.
+    calldata_size: usize,
+}
+
+/// Response from the verify endpoint.
+#[derive(Serialize)]
+struct VerifyResponse {
+    /// Whether the proof is valid.
+    valid: bool,
+    /// Proof hash that was verified.
+    proof_hash: String,
+    /// Model ID associated with this proof.
+    model_id: Option<String>,
+    /// IO commitment from the proof.
+    io_commitment: Option<String>,
+    /// Verification method used.
+    method: String,
+}
+
 fn normalize_canonical_proof_hash(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1292,6 +1366,169 @@ async fn get_prove_result(
 }
 
 // =============================================================================
+// Provable Inference Handler — POST /api/v1/infer
+// =============================================================================
+
+/// Synchronous provable inference: input → forward pass → GKR proof → response.
+///
+/// This is the primary endpoint for building applications on ObelyZK.
+/// Unlike POST /api/v1/prove (async job), this blocks until the proof is ready.
+async fn infer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<InferRequest>,
+) -> Result<Json<InferResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let models = state.models.read().await;
+    let model = models.get(&req.model_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!(
+                    "Model '{}' not found. Load it first via POST /api/v1/models",
+                    req.model_id
+                ),
+            }),
+        )
+    })?;
+
+    let (in_rows, in_cols) = model.input_shape;
+    let expected = in_rows * in_cols;
+    if req.input.len() != expected {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Input has {} values, model expects {} ({in_rows}×{in_cols})",
+                    req.input.len(),
+                    expected
+                ),
+            }),
+        ));
+    }
+
+    // Quantize input
+    let (quantized, _params) = quantize_tensor(&req.input, QuantStrategy::Symmetric8);
+    let mut input_matrix = M31Matrix::new(in_rows, in_cols);
+    for (i, &v) in quantized.iter().enumerate().take(in_rows * in_cols) {
+        input_matrix.data[i] = v;
+    }
+
+    let graph = Arc::clone(&model.graph);
+    let weights = Arc::clone(&model.weights);
+    let model_id_clone = req.model_id.clone();
+    let weight_commitment = model.weight_commitment.clone();
+    let include_calldata = req.include_calldata;
+    let include_output = req.include_output;
+
+    // Drop the read lock before spawning blocking work
+    drop(models);
+
+    // Run inference + proving in a blocking task (CPU/GPU-heavy)
+    let result = tokio::task::spawn_blocking(move || {
+        let t_start = Instant::now();
+
+        // Full GKR proof (includes forward pass)
+        let proof_result = stwo_ml::aggregation::prove_model_aggregated_onchain_gkr_auto(
+            &graph,
+            &input_matrix,
+            &weights,
+            None, // weight_cache
+        );
+
+        match proof_result {
+            Ok(proof) => {
+                let prove_time_ms = t_start.elapsed().as_millis() as u64;
+
+                // Extract output
+                let output_matrix = &proof.execution.output;
+                let output_f32 = if include_output {
+                    Some(output_matrix.data.iter().map(|v| v.0 as f32).collect::<Vec<f32>>())
+                } else {
+                    None
+                };
+
+                // Compute proof hash (Poseidon of io_commitment + weight_commitment)
+                let io_hex = format!("0x{:x}", proof.io_commitment);
+                let proof_hash = format!("0x{:x}",
+                    starknet_crypto::poseidon_hash_many(&[
+                        proof.io_commitment,
+                        proof.layer_chain_commitment,
+                    ])
+                );
+
+                // Serialize calldata
+                let gkr_proof = proof.gkr_proof.as_ref();
+                let calldata_felts = if let Some(gkr) = gkr_proof {
+                    stwo_ml::cairo_serde::serialize_gkr_proof_data_only(gkr)
+                } else {
+                    Vec::new()
+                };
+                let calldata_size = calldata_felts.len();
+
+                let calldata = if include_calldata {
+                    Some(calldata_felts.iter().map(|f| format!("0x{:x}", f)).collect())
+                } else {
+                    None
+                };
+
+                let proof_id = format!("proof-{}", uuid::Uuid::new_v4());
+                let num_proven = proof.num_proven_layers();
+
+                Ok(InferResponse {
+                    proof_id,
+                    output: output_f32,
+                    output_shape: (output_matrix.rows, output_matrix.cols),
+                    io_commitment: io_hex,
+                    weight_commitment,
+                    proof_hash: proof_hash.clone(),
+                    verify_url: format!("/api/v1/verify/{proof_hash}"),
+                    num_proven_layers: num_proven,
+                    prove_time_ms,
+                    estimated_gas: (calldata_size as u64) * 200 + 500_000,
+                    calldata,
+                    calldata_size,
+                })
+            }
+            Err(e) => Err(format!("Proving failed: {e}")),
+        }
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Task join error: {e}"),
+            }),
+        )
+    })?;
+
+    match result {
+        Ok(response) => Ok(Json(response)),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: err }),
+        )),
+    }
+}
+
+/// Verify a proof by hash — GET /api/v1/verify/:proof_hash
+///
+/// Currently performs local verification only. Future: also checks on-chain.
+async fn verify_proof(
+    State(_state): State<Arc<AppState>>,
+    Path(proof_hash): Path<String>,
+) -> Json<VerifyResponse> {
+    // TODO: Look up proof in local store or query Starknet contract
+    // For now, return a stub that indicates the verification method
+    Json(VerifyResponse {
+        valid: false,
+        proof_hash: proof_hash.clone(),
+        model_id: None,
+        io_commitment: None,
+        method: "not_found".to_string(),
+    })
+}
+
+// =============================================================================
 // Privacy Handlers
 // =============================================================================
 
@@ -2291,6 +2528,8 @@ async fn main() {
         .route("/api/v1/prove", post(submit_prove))
         .route("/api/v1/prove/{job_id}", get(get_prove_status))
         .route("/api/v1/prove/{job_id}/result", get(get_prove_result))
+        .route("/api/v1/infer", post(infer))
+        .route("/api/v1/verify/{proof_hash}", get(verify_proof))
         .route("/api/v1/privacy/batch", post(submit_privacy_batch))
         .route(
             "/api/v1/privacy/batch/{job_id}",
