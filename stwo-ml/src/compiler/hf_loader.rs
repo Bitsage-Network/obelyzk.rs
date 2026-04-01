@@ -832,6 +832,50 @@ fn build_weight_name_map(
                 break;
             }
         }
+
+        // Norm weights (γ) — stored as named weights "gamma:{node_id}"
+        // Node offset 0: pre-attention norm
+        let pre_norm_node = block_start;
+        let pre_norm_candidates = [
+            format!("model.layers.{layer_idx}.input_layernorm.weight"),
+            format!("model.layers.{layer_idx}.ln1.weight"),
+            format!("transformer.h.{layer_idx}.ln_1.weight"),
+        ];
+        for name in &pre_norm_candidates {
+            if tensor_set.contains(name.as_str()) {
+                // Use a special key format: "gamma:{node_id}" to distinguish from matmul weights
+                map.insert(10000 + pre_norm_node, name.clone());
+                break;
+            }
+        }
+
+        // Node offset 3: post-attention norm
+        let post_norm_node = block_start + 3;
+        let post_norm_candidates = [
+            format!("model.layers.{layer_idx}.post_attention_layernorm.weight"),
+            format!("model.layers.{layer_idx}.ln2.weight"),
+            format!("transformer.h.{layer_idx}.ln_2.weight"),
+        ];
+        for name in &post_norm_candidates {
+            if tensor_set.contains(name.as_str()) {
+                map.insert(10000 + post_norm_node, name.clone());
+                break;
+            }
+        }
+    }
+
+    // Final norm weight
+    let final_norm_node = num_layers * nodes_per_block;
+    let final_norm_candidates = [
+        "model.norm.weight".to_string(),
+        "transformer.ln_f.weight".to_string(),
+        "model.final_layernorm.weight".to_string(),
+    ];
+    for name in &final_norm_candidates {
+        if tensor_set.contains(name.as_str()) {
+            map.insert(10000 + final_norm_node, name.clone());
+            break;
+        }
     }
 
     map
@@ -1011,6 +1055,59 @@ fn load_weights_from_shards(
         "  Transpose + quantize: {:.1}s",
         t_process.elapsed().as_secs_f64(),
     );
+
+    // ── Phase 3: Load norm γ weights (1D vectors, stored as named weights) ──
+    // Keys >= 10000 are norm weights: actual node_id = key - 10000
+    let gamma_entries: Vec<(usize, &str)> = name_map
+        .iter()
+        .filter(|(k, _)| **k >= 10000)
+        .map(|(k, name)| (k - 10000, name.as_str()))
+        .collect();
+
+    if !gamma_entries.is_empty() {
+        // Re-open shards for gamma loading (lightweight — 1D vectors are small)
+        let mut gamma_shards: Vec<memmap2::Mmap> = Vec::new();
+        for path in shard_paths {
+            let file = std::fs::File::open(path)
+                .map_err(|e| WeightError::IoError(e.to_string()))?;
+            let mmap = unsafe { memmap2::Mmap::map(&file) }
+                .map_err(|e| WeightError::IoError(e.to_string()))?;
+            gamma_shards.push(mmap);
+        }
+
+        let mut gamma_count = 0usize;
+        for (node_id, tensor_name) in &gamma_entries {
+            // Find which shard has this tensor
+            for mmap in &gamma_shards {
+                let Ok(tensors) = safetensors::SafeTensors::deserialize(mmap) else {
+                    continue;
+                };
+                let Ok(tensor) = tensors.tensor(tensor_name) else {
+                    continue;
+                };
+
+                let data = tensor_to_f32(tensor.data(), tensor.dtype());
+                let dim = data.len();
+
+                // Quantize γ to M31 (same strategy as other weights)
+                let (quantized, _params) = quantize_tensor(&data, strategy);
+
+                // Store as a named weight "gamma" for this norm node
+                let gamma_matrix = M31Matrix {
+                    rows: 1,
+                    cols: dim,
+                    data: quantized,
+                };
+                weights.add_named_weight(*node_id, "gamma", gamma_matrix);
+                gamma_count += 1;
+                loaded_count += 1;
+                break;
+            }
+        }
+        if gamma_count > 0 {
+            eprintln!("  Loaded {} norm γ weights as named weights", gamma_count);
+        }
+    }
 
     eprintln!(
         "  All {} weights loaded in {:.1}s",
