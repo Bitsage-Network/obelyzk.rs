@@ -148,6 +148,16 @@ impl<E: FrameworkEval + Sync> ComponentProver<GpuBackend> for FrameworkComponent
             .map(|idx| &trace.polys[PREPROCESSED_TRACE_IDX][*idx])
             .collect();
 
+        if std::env::var("STWO_DEBUG_GPU_COLUMNS").is_ok() {
+            eprintln!(
+                "[GPU_COMPONENT] preprocessed_column_indices={:?}, total_preprocessed={}, component_preprocessed={}, trace_locations={:?}",
+                self.preprocessed_column_indices,
+                trace.polys[PREPROCESSED_TRACE_IDX].len(),
+                component_polys[PREPROCESSED_TRACE_IDX].len(),
+                self.trace_locations,
+            );
+        }
+
         // Check if we need to extend polynomials to the evaluation domain
         let need_to_extend = component_polys
             .iter()
