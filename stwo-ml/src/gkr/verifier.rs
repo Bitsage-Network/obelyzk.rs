@@ -110,7 +110,13 @@ fn verify_gkr_inner(
     // Track skip layer indices for deferred proofs (populated on Add layers)
     let mut deferred_skip_layer_indices: Vec<usize> = Vec::new();
 
+    // Layers to skip in the main walk (deferred branches of Add/Mul)
+    let mut skip_layers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
     for layer_idx in (0..d).rev() {
+        if skip_layers.contains(&layer_idx) {
+            continue;
+        }
         let layer = &circuit.layers[layer_idx];
 
         match &layer.layer_type {
@@ -174,6 +180,7 @@ fn verify_gkr_inner(
                     0
                 };
                 deferred_skip_layer_indices.push(skip_layer_idx);
+                skip_layers.insert(skip_layer_idx);
                 verify_add_reduction(
                     &current_claim,
                     *lhs_eval,
@@ -191,14 +198,37 @@ fn verify_gkr_inner(
                     lhs_eval,
                     rhs_eval,
                 },
-            ) => verify_mul_reduction(
-                &current_claim,
-                eq_round_polys,
-                *lhs_eval,
-                *rhs_eval,
-                layer_idx,
-                channel,
-            )?,
+            ) => {
+                let combined = verify_mul_reduction(
+                    &current_claim,
+                    eq_round_polys,
+                    *lhs_eval,
+                    *rhs_eval,
+                    layer_idx,
+                    channel,
+                )?;
+                // For branched Mul (gated FFN): override claim with trunk eval
+                if layer.input_layers.len() >= 2 {
+                    let skip_layer_idx = if layer.input_layers[1] > layer.input_layers[0] {
+                        layer.input_layers[0]
+                    } else {
+                        layer.input_layers[1]
+                    };
+                    let trunk_eval = if layer.input_layers[1] > layer.input_layers[0] {
+                        *rhs_eval
+                    } else {
+                        *lhs_eval
+                    };
+                    deferred_skip_layer_indices.push(skip_layer_idx);
+                    skip_layers.insert(skip_layer_idx);
+                    GKRClaim {
+                        point: combined.point,
+                        value: trunk_eval,
+                    }
+                } else {
+                    combined
+                }
+            }
 
             (
                 LayerType::Activation {
@@ -1472,10 +1502,14 @@ fn verify_gkr_simd_inner(
     let template_layers: Vec<usize> = (template.start..template.end).rev().collect();
     let mut proof_idx = 0;
     let mut expected_weight_node_ids = Vec::new();
-    // Track skip layer indices for deferred proofs (populated on Add layers)
+    // Track skip layer indices for deferred proofs (populated on Add/Mul layers)
     let mut deferred_skip_layer_indices: Vec<usize> = Vec::new();
+    let mut skip_layers: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     for &layer_idx in &template_layers {
+        if skip_layers.contains(&layer_idx) {
+            continue;
+        }
         let layer = &circuit.layers[layer_idx];
 
         match &layer.layer_type {
@@ -1539,6 +1573,7 @@ fn verify_gkr_simd_inner(
                     0
                 };
                 deferred_skip_layer_indices.push(skip_layer_idx);
+                skip_layers.insert(skip_layer_idx);
                 verify_add_reduction(
                     &current_claim,
                     *lhs_eval,
@@ -1556,14 +1591,37 @@ fn verify_gkr_simd_inner(
                     lhs_eval,
                     rhs_eval,
                 },
-            ) => verify_mul_reduction(
-                &current_claim,
-                eq_round_polys,
-                *lhs_eval,
-                *rhs_eval,
-                layer_idx,
-                channel,
-            )?,
+            ) => {
+                let combined = verify_mul_reduction(
+                    &current_claim,
+                    eq_round_polys,
+                    *lhs_eval,
+                    *rhs_eval,
+                    layer_idx,
+                    channel,
+                )?;
+                // For branched Mul (gated FFN): override claim with trunk eval
+                if layer.input_layers.len() >= 2 {
+                    let skip_layer_idx = if layer.input_layers[1] > layer.input_layers[0] {
+                        layer.input_layers[0]
+                    } else {
+                        layer.input_layers[1]
+                    };
+                    let trunk_eval = if layer.input_layers[1] > layer.input_layers[0] {
+                        *rhs_eval
+                    } else {
+                        *lhs_eval
+                    };
+                    deferred_skip_layer_indices.push(skip_layer_idx);
+                    skip_layers.insert(skip_layer_idx);
+                    GKRClaim {
+                        point: combined.point,
+                        value: trunk_eval,
+                    }
+                } else {
+                    combined
+                }
+            }
 
             (
                 LayerType::Activation {

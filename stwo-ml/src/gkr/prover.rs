@@ -1673,39 +1673,46 @@ pub fn prove_gkr_with_cache(
             LayerType::Mul { .. } => {
                 let (lhs_vals, rhs_vals) = get_binary_op_intermediates(execution, layer, circuit)?;
 
-                let (proof, _claim) =
+                let (proof, combined_claim) =
                     reduce_mul_layer(&current_claim, &lhs_vals, &rhs_vals, channel)?;
 
-                // Handle Mul branching the same way as Add:
-                // follow one branch (trunk), defer the other.
-                if let LayerProof::Mul { lhs_eval, rhs_eval, .. } = &proof {
-                    let (trunk_eval, skip_eval, skip_layer_idx, _trunk_idx) =
-                        if layer.input_layers.len() >= 2 && layer.input_layers[1] > layer.input_layers[0] {
-                            (*rhs_eval, *lhs_eval, layer.input_layers[0], 1u8)
-                        } else if layer.input_layers.len() >= 2 {
-                            (*lhs_eval, *rhs_eval, layer.input_layers[1], 0u8)
+                // For branched Mul (gated FFN): the combined claim's VALUE includes
+                // both branches via alpha combiner. But the trunk branch should use
+                // lhs_eval (the gate SiLU output) as its claim value, since that's
+                // what the next layer (SiLU activation) actually outputs.
+                // The channel is already in sync (alpha drawn in both prover and verifier).
+                if layer.input_layers.len() >= 2 {
+                    if let LayerProof::Mul { lhs_eval, rhs_eval, .. } = &proof {
+                        let skip_layer_idx = if layer.input_layers[1] > layer.input_layers[0] {
+                            layer.input_layers[0]
                         } else {
-                            (*lhs_eval, SecureField::zero(), 0, 0u8)
+                            layer.input_layers[1]
                         };
-                    if layer.input_layers.len() >= 2 {
+                        // Trunk is the higher-index input (the gate/SiLU branch).
+                        let trunk_eval = if layer.input_layers[1] > layer.input_layers[0] {
+                            *rhs_eval  // rhs has higher index = trunk
+                        } else {
+                            *lhs_eval  // lhs has higher index = trunk
+                        };
                         deferred_info.push((
                             GKRClaim {
                                 point: current_claim.point.clone(),
-                                value: skip_eval,
+                                value: *rhs_eval,
                             },
                             skip_layer_idx,
                         ));
-                        // Mark the skip branch layers to be skipped in the main walk.
-                        // Walk backward from skip_layer_idx until we reach a layer
-                        // that's an input to the trunk branch or has no more inputs.
                         skip_layers.insert(skip_layer_idx);
+
+                        // Override claim: trunk value, not combined
+                        (proof, GKRClaim {
+                            point: combined_claim.point,
+                            value: trunk_eval,
+                        })
+                    } else {
+                        (proof, combined_claim)
                     }
-                    (proof, GKRClaim {
-                        point: current_claim.point.clone(),
-                        value: trunk_eval,
-                    })
                 } else {
-                    unreachable!("reduce_mul_layer returned non-Mul proof");
+                    (proof, combined_claim)
                 }
             }
 
