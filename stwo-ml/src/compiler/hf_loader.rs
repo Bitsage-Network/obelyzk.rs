@@ -374,8 +374,18 @@ fn validate_weight_dimensions(
                         let shape = tensor.shape();
                         if shape.len() == 2 {
                             let (rows, cols) = (shape[0], shape[1]);
-                            // HF stores (out, in) or (in, out) — either orientation is valid
-                            let ok = (rows == *k && cols == *n) || (rows == *n && cols == *k);
+                            // HF stores (out, in) or (in, out) — either orientation is valid.
+                            // Also accept fused tensors:
+                            //   gate_up_proj: [2n, k] or [k, 2n] (Phi-3)
+                            //   qkv_proj: [3k, k] or similar (Phi-3, GPT-2)
+                            let ok = (rows == *k && cols == *n)
+                                || (rows == *n && cols == *k)
+                                // Fused gate_up: 2× output dimension
+                                || (rows == 2 * *n && cols == *k)
+                                || (rows == *k && cols == 2 * *n)
+                                // Fused QKV: 3× output dimension (or Q+K+V where K/V may differ)
+                                || (rows >= 2 * *n && cols == *k)
+                                || (rows == *k && cols >= 2 * *n);
                             if !ok {
                                 mismatches.push(format!(
                                     "{}: shape ({}, {}) does not match expected ({}, {})",
@@ -790,10 +800,15 @@ fn build_weight_name_map(
         let down_node = block_start + 6;
 
         // Try common HuggingFace naming patterns for the Q projection
+        // Q projection (or fused QKV for Phi-3/GPT-2)
         let q_candidates = [
             format!("model.layers.{layer_idx}.self_attn.q_proj.weight"),
             format!("model.layers.{layer_idx}.attention.wq.weight"),
             format!("transformer.h.{layer_idx}.attn.q_proj.weight"),
+            // Fused QKV: store as Q, will be split during loading
+            format!("model.layers.{layer_idx}.self_attn.qkv_proj.weight"),
+            // GPT-2 fused QKV
+            format!("h.{layer_idx}.attn.c_attn.weight"),
         ];
         for name in &q_candidates {
             if tensor_set.contains(name.as_str()) {
@@ -807,6 +822,8 @@ fn build_weight_name_map(
             format!("model.layers.{layer_idx}.self_attn.o_proj.weight"),
             format!("model.layers.{layer_idx}.attention.wo.weight"),
             format!("transformer.h.{layer_idx}.attn.o_proj.weight"),
+            // GPT-2
+            format!("h.{layer_idx}.attn.c_proj.weight"),
         ];
         for name in &o_candidates {
             if tensor_set.contains(name.as_str()) {
@@ -816,28 +833,67 @@ fn build_weight_name_map(
         }
 
         // Gate projection (SwiGLU gate branch)
+        // Supports: separate gate_proj OR fused gate_up_proj (Phi-3 style)
         let gate_candidates = [
             format!("model.layers.{layer_idx}.mlp.gate_proj.weight"),
             format!("model.layers.{layer_idx}.feed_forward.w1.weight"),
             format!("transformer.h.{layer_idx}.mlp.gate_proj.weight"),
         ];
+        let mut found_gate = false;
         for name in &gate_candidates {
             if tensor_set.contains(name.as_str()) {
                 map.insert(gate_node, name.clone());
+                found_gate = true;
                 break;
             }
         }
 
+        // Check for fused gate_up_proj (Phi-3: [2*intermediate, hidden] → split into gate + up)
+        if !found_gate {
+            let fused_candidates = [
+                format!("model.layers.{layer_idx}.mlp.gate_up_proj.weight"),
+            ];
+            for name in &fused_candidates {
+                if tensor_set.contains(name.as_str()) {
+                    // Store fused tensor as the gate_proj weight (regular key).
+                    // During weight loading, the fused tensor will be detected by its
+                    // shape (2× expected rows) and split: first half → gate, second half → up.
+                    map.insert(gate_node, name.clone());
+                    found_gate = true;
+                    break;
+                }
+            }
+        }
+
+        // Non-gated FFN (GPT-2 style: c_fc → activation → c_proj)
+        if !found_gate {
+            let nongated_candidates = [
+                format!("h.{layer_idx}.mlp.c_fc.weight"),
+                format!("transformer.h.{layer_idx}.mlp.c_fc.weight"),
+            ];
+            for name in &nongated_candidates {
+                if tensor_set.contains(name.as_str()) {
+                    map.insert(gate_node, name.clone());
+                    found_gate = true;
+                    break;
+                }
+            }
+        }
+
         // Up projection — stored as named weight "up_proj" on down_proj node (key 20000+down_node)
-        let up_candidates = [
-            format!("model.layers.{layer_idx}.mlp.up_proj.weight"),
-            format!("model.layers.{layer_idx}.feed_forward.w3.weight"),
-            format!("transformer.h.{layer_idx}.mlp.up_proj.weight"),
-        ];
-        for name in &up_candidates {
-            if tensor_set.contains(name.as_str()) {
-                map.insert(20000 + down_node, name.clone());
-                break;
+        // For fused gate_up_proj models (Phi-3), this won't find a match —
+        // the up_proj will be split from the fused tensor during weight loading.
+        {
+            let up_candidates = [
+                format!("model.layers.{layer_idx}.mlp.up_proj.weight"),
+                format!("model.layers.{layer_idx}.feed_forward.w3.weight"),
+                format!("transformer.h.{layer_idx}.mlp.up_proj.weight"),
+            ];
+            for name in &up_candidates {
+                if tensor_set.contains(name.as_str()) {
+                    map.insert(20000 + down_node, name.clone());
+                    break;
+                }
             }
         }
 
@@ -846,6 +902,8 @@ fn build_weight_name_map(
             format!("model.layers.{layer_idx}.mlp.down_proj.weight"),
             format!("model.layers.{layer_idx}.feed_forward.w2.weight"),
             format!("transformer.h.{layer_idx}.mlp.down_proj.weight"),
+            // GPT-2
+            format!("h.{layer_idx}.mlp.c_proj.weight"),
         ];
         for name in &down_candidates {
             if tensor_set.contains(name.as_str()) {
@@ -1017,11 +1075,60 @@ fn load_weights_from_shards(
             all_raw.push((idx, k, n, data, shape));
         }
     }
+    // Detect and split fused tensors (gate_up_proj, qkv_proj).
+    // A fused gate_up tensor has shape [2*n, k] where the node expects [n, k].
+    // Split: first half → gate weight (stays in all_raw), second half → up_proj named weight.
+    let mut fused_up_proj_data: Vec<(usize, Vec<f32>, usize, usize)> = Vec::new(); // (down_node, data, rows, cols)
+    for entry in all_raw.iter_mut() {
+        let (idx, k, n, data, shape) = entry;
+        if shape.len() == 2 {
+            let tensor_rows = shape[0];
+            let tensor_cols = shape[1];
+            // Check if this is a fused gate_up: tensor has 2× the expected output dimension
+            if (tensor_rows == 2 * *n && tensor_cols == *k) || (tensor_cols == 2 * *n && tensor_rows == *k) {
+                let is_transposed = tensor_rows == *k;
+                let (fused_rows, fused_cols) = if is_transposed {
+                    (*k, 2 * *n)
+                } else {
+                    (2 * *n, *k)
+                };
+                let half_rows = fused_rows / 2;
+
+                // Split: first half = gate, second half = up
+                let gate_data: Vec<f32>;
+                let up_data: Vec<f32>;
+                if is_transposed {
+                    // Shape [k, 2n]: columns 0..n = gate, columns n..2n = up
+                    gate_data = (0..*k).flat_map(|r| data[r * fused_cols..r * fused_cols + *n].iter().copied()).collect();
+                    up_data = (0..*k).flat_map(|r| data[r * fused_cols + *n..r * fused_cols + 2 * *n].iter().copied()).collect();
+                } else {
+                    // Shape [2n, k]: rows 0..n = gate, rows n..2n = up
+                    gate_data = data[..half_rows * fused_cols].to_vec();
+                    up_data = data[half_rows * fused_cols..].to_vec();
+                }
+
+                eprintln!("  Splitting fused gate_up_proj for node {}: [{}×{}] → gate [{}×{}] + up [{}×{}]",
+                    idx, fused_rows, fused_cols, half_rows, fused_cols, half_rows, fused_cols);
+
+                // Replace data with gate-only
+                *data = gate_data;
+                shape[0] = if is_transposed { *k } else { *n };
+                shape[1] = if is_transposed { *n } else { *k };
+
+                // Store up_proj for later named weight creation
+                // The down_proj node is 2 nodes after gate_proj in 7-node blocks
+                let down_node_id = *idx + 2;
+                fused_up_proj_data.push((down_node_id, up_data, if is_transposed { *k } else { *n }, if is_transposed { *n } else { *k }));
+            }
+        }
+    }
+
     eprintln!(
-        "  Extracted {} tensors from {} shards in {:.1}s",
+        "  Extracted {} tensors from {} shards in {:.1}s{}",
         all_raw.len(),
         shards.len(),
         t_extract.elapsed().as_secs_f64(),
+        if fused_up_proj_data.is_empty() { String::new() } else { format!(" ({} fused splits)", fused_up_proj_data.len()) },
     );
 
     // Drop shard mmaps to free virtual memory before parallel processing
@@ -1076,6 +1183,26 @@ fn load_weights_from_shards(
         "  Transpose + quantize: {:.1}s",
         t_process.elapsed().as_secs_f64(),
     );
+
+    // ── Phase 2b: Store fused up_proj splits as named weights ──
+    for (down_node_id, up_data, rows, cols) in &fused_up_proj_data {
+        // Transpose from HF layout (out_features, in_features) to matmul layout (in_features, out_features)
+        let mut transposed = vec![0.0f32; up_data.len()];
+        for r in 0..*rows {
+            for c in 0..*cols {
+                transposed[c * rows + r] = up_data[r * cols + c];
+            }
+        }
+        let (quantized, _params) = crate::gadgets::quantize::quantize_tensor(&transposed, strategy);
+        let up_matrix = M31Matrix {
+            rows: *cols,   // in_features
+            cols: *rows,   // out_features
+            data: quantized,
+        };
+        weights.add_named_weight(*down_node_id, "up_proj", up_matrix);
+        loaded_count += 1;
+        eprintln!("  Stored fused up_proj for down_proj node {} ({}×{})", down_node_id, cols, rows);
+    }
 
     // ── Phase 3: Load norm γ weights (1D vectors, stored as named weights) ──
     // Keys >= 10000 are norm weights: actual node_id = key - 10000
