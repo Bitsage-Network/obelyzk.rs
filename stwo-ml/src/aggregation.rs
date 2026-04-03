@@ -1111,9 +1111,21 @@ where
                     log_size: rn_log_size,
                 });
 
+                // Apply learned affine scale γ if present
+                let mut output = rn.output_matrix.clone();
+                if let Some(gamma_matrix) = weights.get_named_weight(node.id, "gamma") {
+                    let gamma = &gamma_matrix.data;
+                    for row in 0..output.rows {
+                        for col in 0..output.cols.min(gamma.len()) {
+                            let idx = row * output.cols + col;
+                            output.data[idx] = output.data[idx] * gamma[col];
+                        }
+                    }
+                }
+
                 intermediates.push((node.id, current.clone()));
-                node_outputs.insert(node.id, rn.output_matrix.clone());
-                current = rn.output_matrix;
+                node_outputs.insert(node.id, output.clone());
+                current = output;
             }
 
             GraphOp::Attention {
@@ -2928,9 +2940,21 @@ where
                     log_size: rn_log_size,
                 });
 
+                // Apply learned affine scale γ if present
+                let mut output = rn.output_matrix.clone();
+                if let Some(gamma_matrix) = weights.get_named_weight(node.id, "gamma") {
+                    let gamma = &gamma_matrix.data;
+                    for row in 0..output.rows {
+                        for col in 0..output.cols.min(gamma.len()) {
+                            let idx = row * output.cols + col;
+                            output.data[idx] = output.data[idx] * gamma[col];
+                        }
+                    }
+                }
+
                 intermediates.push((node.id, current.clone()));
-                node_outputs.insert(node.id, rn.output_matrix.clone());
-                current = rn.output_matrix;
+                node_outputs.insert(node.id, output.clone());
+                current = output;
             }
 
             GraphOp::Attention {
@@ -4511,9 +4535,21 @@ where
                     log_size: rn_log_size,
                 });
 
+                // Apply learned affine scale γ if present
+                let mut output = rn.output_matrix.clone();
+                if let Some(gamma_matrix) = weights.get_named_weight(node.id, "gamma") {
+                    let gamma = &gamma_matrix.data;
+                    for row in 0..output.rows {
+                        for col in 0..output.cols.min(gamma.len()) {
+                            let idx = row * output.cols + col;
+                            output.data[idx] = output.data[idx] * gamma[col];
+                        }
+                    }
+                }
+
                 intermediates.push((node.id, current.clone()));
-                node_outputs.insert(node.id, rn.output_matrix.clone());
-                current = rn.output_matrix;
+                node_outputs.insert(node.id, output.clone());
+                current = output;
                 outer_profiler.record_forward_op("rmsnorm", _op_start.elapsed());
             }
 
@@ -5989,9 +6025,21 @@ pub(crate) fn collect_forward_pass_layer_data(
                     log_size: rn_log_size,
                 });
 
+                // Apply learned affine scale γ if present
+                let mut output = rn.output_matrix.clone();
+                if let Some(gamma_matrix) = weights.get_named_weight(node.id, "gamma") {
+                    let gamma = &gamma_matrix.data;
+                    for row in 0..output.rows {
+                        for col in 0..output.cols.min(gamma.len()) {
+                            let idx = row * output.cols + col;
+                            output.data[idx] = output.data[idx] * gamma[col];
+                        }
+                    }
+                }
+
                 intermediates.push((node.id, current.clone()));
-                node_outputs.insert(node.id, rn.output_matrix.clone());
-                current = rn.output_matrix;
+                node_outputs.insert(node.id, output.clone());
+                current = output;
             }
 
             GraphOp::Attention {
