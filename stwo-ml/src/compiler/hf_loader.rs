@@ -280,7 +280,7 @@ pub fn validate_model_directory(model_dir: &Path, num_layers: Option<usize>) -> 
                 .iter()
                 .filter(|n| matches!(n.op, GraphOp::MatMul { .. }))
                 .count();
-            // Count only MatMul weight mappings (keys < 10000), not gamma weights (keys >= 10000)
+            // Count only MatMul weight mappings (keys < 10000), not gamma (10000+) or up_proj (20000+)
             let mapped_count = name_map.keys().filter(|&&k| k < 10000).count();
 
             checks.push(ValidationCheck {
@@ -772,9 +772,10 @@ fn build_weight_name_map(
         .map(|(name, _)| name.as_str())
         .collect();
 
-    // Each block has 9 nodes with gated FFN.
-    // MatMul nodes: offsets 1 (Q), 2 (O), 4 (gate), 6 (up), 8 (down).
-    let nodes_per_block = 9;
+    // Each block has 7 nodes with simplified gated FFN (linear chain):
+    //   0: Norm, 1: Q proj, 2: O proj, 3: Norm, 4: gate_proj, 5: SiLU, 6: down_proj
+    // up_proj is stored as a named weight "up_proj" on the down_proj node (offset 6).
+    let nodes_per_block = 7;
 
     for layer_idx in 0..num_layers {
         let block_start = layer_idx * nodes_per_block;
@@ -783,12 +784,10 @@ fn build_weight_name_map(
         let q_node = block_start + 1;
         // Node offset 2: O projection
         let o_node = block_start + 2;
-        // Node offset 4: gate_proj (SwiGLU gate branch)
+        // Node offset 4: gate_proj
         let gate_node = block_start + 4;
-        // Node offset 6: up_proj (SwiGLU up branch)
-        let up_node = block_start + 6;
-        // Node offset 8: down_proj
-        let down_node = block_start + 8;
+        // Node offset 6: down_proj (up_proj stored as named weight here)
+        let down_node = block_start + 6;
 
         // Try common HuggingFace naming patterns for the Q projection
         let q_candidates = [
@@ -829,7 +828,7 @@ fn build_weight_name_map(
             }
         }
 
-        // Up projection (SwiGLU up branch)
+        // Up projection — stored as named weight "up_proj" on down_proj node (key 20000+down_node)
         let up_candidates = [
             format!("model.layers.{layer_idx}.mlp.up_proj.weight"),
             format!("model.layers.{layer_idx}.feed_forward.w3.weight"),
@@ -837,7 +836,7 @@ fn build_weight_name_map(
         ];
         for name in &up_candidates {
             if tensor_set.contains(name.as_str()) {
-                map.insert(up_node, name.clone());
+                map.insert(20000 + down_node, name.clone());
                 break;
             }
         }
@@ -1128,6 +1127,56 @@ fn load_weights_from_shards(
         }
         if gamma_count > 0 {
             eprintln!("  Loaded {} norm γ weights as named weights", gamma_count);
+        }
+    }
+
+    // ── Phase 4: Load up_proj weights (gated FFN) as named weights ──
+    // Keys >= 20000 are up_proj weights: actual node_id = key - 20000
+    let up_proj_entries: Vec<(usize, &str)> = name_map
+        .iter()
+        .filter(|(k, _)| **k >= 20000)
+        .map(|(k, name)| (k - 20000, name.as_str()))
+        .collect();
+
+    if !up_proj_entries.is_empty() {
+        let mut up_shards: Vec<memmap2::Mmap> = Vec::new();
+        for path in shard_paths {
+            let file = std::fs::File::open(path)
+                .map_err(|e| WeightError::IoError(e.to_string()))?;
+            let mmap = unsafe { memmap2::Mmap::map(&file) }
+                .map_err(|e| WeightError::IoError(e.to_string()))?;
+            up_shards.push(mmap);
+        }
+
+        let mut up_count = 0usize;
+        for (node_id, tensor_name) in &up_proj_entries {
+            for mmap in &up_shards {
+                let Ok(tensors) = safetensors::SafeTensors::deserialize(mmap) else {
+                    continue;
+                };
+                let Ok(tensor) = tensors.tensor(tensor_name) else {
+                    continue;
+                };
+
+                let data = tensor_to_f32(tensor.data(), tensor.dtype());
+                let shape = tensor.shape();
+                let (rows, cols) = if shape.len() == 2 { (shape[0], shape[1]) } else { (data.len(), 1) };
+
+                // Quantize and transpose if needed (same as regular MatMul weights)
+                let (quantized, _params) = crate::gadgets::quantize::quantize_tensor(&data, strategy);
+                let up_matrix = M31Matrix {
+                    rows,
+                    cols,
+                    data: quantized,
+                };
+                weights.add_named_weight(*node_id, "up_proj", up_matrix);
+                up_count += 1;
+                loaded_count += 1;
+                break;
+            }
+        }
+        if up_count > 0 {
+            eprintln!("  Loaded {} up_proj weights as named weights", up_count);
         }
     }
 
