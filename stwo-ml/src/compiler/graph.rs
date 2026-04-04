@@ -810,22 +810,52 @@ impl GraphBuilder {
         self.linear(num_experts);
 
         // Step 2: TopK selection node
-        let size = self.current_output_shape().0 * self.current_output_shape().1;
         let inputs = self.last_node.map(|n| vec![n]).unwrap_or_default();
         let shape = self.current_output_shape();
         let topk_id = self.graph.add_node(
             GraphOp::MoE { num_experts, top_k, hidden_dim: d_model, expert_ffn_dim: d_ff },
             inputs,
-            (shape.0, top_k), // output: (batch, top_k) gate weights
+            (shape.0, top_k),
         );
         self.last_node = Some(topk_id);
 
-        // Step 3: For now, model the MoE output as a single gated FFN
-        // (equivalent to top-1 expert or average expert behavior).
-        // The TopK proof above verifies the routing was correct.
-        // Full sparse expert evaluation requires per-expert graph branches.
-        self.last_node = Some(input_branch);
-        self.gated_ffn(d_ff, act_type);
+        // Step 3: Multi-expert FFN with weighted sum
+        //
+        // For each selected expert (K total):
+        //   expert_output_i = gated_ffn_i(input)
+        //
+        // The output is a weighted sum: Σ gate_weight_i × expert_output_i
+        //
+        // Graph structure for K=2 (Mixtral):
+        //   input → expert_0_ffn → [save]
+        //   input → expert_1_ffn → add_from(expert_0)
+        //
+        // For K experts, we chain: expert_0 → add(expert_1) → add(expert_2) → ...
+        // Each expert has its own weight set (stored as separate named weights).
+        //
+        // The gate weights (softmax of selected logits) are applied during the
+        // forward pass by scaling each expert's output before summing.
+        // The proof verifies each expert FFN independently.
+
+        if top_k == 1 {
+            // Single expert: just a gated FFN
+            self.last_node = Some(input_branch);
+            self.gated_ffn(d_ff, act_type);
+        } else {
+            // Multi-expert: K parallel FFN branches + accumulated sum
+            // Expert 0: the "base" branch
+            self.last_node = Some(input_branch);
+            self.gated_ffn(d_ff, act_type);
+
+            // Experts 1..K: each adds to the accumulated output
+            for _expert_idx in 1..top_k {
+                let accumulated = self.fork();
+                self.last_node = Some(input_branch);
+                self.gated_ffn(d_ff, act_type);
+                // Add expert output to accumulated sum
+                self.add_from(accumulated);
+            }
+        }
 
         self
     }
@@ -1481,6 +1511,61 @@ mod tests {
 
         // 2 norms + 2 attention matmuls + 5 gated FFN = 9 nodes
         assert_eq!(graph.nodes.len(), 9, "transformer block should have 9 nodes");
+        assert_eq!(graph.output_shape, (1, d));
+    }
+
+    #[test]
+    fn test_moe_ffn_multi_expert() {
+        // Mixtral-style: 8 experts, top-2
+        let d = 8;
+        let d_ff = 16;
+        let mut builder = GraphBuilder::new((1, d));
+        builder.identity(); // input anchor
+        builder.moe_ffn(8, 2, d_ff, ActivationType::SiLU);
+        let graph = builder.build();
+
+        // Expected structure:
+        //   0: Identity (input)
+        //   1: MatMul (router: d → 8)
+        //   2: MoE (TopK: 8 experts, top 2)
+        //   3-5: Expert 0 gated FFN (gate_proj, SiLU, down_proj)
+        //   6-8: Expert 1 gated FFN (gate_proj, SiLU, down_proj)
+        //   9: Add (expert_0 + expert_1)
+
+        // Should have: identity + router + topk + 2*(3 FFN nodes) + 1 Add = 10
+        assert!(graph.nodes.len() >= 9,
+            "MoE K=2 should have at least 9 nodes, got {}", graph.nodes.len());
+        assert_eq!(graph.output_shape, (1, d),
+            "MoE output should match input dim");
+
+        // Verify there's a MoE/TopK node
+        let has_moe = graph.nodes.iter().any(|n| matches!(n.op, GraphOp::MoE { .. }));
+        assert!(has_moe, "graph should contain a MoE/TopK node");
+
+        // Verify there's an Add node (weighted sum)
+        let add_count = graph.nodes.iter().filter(|n| matches!(n.op, GraphOp::Add { .. })).count();
+        assert!(add_count >= 1, "MoE K=2 should have at least 1 Add node for expert sum, got {add_count}");
+
+        // Count gated FFN components (2 experts × 3 nodes each = 6 MatMul+Activation nodes)
+        let matmul_count = graph.nodes.iter().filter(|n| matches!(n.op, GraphOp::MatMul { .. })).count();
+        // router(1) + 2 experts × (gate_proj + down_proj) = 1 + 4 = 5
+        assert!(matmul_count >= 5,
+            "MoE K=2 should have >= 5 MatMul nodes (1 router + 4 expert), got {matmul_count}");
+    }
+
+    #[test]
+    fn test_moe_ffn_single_expert() {
+        // top-1: should be equivalent to a single gated FFN
+        let d = 8;
+        let d_ff = 16;
+        let mut builder = GraphBuilder::new((1, d));
+        builder.identity();
+        builder.moe_ffn(4, 1, d_ff, ActivationType::SiLU);
+        let graph = builder.build();
+
+        // No Add node needed for K=1
+        let add_count = graph.nodes.iter().filter(|n| matches!(n.op, GraphOp::Add { .. })).count();
+        assert_eq!(add_count, 0, "MoE K=1 should have no Add nodes, got {add_count}");
         assert_eq!(graph.output_shape, (1, d));
     }
 }
