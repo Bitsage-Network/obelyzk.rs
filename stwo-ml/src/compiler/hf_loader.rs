@@ -423,6 +423,10 @@ pub struct HfConfig {
     pub vocab_size: usize,
     pub hidden_act: String,
     pub max_position_embeddings: usize,
+    /// Number of experts for MoE models (0 = dense, no MoE).
+    pub num_experts: usize,
+    /// Number of experts activated per token (top-K).
+    pub num_experts_per_tok: usize,
 }
 
 impl HfConfig {
@@ -464,6 +468,14 @@ impl HfConfig {
                 .to_string(),
             max_position_embeddings: json["max_position_embeddings"].as_u64().unwrap_or(2048)
                 as usize,
+            num_experts: json["num_local_experts"]
+                .as_u64()
+                .or_else(|| json["num_experts"].as_u64())
+                .unwrap_or(0) as usize,
+            num_experts_per_tok: json["num_experts_per_tok"]
+                .as_u64()
+                .or_else(|| json["num_experts_per_token"].as_u64())
+                .unwrap_or(0) as usize,
         })
     }
 
@@ -492,7 +504,14 @@ impl HfConfig {
             d_ff: self.intermediate_size,
             activation,
             norm_type,
+            num_experts: self.num_experts,
+            num_experts_per_tok: self.num_experts_per_tok,
         }
+    }
+
+    /// Whether this model uses Mixture of Experts.
+    pub fn is_moe(&self) -> bool {
+        self.num_experts > 0 && self.num_experts_per_tok > 0
     }
 }
 
@@ -738,10 +757,14 @@ fn build_hf_transformer_graph(config: &TransformerConfig, num_layers: usize) -> 
             NormType::LayerNorm => { builder.layer_norm(); }
             NormType::RMSNorm => { builder.rms_norm(); }
         }
-        // Gated FFN: gate_proj(SiLU) × up_proj → down_proj
-        // This models the real SwiGLU/GeGLU architecture used by
-        // Llama, Qwen, Mistral, GLM, Yi, and most modern LLMs.
-        builder.gated_ffn(d_ff, config.activation);
+        // FFN: dense (gated FFN) or MoE (multi-expert gated FFN)
+        if config.num_experts > 0 && config.num_experts_per_tok > 0 {
+            // MoE: router → TopK → K parallel expert FFNs → weighted sum
+            builder.moe_ffn(config.num_experts, config.num_experts_per_tok, d_ff, config.activation);
+        } else {
+            // Dense: single gated FFN (SwiGLU)
+            builder.gated_ffn(d_ff, config.activation);
+        }
     }
 
     // Final norm
