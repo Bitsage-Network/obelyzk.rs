@@ -1425,30 +1425,19 @@ mod tests {
 
     #[test]
     fn test_gated_ffn_structure() {
-        // Verify the gated FFN creates the correct graph structure:
-        //   input → gate_proj(MatMul) → SiLU → mul_from(up_proj) → down_proj
-        //         ↘ up_proj(MatMul) ──────────↗
+        // Gated FFN is now a LINEAR chain: gate_proj → SiLU → down_proj
+        // The up_proj is computed in the forward pass (not a separate graph node)
         let d = 8;
         let d_ff = 16;
         let mut builder = GraphBuilder::new((1, d));
-        // Need an identity node as the input anchor (gated_ffn uses fork())
         builder.identity();
         builder.gated_ffn(d_ff, ActivationType::SiLU);
         let graph = builder.build();
 
-        // Expected nodes:
-        // 0: Identity (input anchor)
-        // 1: MatMul (gate_proj: d → d_ff)
-        // 2: Activation (SiLU on gate)
-        // 3: MatMul (up_proj: d → d_ff) — from the fork
-        // 4: Mul (gate * up)
-        // 5: MatMul (down_proj: d_ff → d)
-        assert_eq!(graph.nodes.len(), 6, "identity + gated FFN should have 6 nodes");
+        // Expected: Identity + gate_proj + SiLU + down_proj = 4 nodes
+        assert_eq!(graph.nodes.len(), 4, "identity + gated FFN should have 4 nodes");
 
-        // Node 0: Identity (input anchor)
         assert!(matches!(&graph.nodes[0].op, GraphOp::Identity { .. }));
-
-        // Node 1: gate_proj MatMul (d → d_ff)
         match &graph.nodes[1].op {
             GraphOp::MatMul { dims: (_m, k, n) } => {
                 assert_eq!(*k, d);
@@ -1456,61 +1445,37 @@ mod tests {
             }
             other => panic!("node 1 should be MatMul (gate_proj), got {:?}", other),
         }
-
-        // Node 2: SiLU activation
         match &graph.nodes[2].op {
             GraphOp::Activation { activation_type, .. } => {
                 assert_eq!(*activation_type, ActivationType::SiLU);
             }
             other => panic!("node 2 should be Activation, got {:?}", other),
         }
-
-        // Node 3: up_proj MatMul (d → d_ff)
         match &graph.nodes[3].op {
-            GraphOp::MatMul { dims: (_m, k, n) } => {
-                assert_eq!(*k, d);
-                assert_eq!(*n, d_ff);
-            }
-            other => panic!("node 3 should be MatMul (up_proj), got {:?}", other),
-        }
-
-        // Node 4: Mul (gate * up)
-        match &graph.nodes[4].op {
-            GraphOp::Mul { size } => {
-                assert_eq!(*size, d_ff); // 1 × d_ff
-            }
-            other => panic!("node 4 should be Mul, got {:?}", other),
-        }
-
-        // Node 5: down_proj MatMul (d_ff → d)
-        match &graph.nodes[5].op {
             GraphOp::MatMul { dims: (_m, k, n) } => {
                 assert_eq!(*k, d_ff);
                 assert_eq!(*n, d);
             }
-            other => panic!("node 5 should be MatMul (down_proj), got {:?}", other),
+            other => panic!("node 3 should be MatMul (down_proj), got {:?}", other),
         }
-
-        // Final output shape should match input
         assert_eq!(graph.output_shape, (1, d));
     }
 
     #[test]
     fn test_gated_ffn_in_transformer_block() {
-        // Verify a transformer-like block with gated FFN has correct structure:
-        // Norm → Q → O → Norm → GatedFFN(gate, act, up, mul, down)
+        // Norm → Q → O → Norm → GatedFFN(gate, SiLU, down) = 7 nodes
         let d = 8;
         let d_ff = 16;
         let mut builder = GraphBuilder::new((1, d));
         builder.rms_norm();
-        builder.linear(d); // Q proj
-        builder.linear(d); // O proj
+        builder.linear(d);
+        builder.linear(d);
         builder.rms_norm();
         builder.gated_ffn(d_ff, ActivationType::SiLU);
         let graph = builder.build();
 
-        // 2 norms + 2 attention matmuls + 5 gated FFN = 9 nodes
-        assert_eq!(graph.nodes.len(), 9, "transformer block should have 9 nodes");
+        // 2 norms + 2 attention matmuls + 3 gated FFN = 7 nodes
+        assert_eq!(graph.nodes.len(), 7, "transformer block should have 7 nodes");
         assert_eq!(graph.output_shape, (1, d));
     }
 

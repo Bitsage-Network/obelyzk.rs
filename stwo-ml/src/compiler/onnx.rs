@@ -573,6 +573,8 @@ mod tests {
             d_ff: 8,
             activation: ActivationType::GELU,
             norm_type: NormType::LayerNorm,
+            num_experts: 0,
+            num_experts_per_tok: 0,
         };
         let model = build_transformer_block(&config, 77);
 
