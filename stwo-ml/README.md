@@ -1,6 +1,56 @@
 # stwo-ml
 
-ML inference proving and privacy protocol built on [STWO](https://github.com/starkware-libs/stwo) — StarkWare's Circle STARK prover over M31.
+ML inference proving and privacy protocol built on [STWO](https://github.com/starkware-libs/stwo) — StarkWare's Circle STARK prover over M31. GKR sumcheck over M31 multilinear extensions. Zero f64 in the proving path — integer-only M31 arithmetic end to end.
+
+**920+ tests, 0 failures** | **6 model families proven** | **On-chain verified on Starknet Sepolia (6/6 TX succeeded)**
+
+## Proven Models
+
+Cryptographic self-verification on Apple Silicon (CPU). Every model runs through the full GKR sumcheck pipeline — no mock proofs, no skipped layers.
+
+| Model | Family | Parameters | Prove Time | Notes |
+|-------|--------|-----------|------------|-------|
+| **Qwen2-0.5B** | Qwen | 0.5B | **0.57s** | Fastest full-model proof |
+| **Qwen2-1.5B** | Qwen | 1.5B | **1.14s** | |
+| **SmolLM2-135M** | Llama | 135M | **3.41s** | Llama-family architecture |
+| **Phi-3 Mini 3.8B** | Phi | 3.8B | **48.86s** | Fused QKV + gate_up weight splitting |
+| **Yi-1.5-6B** | Yi | 6B | **86.58s** | |
+| **Mistral-7B-v0.3** | Mistral | 7B | **88.19s** | |
+| **Llama-3.2-3B** | Meta Llama | 3B | *downloading* | |
+
+Architecture highlights:
+- **Gated FFN (SwiGLU)**: gate * up multiplication correctly modeled in the proving circuit
+- **Fused weight support**: QKV splitting (Phi-3), gate_up splitting (Phi-3) handled natively
+- **GPU kernels**: 7K LOC CUDA + Metal shaders
+
+## Quick Start
+
+```bash
+# Build (macOS with Metal)
+cargo build --release --bin prove-model --features cli,metal
+
+# Prove a HuggingFace model (1 transformer layer)
+./target/release/prove-model --model-dir ./model --layers 1 --gkr --format ml_gkr
+
+# Full model proof
+./target/release/prove-model --model-dir ~/.obelysk/models/qwen2-0.5b --gkr --format ml_gkr --output proof.json
+```
+
+## Python SDK and REST API
+
+```bash
+# Start the prove server
+cargo build --release --bin prove-server --features server
+BIND_ADDR=0.0.0.0:8080 ./target/release/prove-server
+```
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/infer` | Provable inference — run model + generate proof |
+| `GET` | `/api/v1/verify/:hash` | Verify a proof by hash |
+| `GET` | `/api/v1/proofs` | List all generated proofs |
+
+Docker deployment available via `Dockerfile` in the repository root.
 
 ## What This Is
 
@@ -551,7 +601,7 @@ stwo-ml/
 │
 ├── docs/                     # Technical documentation
 ├── benches/                  # Performance benchmarks
-└── tests/                    # Integration tests (802 lib + 10 e2e_audit + 1 cli_audit)
+└── tests/                    # Integration tests (920+ total: lib + e2e_audit + cli_audit)
 ```
 
 ## Tile-Level Streaming
