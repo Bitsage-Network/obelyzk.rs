@@ -45,7 +45,7 @@ pub fn verify_gkr(
     output: &M31Matrix,
     channel: &mut PoseidonChannel,
 ) -> Result<GKRClaim, GKRError> {
-    verify_gkr_inner(circuit, proof, output, None, channel)
+    verify_gkr_inner(circuit, proof, output, None, channel, None)
 }
 
 /// Verify a GKR proof with access to model weights.
@@ -59,7 +59,22 @@ pub fn verify_gkr_with_weights(
     weights: &GraphWeights,
     channel: &mut PoseidonChannel,
 ) -> Result<GKRClaim, GKRError> {
-    verify_gkr_inner(circuit, proof, output, Some(weights), channel)
+    verify_gkr_inner(circuit, proof, output, Some(weights), channel, None)
+}
+
+/// Verify a GKR proof with explicit policy binding.
+///
+/// The policy commitment must match the one used during proving — otherwise
+/// the Fiat-Shamir transcript diverges and verification fails.
+pub fn verify_gkr_with_policy(
+    circuit: &LayeredCircuit,
+    proof: &GKRProof,
+    output: &M31Matrix,
+    weights: Option<&GraphWeights>,
+    channel: &mut PoseidonChannel,
+    policy: &crate::policy::PolicyConfig,
+) -> Result<GKRClaim, GKRError> {
+    verify_gkr_inner(circuit, proof, output, weights, channel, Some(policy))
 }
 
 fn verify_gkr_inner(
@@ -68,6 +83,7 @@ fn verify_gkr_inner(
     output: &M31Matrix,
     weights: Option<&GraphWeights>,
     channel: &mut PoseidonChannel,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<GKRClaim, GKRError> {
     let d = circuit.layers.len();
 
@@ -82,10 +98,20 @@ fn verify_gkr_inner(
         });
     }
 
+    // Resolve policy configuration (must match prover's policy).
+    let resolved_policy = crate::policy::resolve(policy);
+
     // Seed channel identically to prover
     channel.mix_u64(d as u64);
     channel.mix_u64(circuit.input_shape.0 as u64);
     channel.mix_u64(circuit.input_shape.1 as u64);
+
+    // Bind policy commitment (must match prover's mix position exactly).
+    let policy_commitment = resolved_policy.policy_commitment();
+    let skip_policy = std::env::var("STWO_SKIP_POLICY_COMMITMENT").is_ok();
+    if !skip_policy && policy_commitment != starknet_ff::FieldElement::ZERO {
+        channel.mix_felt(policy_commitment);
+    }
 
     // Reconstruct output claim
     let output_padded = pad_matrix_pow2(output);

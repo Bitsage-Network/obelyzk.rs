@@ -372,6 +372,14 @@ pub fn piecewise_activation_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// Check piecewise activation from an explicit policy configuration.
+///
+/// Prefer this over [`piecewise_activation_enabled()`] when a [`PolicyConfig`] is available,
+/// to avoid reading environment variables.
+pub fn piecewise_activation_from_policy(policy: &crate::policy::PolicyConfig) -> bool {
+    policy.piecewise_activation
+}
+
 /// Error type for activation proving.
 #[derive(Debug, thiserror::Error)]
 pub enum ActivationError {

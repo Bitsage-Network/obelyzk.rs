@@ -259,7 +259,7 @@ impl GpuModelProver {
         {
             use stwo::prover::backend::gpu::GpuBackend;
             return crate::aggregation::prove_model_aggregated_onchain_with::<GpuBackend>(
-                graph, input, weights,
+                graph, input, weights, None,
             );
         }
 

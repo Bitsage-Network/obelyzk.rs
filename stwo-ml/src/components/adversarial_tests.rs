@@ -204,6 +204,7 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════
 
     #[test]
+    #[cfg(feature = "cli")]
     fn test_adversarial_commitment_chain_tampering() {
         use crate::economics::{CommitmentChain, VerificationPolicy};
         use starknet_ff::FieldElement;

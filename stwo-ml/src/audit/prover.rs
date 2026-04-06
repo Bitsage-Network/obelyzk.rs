@@ -36,12 +36,13 @@ pub struct AuditProver<'a> {
     graph: &'a ComputationGraph,
     weights: &'a GraphWeights,
     weight_cache: Option<&'a crate::weight_cache::SharedWeightCache>,
+    policy: Option<&'a crate::policy::PolicyConfig>,
 }
 
 impl<'a> AuditProver<'a> {
     /// Create a prover for a model.
     pub fn new(graph: &'a ComputationGraph, weights: &'a GraphWeights) -> Self {
-        Self { graph, weights, weight_cache: None }
+        Self { graph, weights, weight_cache: None, policy: None }
     }
 
     /// Create a prover with a pre-warmed weight cache for GPU-accelerated proving.
@@ -50,7 +51,13 @@ impl<'a> AuditProver<'a> {
         weights: &'a GraphWeights,
         cache: &'a crate::weight_cache::SharedWeightCache,
     ) -> Self {
-        Self { graph, weights, weight_cache: Some(cache) }
+        Self { graph, weights, weight_cache: Some(cache), policy: None }
+    }
+
+    /// Set the policy configuration for proof binding.
+    pub fn with_policy(mut self, policy: &'a crate::policy::PolicyConfig) -> Self {
+        self.policy = Some(policy);
+        self
     }
 
     /// Prove all inferences in a time window.
@@ -67,6 +74,7 @@ impl<'a> AuditProver<'a> {
         &self,
         log: &InferenceLog,
         request: &AuditRequest,
+        policy: Option<&crate::policy::PolicyConfig>,
     ) -> Result<BatchAuditResult, AuditError> {
         let total_start = Instant::now();
 
@@ -238,6 +246,14 @@ impl<'a> AuditProver<'a> {
             verification_calldata,
             weight_binding_mode,
             tee_attestation_hash: None,
+            policy_name: {
+                let resolved = crate::policy::resolve(policy.or(self.policy));
+                Some(crate::policy::preset_name(&resolved).unwrap_or("custom").to_string())
+            },
+            policy_commitment: {
+                let resolved = crate::policy::resolve(policy.or(self.policy));
+                Some(format!("0x{:x}", resolved.policy_commitment()))
+            },
         })
     }
 
@@ -303,7 +319,7 @@ impl<'a> AuditProver<'a> {
 
         let agg_proof =
             crate::aggregation::prove_model_pure_gkr_auto_with_cache(
-                self.graph, input, self.weights, self.weight_cache,
+                self.graph, input, self.weights, self.weight_cache, self.policy,
             )
                 .map_err(|e| AuditError::ProvingFailed(format!("GKR proving failed: {}", e)))?;
         let gkr_proof = build_gkr_serializable_proof(&agg_proof, model_id, input)
@@ -353,7 +369,7 @@ impl<'a> AuditProver<'a> {
         // and the GKR proof is available from the aggregated proof.
         let streaming_steps = if verify_on_chain {
             if let Some(ref gkr) = agg_proof.gkr_proof {
-                match self.build_streaming_steps(gkr, model_id, input, &agg_proof.execution.output) {
+                match self.build_streaming_steps(gkr, model_id, input, &agg_proof.execution.output, agg_proof.policy_commitment) {
                     Ok(steps) => {
                         info!(
                             steps = steps.len(),
@@ -408,6 +424,7 @@ impl<'a> AuditProver<'a> {
         model_id: FieldElement,
         input: &M31Matrix,
         output: &M31Matrix,
+        policy_commitment: FieldElement,
     ) -> Result<Vec<crate::audit::types::StreamingVerificationStep>, AuditError> {
         use crate::audit::types::StreamingVerificationStep;
 
@@ -418,6 +435,7 @@ impl<'a> AuditProver<'a> {
 
         let streaming = crate::starknet::build_streaming_gkr_calldata(
             gkr_proof, &circuit, model_id, &raw_io, None, None,
+            policy_commitment,
         )
         .map_err(|e| AuditError::ProvingFailed(format!("Streaming calldata build failed: {}", e)))?;
 
@@ -448,12 +466,14 @@ impl<'a> AuditProver<'a> {
             });
         }
 
-        // Weight binding (packed QM31, separate TX before input MLE)
-        steps.push(StreamingVerificationStep {
-            filename: "stream_weight_binding.txt".to_string(),
-            entrypoint: "verify_gkr_stream_weight_binding".to_string(),
-            calldata: streaming.weight_binding_calldata,
-        });
+        // Weight binding (potentially chunked for large proofs)
+        for chunk in &streaming.weight_binding_chunks {
+            steps.push(StreamingVerificationStep {
+                filename: format!("stream_weight_binding_{}.txt", chunk.chunk_idx),
+                entrypoint: chunk.entrypoint.clone(),
+                calldata: chunk.calldata.clone(),
+            });
+        }
 
         // Input MLE chunks (uniform — no binding data)
         for (i, chunk) in streaming.input_mle_chunks.iter().enumerate() {
@@ -488,7 +508,9 @@ impl<'a> AuditProver<'a> {
         input: &M31Matrix,
         start: Instant,
     ) -> Result<InferenceProofResult, AuditError> {
-        let proof = prove_for_starknet_onchain(self.graph, input, self.weights)
+        let proof = crate::starknet::prove_for_starknet_onchain_with_policy(
+                self.graph, input, self.weights, self.policy,
+            )
             .map_err(|e| AuditError::ProvingFailed(format!("Direct proving failed: {}", e)))?;
 
         let proving_time_ms = start.elapsed().as_millis() as u64;
@@ -762,7 +784,7 @@ mod tests {
             ..AuditRequest::default()
         };
 
-        let result = prover.prove_window(&log, &request).unwrap();
+        let result = prover.prove_window(&log, &request, None).unwrap();
         assert_eq!(result.inference_count, 1);
         assert_eq!(result.inference_results.len(), 1);
         assert!(result.proving_time_ms > 0);
@@ -796,8 +818,8 @@ mod tests {
             ..AuditRequest::default()
         };
 
-        let r1 = prover1.prove_window(&log1, &request).unwrap();
-        let r2 = prover2.prove_window(&log2, &request).unwrap();
+        let r1 = prover1.prove_window(&log1, &request, None).unwrap();
+        let r2 = prover2.prove_window(&log2, &request, None).unwrap();
 
         assert_eq!(r1.io_merkle_root, r2.io_merkle_root);
         assert_eq!(r1.combined_chain_commitment, r2.combined_chain_commitment);
@@ -821,7 +843,7 @@ mod tests {
             ..AuditRequest::default()
         };
 
-        let result = prover.prove_window(&log, &request);
+        let result = prover.prove_window(&log, &request, None);
         assert!(matches!(result, Err(AuditError::EmptyWindow { .. })));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -896,7 +918,7 @@ mod tests {
             ..AuditRequest::default()
         };
 
-        let result = prover.prove_window(&log, &request).unwrap();
+        let result = prover.prove_window(&log, &request, None).unwrap();
         assert_eq!(result.inference_count, 1);
         // Legacy mode: proof_calldata should be empty.
         assert!(result.proof_calldata.is_empty());
@@ -1031,7 +1053,7 @@ mod tests {
             ..AuditRequest::default()
         };
 
-        let result = prover.prove_window(&log, &request).unwrap();
+        let result = prover.prove_window(&log, &request, None).unwrap();
         assert_eq!(result.inference_count, 1);
         assert_eq!(result.inference_results[0].proof_mode, ProofMode::Gkr);
 
@@ -1083,7 +1105,7 @@ mod tests {
             ..AuditRequest::default()
         };
 
-        let result = prover.prove_window(&log, &request).unwrap();
+        let result = prover.prove_window(&log, &request, None).unwrap();
         assert_eq!(result.inference_count, 1);
         assert!(
             result.inference_results[0].streaming_steps.is_none(),

@@ -304,6 +304,14 @@ pub struct BatchAuditResult {
     // === TEE ===
     /// TEE attestation hash (None if no TEE).
     pub tee_attestation_hash: Option<String>,
+
+    // === Policy ===
+    /// Policy preset name used for proving ("strict", "standard", "relaxed", or "custom").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_name: Option<String>,
+    /// Poseidon commitment of the PolicyConfig (hex felt252).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_commitment: Option<String>,
 }
 
 // ─── Stage 3: Semantic Evaluation (Dev B produces) ──────────────────────────

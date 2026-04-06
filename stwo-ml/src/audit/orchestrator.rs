@@ -168,7 +168,7 @@ pub fn run_audit(
     } else {
         AuditProver::new(graph, weights)
     };
-    let audit_result = prover.prove_window(log, &config.request)?;
+    let audit_result = prover.prove_window(log, &config.request, None)?;
 
     // Extract streaming verification steps from per-inference results.
     let streaming_verification_steps = {

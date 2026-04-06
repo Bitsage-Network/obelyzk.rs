@@ -3422,6 +3422,232 @@ pub fn felt_to_receipt_hash(felt: &FieldElement) -> [u8; 32] {
     felt.to_bytes_be()
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Recursive STARK proof serialization (Poseidon252MerkleHasher)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The recursive STARK uses `Poseidon252MerkleHasher` whose `Hash` type is
+// `FieldElement252` (a single felt252), not `Blake2sHash`.  This means:
+//   - Commitments are single felt252 per tree (vs 8 felt252 for Blake2s).
+//   - Decommitment hash_witness entries are single felt252.
+//   - FRI layer commitments are single felt252.
+//
+// The serialization layout matches Cairo's `#[derive(Serde)]` on the same
+// generic `StarkProof<Poseidon252MerkleHasher>` / `CommitmentSchemeProof`.
+//
+// Feature-gated behind `cli` because the `recursive` module is `cli`-only.
+
+#[cfg(feature = "cli")]
+mod recursive_serde {
+    use super::*;
+    use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
+
+    /// Concrete proof type for Poseidon252 channel (recursive STARK).
+    pub type Poseidon252Proof = StarkProof<Poseidon252MerkleHasher>;
+
+    /// Concrete hasher type for Poseidon252 channel.
+    type Poseidon252HasherType = Poseidon252MerkleHasher;
+
+    /// Serialize a Poseidon252 hash (FieldElement252) — single felt252.
+    fn serialize_poseidon252_hash(hash: &FieldElement, output: &mut Vec<FieldElement>) {
+        output.push(*hash);
+    }
+
+    /// Serialize `TreeVec<FieldElement252>` (commitments) for Poseidon252 proofs.
+    fn serialize_tree_hashes_poseidon252(
+        tree: &TreeVec<FieldElement>,
+        output: &mut Vec<FieldElement>,
+    ) {
+        serialize_u32(tree.0.len() as u32, output);
+        for hash in &tree.0 {
+            serialize_poseidon252_hash(hash, output);
+        }
+    }
+
+    /// Serialize `TreeVec<MerkleDecommitmentLifted<Poseidon252MerkleHasher>>`.
+    fn serialize_decommitments_poseidon252(
+        tree: &TreeVec<MerkleDecommitmentLifted<Poseidon252HasherType>>,
+        output: &mut Vec<FieldElement>,
+    ) {
+        serialize_u32(tree.0.len() as u32, output);
+        for decommitment in &tree.0 {
+            serialize_merkle_decommitment_poseidon252(decommitment, output);
+        }
+    }
+
+    fn serialize_merkle_decommitment_poseidon252(
+        decommitment: &MerkleDecommitmentLifted<Poseidon252HasherType>,
+        output: &mut Vec<FieldElement>,
+    ) {
+        // hash_witness: Span<felt252> — each hash is a single felt252
+        serialize_span(
+            &decommitment.hash_witness,
+            |h, o| serialize_poseidon252_hash(h, o),
+            output,
+        );
+        // column_witness: Span<M31> — empty (same as Blake2s path)
+        serialize_u32(0, output);
+    }
+
+    /// Serialize a FRI layer proof for Poseidon252.
+    fn serialize_fri_layer_proof_poseidon252(
+        layer: &stwo::core::fri::FriLayerProof<Poseidon252HasherType>,
+        output: &mut Vec<FieldElement>,
+    ) {
+        // fri_witness: Span<QM31>
+        serialize_span(&layer.fri_witness, |v, o| serialize_qm31(*v, o), output);
+        // decommitment: MerkleDecommitment<Poseidon252>
+        serialize_merkle_decommitment_poseidon252(&layer.decommitment, output);
+        // commitment: felt252
+        serialize_poseidon252_hash(&layer.commitment, output);
+    }
+
+    /// Serialize a FRI proof for Poseidon252.
+    fn serialize_fri_proof_poseidon252(
+        fri: &stwo::core::fri::FriProof<Poseidon252HasherType>,
+        output: &mut Vec<FieldElement>,
+    ) {
+        // first_layer: FriLayerProof
+        serialize_fri_layer_proof_poseidon252(&fri.first_layer, output);
+        // inner_layers: Span<FriLayerProof>
+        serialize_span(
+            &fri.inner_layers,
+            serialize_fri_layer_proof_poseidon252,
+            output,
+        );
+        // last_layer_poly: LinePoly
+        serialize_line_poly(&fri.last_layer_poly, output);
+    }
+
+    /// Serialize the full `CommitmentSchemeProof<Poseidon252MerkleHasher>`.
+    ///
+    /// Same field order as the Blake2s variant but with felt252 hashes.
+    fn serialize_commitment_scheme_proof_poseidon252(
+        proof: &stwo::core::pcs::quotients::CommitmentSchemeProof<Poseidon252HasherType>,
+        output: &mut Vec<FieldElement>,
+    ) {
+        // 1. config: PcsConfig
+        serialize_pcs_config(&proof.config, output);
+
+        // 2. commitments: TreeVec<felt252>
+        serialize_tree_hashes_poseidon252(&proof.commitments, output);
+
+        // 3. sampled_values: TreeVec<ColumnVec<Vec<SecureField>>>
+        serialize_sampled_values(&proof.sampled_values, output);
+
+        // 4. decommitments: TreeVec<MerkleDecommitmentLifted<Poseidon252>>
+        serialize_decommitments_poseidon252(&proof.decommitments, output);
+
+        // 5. queried_values: TreeVec<ColumnVec<Vec<BaseField>>>
+        serialize_queried_values(&proof.queried_values, output);
+
+        // 6. proof_of_work_nonce: u64
+        serialize_u64(proof.proof_of_work, output);
+
+        // 7. fri_proof: FriProof<Poseidon252>
+        serialize_fri_proof_poseidon252(&proof.fri_proof, output);
+    }
+
+    /// Serialize a complete `RecursiveProof` into calldata felts for single-TX
+    /// on-chain verification.
+    ///
+    /// # Layout
+    ///
+    /// ```text
+    /// ┌──────────────────────────────────────────────────────────┐
+    /// │ Public Inputs (RecursivePublicInputs)                    │
+    /// │   circuit_hash: QM31             [4 felts]               │
+    /// │   io_commitment: QM31            [4 felts]               │
+    /// │   weight_super_root: QM31        [4 felts]               │
+    /// │   n_layers: u32                  [1 felt]                │
+    /// │   verified: bool (u32)           [1 felt]                │
+    /// │ final_digest: felt252            [1 felt]                │
+    /// │ log_size: u32                    [1 felt]                │
+    /// ├──────────────────────────────────────────────────────────┤
+    /// │ StarkProof<Poseidon252MerkleHasher>                      │
+    /// │   (CommitmentSchemeProof layout — see above)             │
+    /// └──────────────────────────────────────────────────────────┘
+    /// ```
+    ///
+    /// Total: ~16 header felts + STARK proof body.
+    /// For a log_size=10 recursive STARK this is typically 200-600 felts,
+    /// compared to 10,000+ for the raw GKR streaming pipeline.
+    pub fn serialize_recursive_proof_calldata(
+        proof: &crate::recursive::types::RecursiveProof,
+    ) -> Vec<FieldElement> {
+        let mut output = Vec::new();
+
+        // ── Public Inputs ────────────────────────────────────────────────
+        serialize_qm31(proof.public_inputs.circuit_hash, &mut output);
+        serialize_qm31(proof.public_inputs.io_commitment, &mut output);
+        serialize_qm31(proof.public_inputs.weight_super_root, &mut output);
+        serialize_u32(proof.public_inputs.n_layers, &mut output);
+        serialize_u32(if proof.public_inputs.verified { 1 } else { 0 }, &mut output);
+
+        // Final digest (felt252)
+        output.push(proof.final_digest);
+
+        // Trace log_size (needed by verifier to reconstruct the AIR)
+        serialize_u32(proof.log_size, &mut output);
+
+        // ── STARK Proof Body ─────────────────────────────────────────────
+        serialize_commitment_scheme_proof_poseidon252(&proof.stark_proof.0, &mut output);
+
+        output
+    }
+
+    /// Compute a summary of the recursive proof calldata for display.
+    pub fn recursive_proof_calldata_summary(
+        proof: &crate::recursive::types::RecursiveProof,
+    ) -> RecursiveCalldataSummary {
+        let calldata = serialize_recursive_proof_calldata(proof);
+        let n_commitments = proof.stark_proof.0.commitments.0.len();
+        let n_fri_layers = 1 + proof.stark_proof.0.fri_proof.inner_layers.len();
+        let n_queries = proof
+            .stark_proof
+            .0
+            .queried_values
+            .0
+            .first()
+            .map(|cols| cols.first().map(|v| v.len()).unwrap_or(0))
+            .unwrap_or(0);
+
+        RecursiveCalldataSummary {
+            total_felts: calldata.len(),
+            header_felts: 16, // 4+4+4+1+1+1+1
+            n_commitments,
+            n_fri_layers,
+            n_queries,
+            log_size: proof.log_size,
+        }
+    }
+
+    /// Summary of recursive proof calldata.
+    #[derive(Debug, Clone)]
+    pub struct RecursiveCalldataSummary {
+        /// Total number of felt252 values in the calldata.
+        pub total_felts: usize,
+        /// Number of header felts (public inputs + metadata).
+        pub header_felts: usize,
+        /// Number of tree commitments.
+        pub n_commitments: usize,
+        /// Number of FRI layers (first + inner).
+        pub n_fri_layers: usize,
+        /// Number of FRI queries.
+        pub n_queries: usize,
+        /// Trace log_size.
+        pub log_size: u32,
+    }
+}
+
+#[cfg(feature = "cli")]
+pub use recursive_serde::{
+    serialize_recursive_proof_calldata,
+    recursive_proof_calldata_summary,
+    Poseidon252Proof,
+    RecursiveCalldataSummary,
+};
+
 /// Convert a FieldElement to M31 (truncating to 31 bits).
 ///
 /// NOTE: This silently reduces values mod P. For verification paths where
@@ -4245,6 +4471,7 @@ mod tests {
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: starknet_ff::FieldElement::ZERO,
         };
 
         let metadata = MLClaimMetadata {
@@ -4357,6 +4584,7 @@ mod tests {
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: starknet_ff::FieldElement::ZERO,
         };
 
         let metadata = MLClaimMetadata {
@@ -4552,6 +4780,7 @@ mod tests {
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: starknet_ff::FieldElement::ZERO,
         };
         let felts_none = serialize_ml_proof_for_recursive(&aggregated_none, &metadata, None);
 
@@ -4587,6 +4816,7 @@ mod tests {
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: starknet_ff::FieldElement::ZERO,
         };
         let felts_some = serialize_ml_proof_for_recursive(&aggregated_some, &metadata, None);
 
@@ -4702,6 +4932,7 @@ mod tests {
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: starknet_ff::FieldElement::ZERO,
         };
 
         let metadata = MLClaimMetadata {
@@ -5071,6 +5302,7 @@ mod tests {
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: starknet_ff::FieldElement::ZERO,
         };
 
         let metadata = MLClaimMetadata {
@@ -5196,6 +5428,7 @@ mod tests {
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: starknet_ff::FieldElement::ZERO,
         };
 
         let metadata = MLClaimMetadata {

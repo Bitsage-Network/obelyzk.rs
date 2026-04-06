@@ -53,6 +53,7 @@ pub mod aggregation;
 pub mod backend;
 pub mod cairo_serde;
 pub mod circuits;
+pub mod classifier;
 pub mod compiler;
 pub mod components;
 pub mod crypto;
@@ -60,13 +61,16 @@ pub mod gadgets;
 pub mod gkr;
 pub mod gpu;
 pub mod json_serde;
+pub mod policy;
 #[cfg(feature = "binary-proof")]
 pub mod binary_serde;
 #[cfg(any(feature = "cli", feature = "audit", feature = "server"))]
 pub mod kv_state;
+#[cfg(feature = "cli")]
 pub mod economics;
 pub mod receipt;
 pub mod starknet;
+#[cfg(feature = "cli")]
 pub mod recursive;
 pub mod tee;
 pub mod weight_cache;
@@ -91,6 +95,9 @@ pub mod multi_gpu;
 
 #[cfg(feature = "multi-query")]
 pub mod gpu_scheduler;
+
+#[cfg(feature = "server")]
+pub mod worker;
 
 /// Re-export core STWO types used throughout stwo-ml.
 pub mod prelude {

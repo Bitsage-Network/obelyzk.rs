@@ -2531,6 +2531,9 @@ pub struct AggregatedModelProofOnChain {
     /// Previous step's KV-cache commitment (ZERO for prefill / step 0).
     /// Used for chain verification: `proof[i+1].prev == proof[i].kv_cache_commitment`.
     pub prev_kv_cache_commitment: Option<FieldElement>,
+    /// Policy commitment: Poseidon hash of the [`PolicyConfig`](crate::policy::PolicyConfig)
+    /// under which this proof was generated. ZERO means legacy (no explicit policy).
+    pub policy_commitment: FieldElement,
 }
 
 impl AggregatedModelProofOnChain {
@@ -2577,7 +2580,7 @@ pub fn prove_model_aggregated_onchain(
     input: &M31Matrix,
     weights: &GraphWeights,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
-    prove_model_aggregated_onchain_with::<SimdBackend>(graph, input, weights)
+    prove_model_aggregated_onchain_with::<SimdBackend>(graph, input, weights, None)
 }
 
 /// On-chain aggregated proving, generic over backend `B`.
@@ -2590,6 +2593,7 @@ pub(crate) fn prove_model_aggregated_onchain_with<B>(
     graph: &ComputationGraph,
     input: &M31Matrix,
     weights: &GraphWeights,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError>
 where
     B: BackendForChannel<Blake2sMerkleChannel> + PolyOps + ColumnOps<BaseField>,
@@ -2603,7 +2607,7 @@ where
     FrameworkComponent<QuantizeEval>: ComponentProver<B>,
     FrameworkComponent<DequantizeEval>: ComponentProver<B>,
 {
-    prove_model_aggregated_onchain_with_cache::<B>(graph, input, weights, None, None)
+    prove_model_aggregated_onchain_with_cache::<B>(graph, input, weights, None, None, policy)
 }
 
 /// On-chain aggregated proving with optional weight commitment cache.
@@ -2621,6 +2625,7 @@ pub(crate) fn prove_model_aggregated_onchain_with_cache<B>(
     weights: &GraphWeights,
     _weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
     precomputed: Option<PrecomputedMatmuls>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError>
 where
     B: BackendForChannel<Blake2sMerkleChannel> + PolyOps + ColumnOps<BaseField>,
@@ -2634,6 +2639,8 @@ where
     FrameworkComponent<QuantizeEval>: ComponentProver<B>,
     FrameworkComponent<DequantizeEval>: ComponentProver<B>,
 {
+    let resolved_policy = crate::policy::resolve(policy);
+
     info!(
         backend = std::any::type_name::<B>(),
         "Proving unified STARK (on-chain aggregation, Blake2sMerkleChannel)"
@@ -3607,6 +3614,7 @@ where
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: resolved_policy.policy_commitment(),
         });
     }
 
@@ -3663,6 +3671,7 @@ where
         gkr_batch_data: None,
         kv_cache_commitment: None,
         prev_kv_cache_commitment: None,
+        policy_commitment: resolved_policy.policy_commitment(),
     })
 }
 
@@ -3676,6 +3685,7 @@ pub fn prove_model_aggregated_onchain_auto(
     graph: &ComputationGraph,
     input: &M31Matrix,
     weights: &GraphWeights,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
     let gpu_available = crate::backend::gpu_is_available();
     info!(
@@ -3685,11 +3695,11 @@ pub fn prove_model_aggregated_onchain_auto(
     crate::backend::with_best_backend(
         || {
             info!("Using SimdBackend for on-chain aggregation");
-            prove_model_aggregated_onchain_with::<SimdBackend>(graph, input, weights)
+            prove_model_aggregated_onchain_with::<SimdBackend>(graph, input, weights, policy)
         },
         || {
             info!("Using GpuBackend for on-chain aggregation");
-            prove_model_aggregated_onchain_gpu(graph, input, weights)
+            prove_model_aggregated_onchain_gpu(graph, input, weights, policy)
         },
     )
 }
@@ -3707,6 +3717,7 @@ pub(crate) fn prove_model_aggregated_onchain_with_precomputed(
     input: &M31Matrix,
     weights: &GraphWeights,
     precomputed: PrecomputedMatmuls,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
     #[cfg(feature = "cuda-runtime")]
     {
@@ -3718,6 +3729,7 @@ pub(crate) fn prove_model_aggregated_onchain_with_precomputed(
                 weights,
                 None,
                 Some(precomputed),
+                policy,
             );
         }
     }
@@ -3728,6 +3740,7 @@ pub(crate) fn prove_model_aggregated_onchain_with_precomputed(
         weights,
         None,
         Some(precomputed),
+        policy,
     )
 }
 
@@ -3736,6 +3749,7 @@ fn prove_model_aggregated_onchain_gpu(
     graph: &ComputationGraph,
     input: &M31Matrix,
     weights: &GraphWeights,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
     // Phase 3 (unified STARK) always uses SimdBackend internally,
     // so GpuBackend is only used for Phase 1+2 (matmul forward/sumcheck).
@@ -3743,12 +3757,12 @@ fn prove_model_aggregated_onchain_gpu(
     #[cfg(feature = "cuda-runtime")]
     {
         use stwo::prover::backend::gpu::GpuBackend;
-        return prove_model_aggregated_onchain_with::<GpuBackend>(graph, input, weights);
+        return prove_model_aggregated_onchain_with::<GpuBackend>(graph, input, weights, policy);
     }
 
     #[cfg(not(feature = "cuda-runtime"))]
     {
-        prove_model_aggregated_onchain_with::<SimdBackend>(graph, input, weights)
+        prove_model_aggregated_onchain_with::<SimdBackend>(graph, input, weights, policy)
     }
 }
 
@@ -3767,6 +3781,7 @@ pub fn prove_model_aggregated_onchain_auto_cached(
     input: &M31Matrix,
     weights: &GraphWeights,
     weight_cache: &crate::weight_cache::SharedWeightCache,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
     let _cache = weight_cache; // used in cuda-runtime path only
 
@@ -3774,12 +3789,12 @@ pub fn prove_model_aggregated_onchain_auto_cached(
     {
         let gpu_available = crate::backend::gpu_is_available();
         if gpu_available {
-            return prove_model_aggregated_onchain_gpu_cached(graph, input, weights, _cache);
+            return prove_model_aggregated_onchain_gpu_cached(graph, input, weights, _cache, policy);
         }
     }
 
     // Non-GPU path: no batch entry prep, cache unused
-    prove_model_aggregated_onchain_with::<SimdBackend>(graph, input, weights)
+    prove_model_aggregated_onchain_with::<SimdBackend>(graph, input, weights, policy)
 }
 
 /// GPU proving path with weight cache.
@@ -3789,6 +3804,7 @@ fn prove_model_aggregated_onchain_gpu_cached(
     input: &M31Matrix,
     weights: &GraphWeights,
     weight_cache: &crate::weight_cache::SharedWeightCache,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
     // Phase 3 (unified STARK) always uses SimdBackend internally,
     // so GpuBackend is only used for Phase 1+2 (matmul forward/sumcheck).
@@ -3800,6 +3816,7 @@ fn prove_model_aggregated_onchain_gpu_cached(
         weights,
         Some(weight_cache),
         None,
+        policy,
     )
 }
 
@@ -4009,7 +4026,7 @@ where
 {
     // Step 1: Run the standard aggregated pipeline
     let mut proof =
-        prove_model_aggregated_onchain_with_cache::<B>(graph, input, weights, None, None)?;
+        prove_model_aggregated_onchain_with_cache::<B>(graph, input, weights, None, None, None)?;
 
     // Step 2: Compile the GKR circuit from the computation graph
     let circuit = crate::gkr::LayeredCircuit::from_graph(graph)
@@ -4049,7 +4066,7 @@ pub fn prove_model_pure_gkr(
     input: &M31Matrix,
     weights: &GraphWeights,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
-    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, None, None)
+    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, None, None, None)
 }
 
 /// Pure GKR with auto GPU dispatch for the unified STARK backend.
@@ -4058,29 +4075,34 @@ pub fn prove_model_pure_gkr_auto(
     input: &M31Matrix,
     weights: &GraphWeights,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
-    prove_model_pure_gkr_auto_with_cache(graph, input, weights, None)
+    prove_model_pure_gkr_auto_with_cache(graph, input, weights, None, None)
 }
 
-/// Like [`prove_model_pure_gkr_auto`] but with optional weight commitment cache.
+/// Like [`prove_model_pure_gkr_auto`] but with optional weight commitment cache and policy.
 ///
 /// When a cache is provided, Poseidon Merkle root computations for weight
 /// matrices are skipped on cache hits, reducing commitment time from ~500s
 /// to near-zero on subsequent proofs of the same model.
+///
+/// When a [`PolicyConfig`](crate::policy::PolicyConfig) is provided, its commitment
+/// is mixed into the Fiat-Shamir channel, cryptographically binding the proof to
+/// the policy. Pass `None` for backward-compatible env var behavior.
 pub fn prove_model_pure_gkr_auto_with_cache(
     graph: &ComputationGraph,
     input: &M31Matrix,
     weights: &GraphWeights,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
     #[cfg(feature = "cuda-runtime")]
     {
         if crate::backend::gpu_is_available() {
             return prove_model_pure_gkr_inner::<stwo::prover::backend::gpu::GpuBackend>(
-                graph, input, weights, weight_cache, None,
+                graph, input, weights, weight_cache, None, policy,
             );
         }
     }
-    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, weight_cache, None)
+    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, weight_cache, None, policy)
 }
 
 /// Prove a prefill batch (seq_len >= 1) with KV-cache support.
@@ -4096,7 +4118,7 @@ pub fn prove_model_pure_gkr_prefill(
     weights: &GraphWeights,
     kv_cache: &mut crate::components::attention::ModelKVCache,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
-    prove_model_pure_gkr_prefill_with_cache(graph, input, weights, kv_cache, None)
+    prove_model_pure_gkr_prefill_with_cache(graph, input, weights, kv_cache, None, None)
 }
 
 /// Like [`prove_model_pure_gkr_prefill`] but with optional weight commitment cache.
@@ -4106,16 +4128,17 @@ pub fn prove_model_pure_gkr_prefill_with_cache(
     weights: &GraphWeights,
     kv_cache: &mut crate::components::attention::ModelKVCache,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
     #[cfg(feature = "cuda-runtime")]
     {
         if crate::backend::gpu_is_available() {
             return prove_model_pure_gkr_inner::<stwo::prover::backend::gpu::GpuBackend>(
-                graph, input, weights, weight_cache, Some(kv_cache),
+                graph, input, weights, weight_cache, Some(kv_cache), policy,
             );
         }
     }
-    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, weight_cache, Some(kv_cache))
+    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, weight_cache, Some(kv_cache), policy)
 }
 
 /// Streaming prefill: split a long prompt into chunks and prove each independently.
@@ -4133,6 +4156,7 @@ pub fn prove_model_pure_gkr_prefill_chunked(
     weights: &GraphWeights,
     kv_cache: &mut crate::components::attention::ModelKVCache,
     chunk_size: usize,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<Vec<AggregatedModelProofOnChain>, AggregationError> {
     assert!(chunk_size > 0, "chunk_size must be > 0");
     let total_rows = input.rows;
@@ -4167,6 +4191,7 @@ pub fn prove_model_pure_gkr_prefill_chunked(
             weights,
             kv_cache,
             Some(&weight_cache),
+            policy,
         )?;
         proofs.push(proof);
         offset += chunk_rows;
@@ -4195,6 +4220,7 @@ pub fn prove_model_pure_gkr_decode_step(
     weights: &GraphWeights,
     kv_cache: &mut crate::components::attention::ModelKVCache,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
     assert_eq!(
         token_input.rows, 1,
@@ -4208,6 +4234,7 @@ pub fn prove_model_pure_gkr_decode_step(
         weights,
         kv_cache,
         weight_cache,
+        policy,
     )
 }
 
@@ -4225,6 +4252,7 @@ pub fn prove_model_pure_gkr_decode_sequence(
     weights: &GraphWeights,
     kv_cache: &mut crate::components::attention::ModelKVCache,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<Vec<AggregatedModelProofOnChain>, AggregationError> {
     let decode_graph = graph.with_seq_len(1);
     let mut proofs = Vec::with_capacity(token_inputs.len());
@@ -4241,6 +4269,7 @@ pub fn prove_model_pure_gkr_decode_sequence(
             weights,
             kv_cache,
             weight_cache,
+            policy,
         )?;
         proofs.push(proof);
     }
@@ -4280,6 +4309,7 @@ fn prove_model_pure_gkr_inner<B>(
     weights: &GraphWeights,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
     mut kv_cache: Option<&mut crate::components::attention::ModelKVCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError>
 where
     B: BackendForChannel<Blake2sMerkleChannel> + PolyOps + ColumnOps<BaseField>,
@@ -4906,6 +4936,9 @@ where
 
     let mut gkr_channel = crate::crypto::poseidon_channel::PoseidonChannel::new();
 
+    // Resolve policy configuration for this proof.
+    let resolved_policy = crate::policy::resolve(policy);
+
     // Bind KV-cache state into GKR Fiat-Shamir transcript.
     // If a KV-cache is present, mix its current super-commitment so proofs are
     // cryptographically tied to a specific cache snapshot. Verifiers that replay
@@ -4922,16 +4955,16 @@ where
         #[cfg(feature = "cuda-runtime")]
         {
             if gpu_active {
-                crate::gkr::prove_gkr_gpu_with_cache(&circuit, &gkr_execution, weights, &mut gkr_channel, weight_cache)
+                crate::gkr::prove_gkr_gpu_with_cache(&circuit, &gkr_execution, weights, &mut gkr_channel, weight_cache, Some(&resolved_policy))
                     .map_err(|e| AggregationError::ProvingError(format!("GKR GPU proving: {e}")))?
             } else {
-                crate::gkr::prove_gkr_with_cache(&circuit, &gkr_execution, weights, &mut gkr_channel, weight_cache)
+                crate::gkr::prove_gkr_with_cache(&circuit, &gkr_execution, weights, &mut gkr_channel, weight_cache, Some(&resolved_policy))
                     .map_err(|e| AggregationError::ProvingError(format!("GKR proving: {e}")))?
             }
         }
         #[cfg(not(feature = "cuda-runtime"))]
         {
-            crate::gkr::prove_gkr_with_cache(&circuit, &gkr_execution, weights, &mut gkr_channel, weight_cache)
+            crate::gkr::prove_gkr_with_cache(&circuit, &gkr_execution, weights, &mut gkr_channel, weight_cache, Some(&resolved_policy))
                 .map_err(|e| AggregationError::ProvingError(format!("GKR proving: {e}")))?
         }
     };
@@ -5087,6 +5120,7 @@ where
             gkr_batch_data: None,
             kv_cache_commitment,
             prev_kv_cache_commitment,
+            policy_commitment: resolved_policy.policy_commitment(),
         });
     }
 
@@ -5193,6 +5227,7 @@ where
                 gkr_batch_data: None,
                 kv_cache_commitment,
                 prev_kv_cache_commitment,
+                policy_commitment: resolved_policy.policy_commitment(),
             });
         }
     }
@@ -5253,6 +5288,7 @@ where
         gkr_batch_data: None,
         kv_cache_commitment,
         prev_kv_cache_commitment,
+        policy_commitment: resolved_policy.policy_commitment(),
     })
 }
 
@@ -5272,10 +5308,12 @@ pub fn prove_model_pure_gkr_decode_step_incremental(
     kv_cache: &mut crate::components::attention::ModelKVCache,
     kv_commitment: &mut IncrementalKVCommitment,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<(AggregatedModelProofOnChain, FieldElement), AggregationError> {
     use crate::components::attention::{attention_forward_cached, AttentionIntermediates};
     use std::collections::HashMap;
 
+    let resolved_policy = crate::policy::resolve(policy);
     let t_start = std::time::Instant::now();
     eprintln!("=== Decode-Step GKR Pipeline ===");
 
@@ -5477,6 +5515,7 @@ pub fn prove_model_pure_gkr_decode_step_incremental(
         gkr_batch_data: None,
         kv_cache_commitment: Some(new_kv_commitment),
         prev_kv_cache_commitment: Some(prev_kv_commitment),
+        policy_commitment: resolved_policy.policy_commitment(),
     };
 
     eprintln!(
@@ -5572,6 +5611,8 @@ pub struct StreamingProofPipeline {
     kv_commitment: IncrementalKVCommitment,
     /// Optional weight cache for faster repeated proofs.
     weight_cache: Option<crate::weight_cache::SharedWeightCache>,
+    /// Optional policy configuration for proof binding.
+    policy: Option<crate::policy::PolicyConfig>,
     /// Token buffer — accumulates tokens until chunk_size is reached.
     token_buffer: Vec<Vec<M31>>,
     /// Hidden dimension (width of each token vector).
@@ -5603,6 +5644,7 @@ impl StreamingProofPipeline {
             kv_cache,
             kv_commitment,
             weight_cache: None,
+            policy: None,
             token_buffer: Vec::new(),
             hidden_dim,
             total_tokens_proven: 0,
@@ -5613,6 +5655,12 @@ impl StreamingProofPipeline {
     /// Set the weight cache for faster proving.
     pub fn with_weight_cache(mut self, cache: crate::weight_cache::SharedWeightCache) -> Self {
         self.weight_cache = Some(cache);
+        self
+    }
+
+    /// Set the policy configuration for proof binding.
+    pub fn with_policy(mut self, policy: crate::policy::PolicyConfig) -> Self {
+        self.policy = Some(policy);
         self
     }
 
@@ -5691,6 +5739,7 @@ impl StreamingProofPipeline {
             &mut self.kv_cache,
             &mut self.kv_commitment,
             self.weight_cache.as_ref(),
+            self.policy.as_ref(),
         )?;
 
         let prove_time_ms = t_start.elapsed().as_millis() as u64;
@@ -5748,6 +5797,7 @@ impl StreamingProofPipeline {
                 gkr_batch_data: None,
                 kv_cache_commitment: Some(new_commitment),
                 prev_kv_cache_commitment: Some(prev_commitment),
+                policy_commitment: crate::policy::resolve(self.policy.as_ref()).policy_commitment(),
             },
             num_tokens,
             position_offset,
@@ -5867,7 +5917,7 @@ where
 {
     // Step 1: Run the standard aggregated pipeline (with unified STARK + matmul sumchecks)
     let mut proof =
-        prove_model_aggregated_onchain_with_cache::<B>(graph, input, weights, None, None)?;
+        prove_model_aggregated_onchain_with_cache::<B>(graph, input, weights, None, None, None)?;
 
     // Step 2: Collect LogUp layer data via forward pass
     let layer_data = collect_forward_pass_layer_data(graph, input, weights)?;
@@ -9581,7 +9631,7 @@ mod tests {
         }
         weights.add_weight(2, w2);
 
-        let proof = prove_model_aggregated_onchain_auto(&graph, &input, &weights)
+        let proof = prove_model_aggregated_onchain_auto(&graph, &input, &weights, None)
             .expect("on-chain auto aggregated proving should succeed");
 
         assert!(proof.unified_stark.is_some());
@@ -9609,7 +9659,7 @@ mod tests {
         }
         weights.add_weight(0, w);
 
-        let proof = prove_model_aggregated_onchain_auto(&graph, &input, &weights)
+        let proof = prove_model_aggregated_onchain_auto(&graph, &input, &weights, None)
             .expect("on-chain auto matmul-only proving should succeed");
 
         assert!(proof.unified_stark.is_none());
@@ -12235,7 +12285,7 @@ mod tests {
         let mut kv_cache = ModelKVCache::new();
         let chunk_size = 4;
         let result = prove_model_pure_gkr_prefill_chunked(
-            &graph, &input, &weights, &mut kv_cache, chunk_size,
+            &graph, &input, &weights, &mut kv_cache, chunk_size, None,
         );
         assert!(result.is_ok(), "chunked prefill should succeed: {:?}", result.err());
 
@@ -12352,7 +12402,7 @@ mod tests {
         let mut kv_cache = ModelKVCache::new();
         let chunk_size = 4;
         let proofs = prove_model_pure_gkr_prefill_chunked(
-            &graph, &input, &weights, &mut kv_cache, chunk_size,
+            &graph, &input, &weights, &mut kv_cache, chunk_size, None,
         )
         .expect("chunked prefill should succeed");
 
@@ -12469,7 +12519,7 @@ mod tests {
         // Step 2: Decode 1 token
         let decode_input = make_test_matrix(1, d_model);
         let decode_proof =
-            prove_model_pure_gkr_decode_step(&graph, &decode_input, &weights, &mut kv_cache, None)
+            prove_model_pure_gkr_decode_step(&graph, &decode_input, &weights, &mut kv_cache, None, None)
                 .expect("decode step should succeed");
         assert_eq!(kv_cache.cached_len(), 3, "cache should grow to 3 after decode");
 
@@ -12503,7 +12553,7 @@ mod tests {
         // Decode 3 tokens as a sequence
         let tokens: Vec<M31Matrix> = (0..3).map(|_| make_test_matrix(1, d_model)).collect();
         let decode_proofs =
-            prove_model_pure_gkr_decode_sequence(&graph, &tokens, &weights, &mut kv_cache, None)
+            prove_model_pure_gkr_decode_sequence(&graph, &tokens, &weights, &mut kv_cache, None, None)
                 .expect("decode sequence should succeed");
 
         assert_eq!(decode_proofs.len(), 3, "should produce 3 decode proofs");
@@ -12664,6 +12714,7 @@ mod tests {
                 gkr_batch_data: None,
                 kv_cache_commitment: None,
                 prev_kv_cache_commitment: None,
+                policy_commitment: FieldElement::ZERO,
             },
             num_tokens: 1000,
             position_offset: 0,

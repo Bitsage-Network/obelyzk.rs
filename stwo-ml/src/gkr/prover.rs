@@ -106,7 +106,7 @@ fn layer_kind_from_type(layer_type: &LayerType) -> proof_stream::LayerKind {
         LayerType::Embedding { .. } => proof_stream::LayerKind::Embedding,
         // Quantize/Dequantize mapped to Add (no dedicated color needed)
         LayerType::Dequantize { .. } | LayerType::Quantize { .. } => proof_stream::LayerKind::Add,
-        LayerType::Input | LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } => proof_stream::LayerKind::Add,
+        LayerType::Input | LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } | LayerType::TopK { .. } => proof_stream::LayerKind::Add,
     }
 }
 
@@ -124,7 +124,7 @@ fn estimate_trace_cost(layer_type: &LayerType) -> usize {
             vocab_size,
             embed_dim,
         } => vocab_size * embed_dim,
-        LayerType::Input | LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } => 0,
+        LayerType::Input | LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } | LayerType::TopK { .. } => 0,
     }
 }
 
@@ -1473,16 +1473,17 @@ pub fn prove_gkr(
     weights: &GraphWeights,
     channel: &mut PoseidonChannel,
 ) -> Result<GKRProof, GKRError> {
-    prove_gkr_with_cache(circuit, execution, weights, channel, None)
+    prove_gkr_with_cache(circuit, execution, weights, channel, None, None)
 }
 
-/// CPU GKR prover with optional weight commitment cache.
+/// CPU GKR prover with optional weight commitment cache and policy.
 pub fn prove_gkr_with_cache(
     circuit: &LayeredCircuit,
     execution: &GraphExecution,
     weights: &GraphWeights,
     channel: &mut PoseidonChannel,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<GKRProof, GKRError> {
     let mut profiler = super::profiler::PhaseProfiler::new(crate::is_profile());
 
@@ -1496,10 +1497,25 @@ pub fn prove_gkr_with_cache(
     // ── Phase: channel_init ──
     profiler.begin_phase("channel_init", channel.hash_count());
 
+    // Resolve policy configuration (explicit config or env var fallback).
+    let resolved_policy = crate::policy::resolve(policy);
+
     // Seed channel with circuit metadata
     channel.mix_u64(d as u64);
     channel.mix_u64(circuit.input_shape.0 as u64);
     channel.mix_u64(circuit.input_shape.1 as u64);
+
+    // Bind policy commitment into Fiat-Shamir transcript.
+    // When non-zero, this cryptographically ties the proof to the specific policy
+    // under which it was generated. The Cairo verifier must mix at the same position.
+    // Zero commitment (legacy proofs with no explicit policy) skips the mix.
+    let policy_commitment = resolved_policy.policy_commitment();
+    // Skip policy commitment when STWO_SKIP_POLICY_COMMITMENT is set
+    // (Cairo on-chain verifier doesn't mix policy yet).
+    let skip_policy = std::env::var("STWO_SKIP_POLICY_COMMITMENT").is_ok();
+    if !skip_policy && policy_commitment != starknet_ff::FieldElement::ZERO {
+        channel.mix_felt(policy_commitment);
+    }
 
     // Start with claim on output layer: evaluate the output MLE at a random point
     let output = &execution.output;
@@ -1784,7 +1800,7 @@ pub fn prove_gkr_with_cache(
                 )?
             }
 
-            LayerType::Identity | LayerType::RoPE { .. } => {
+            LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } => {
                 // Claim propagates unchanged (RoPE verified in unified STARK)
                 continue;
             }
@@ -2309,7 +2325,10 @@ pub fn prove_gkr_decode(
 
             LayerType::RMSNorm { dim, .. } => {
                 let input_matrix = get_intermediate(execution, layer.node_id)?;
-                reduce_rmsnorm_layer(&current_claim, input_matrix, *dim, channel)?
+                let affine_gamma = weights
+                    .get_named_weight(layer.node_id, "gamma")
+                    .map(|m| m.data.as_slice());
+                reduce_rmsnorm_layer_with_gamma(&current_claim, input_matrix, *dim, channel, affine_gamma)?
             }
 
             LayerType::Quantize { params, .. } => {
@@ -2328,7 +2347,7 @@ pub fn prove_gkr_decode(
                 )?
             }
 
-            LayerType::Identity | LayerType::RoPE { .. } => {
+            LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } => {
                 continue;
             }
 
@@ -2489,9 +2508,12 @@ pub fn prove_gkr_decode(
             // --- Decode extensions: handle all layer types from transformer blocks ---
             LayerType::RMSNorm { dim, .. } => {
                 let input_matrix = get_intermediate(execution, rhs_layer.node_id)?;
+                let affine_gamma = weights
+                    .get_named_weight(rhs_layer.node_id, "gamma")
+                    .map(|m| m.data.as_slice());
                 mix_secure_field(channel, deferred_claim.value);
                 let (layer_proof, input_claim) =
-                    reduce_rmsnorm_layer(&deferred_claim, input_matrix, *dim, channel)?;
+                    reduce_rmsnorm_layer_with_gamma(&deferred_claim, input_matrix, *dim, channel, affine_gamma)?;
                 deferred_proofs.push(super::types::DeferredProof {
                     claim: deferred_claim.clone(),
                     layer_proof,
@@ -2555,7 +2577,7 @@ pub fn prove_gkr_decode(
                     kind: super::types::DeferredProofKind::Weightless,
                 });
             }
-            LayerType::Identity | LayerType::RoPE { .. } | LayerType::Input => {
+            LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } | LayerType::Input => {
                 // Identity/Input/RoPE: the claim propagates unchanged — trivial deferred proof.
                 // Replay Add reduction channel ops for transcript consistency:
                 // mix claim.value (before match), mix lhs_eval, mix rhs_eval, draw alpha.
@@ -2718,10 +2740,10 @@ pub fn prove_gkr_auto(
     weights: &GraphWeights,
     channel: &mut PoseidonChannel,
 ) -> Result<GKRProof, GKRError> {
-    prove_gkr_auto_with_cache(circuit, execution, weights, channel, None)
+    prove_gkr_auto_with_cache(circuit, execution, weights, channel, None, None)
 }
 
-/// Like [`prove_gkr_auto`] but accepts an optional weight commitment cache.
+/// Like [`prove_gkr_auto`] but accepts an optional weight commitment cache and policy.
 ///
 /// When a [`SharedWeightCache`](crate::weight_cache::SharedWeightCache) is provided,
 /// Poseidon Merkle root computations for weight matrices are cached across
@@ -2733,14 +2755,15 @@ pub fn prove_gkr_auto_with_cache(
     weights: &GraphWeights,
     channel: &mut PoseidonChannel,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<GKRProof, GKRError> {
     #[cfg(feature = "cuda-runtime")]
     {
         if crate::backend::force_gpu() || crate::backend::gpu_is_available() {
-            return prove_gkr_gpu_with_cache(circuit, execution, weights, channel, weight_cache);
+            return prove_gkr_gpu_with_cache(circuit, execution, weights, channel, weight_cache, policy);
         }
     }
-    prove_gkr_with_cache(circuit, execution, weights, channel, weight_cache)
+    prove_gkr_with_cache(circuit, execution, weights, channel, weight_cache, policy)
 }
 
 // =============================================================================
@@ -2763,10 +2786,10 @@ pub fn prove_gkr_gpu(
     weights: &GraphWeights,
     channel: &mut PoseidonChannel,
 ) -> Result<GKRProof, GKRError> {
-    prove_gkr_gpu_with_cache(circuit, execution, weights, channel, None)
+    prove_gkr_gpu_with_cache(circuit, execution, weights, channel, None, None)
 }
 
-/// GPU GKR prover with optional weight commitment cache.
+/// GPU GKR prover with optional weight commitment cache and policy.
 #[cfg(feature = "cuda-runtime")]
 pub fn prove_gkr_gpu_with_cache(
     circuit: &LayeredCircuit,
@@ -2774,6 +2797,7 @@ pub fn prove_gkr_gpu_with_cache(
     weights: &GraphWeights,
     channel: &mut PoseidonChannel,
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<GKRProof, GKRError> {
     use crate::gpu_sumcheck::GpuSumcheckExecutor;
 
@@ -2794,10 +2818,22 @@ pub fn prove_gkr_gpu_with_cache(
     // ── Phase: channel_init ──
     profiler.begin_phase("channel_init", channel.hash_count());
 
+    // Resolve policy configuration (explicit config or env var fallback).
+    let resolved_policy = crate::policy::resolve(policy);
+
     // Seed channel with circuit metadata (same as CPU prover)
     channel.mix_u64(d as u64);
     channel.mix_u64(circuit.input_shape.0 as u64);
     channel.mix_u64(circuit.input_shape.1 as u64);
+
+    // Bind policy commitment into Fiat-Shamir transcript (same position as CPU prover).
+    let policy_commitment = resolved_policy.policy_commitment();
+    // Skip policy commitment when STWO_SKIP_POLICY_COMMITMENT is set
+    // (Cairo on-chain verifier doesn't mix policy yet).
+    let skip_policy = std::env::var("STWO_SKIP_POLICY_COMMITMENT").is_ok();
+    if !skip_policy && policy_commitment != starknet_ff::FieldElement::ZERO {
+        channel.mix_felt(policy_commitment);
+    }
 
     // Start with claim on output layer
     let output = &execution.output;
@@ -2839,7 +2875,7 @@ pub fn prove_gkr_gpu_with_cache(
     let total_work_layers = circuit
         .layers
         .iter()
-        .filter(|l| !matches!(l.layer_type, LayerType::Identity | LayerType::RoPE { .. } | LayerType::Input))
+        .filter(|l| !matches!(l.layer_type, LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } | LayerType::Input))
         .count();
     let total_matmul_layers = circuit
         .layers
@@ -3020,7 +3056,10 @@ pub fn prove_gkr_gpu_with_cache(
                 profiler.record_layer_type("rmsnorm");
                 // CPU fallback — RMSNorm is memory-bound, not compute-bound
                 let input_matrix = get_intermediate(execution, layer.node_id)?;
-                reduce_rmsnorm_layer(&current_claim, input_matrix, *dim, channel)?
+                let affine_gamma = weights
+                    .get_named_weight(layer.node_id, "gamma")
+                    .map(|m| m.data.as_slice());
+                reduce_rmsnorm_layer_with_gamma(&current_claim, input_matrix, *dim, channel, affine_gamma)?
             }
 
             LayerType::Quantize { params, .. } => {
@@ -3057,7 +3096,7 @@ pub fn prove_gkr_gpu_with_cache(
                 reduce_dequantize_layer(&current_claim, input_matrix, params, channel)?
             }
 
-            LayerType::Identity | LayerType::RoPE { .. } => continue,
+            LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } => continue,
 
             LayerType::Attention { config } => {
                 profiler.record_layer_type("attention");
@@ -3824,7 +3863,7 @@ pub fn prove_gkr_decode_gpu_with_cache(
     let total_work_layers = circuit
         .layers
         .iter()
-        .filter(|l| !matches!(l.layer_type, LayerType::Identity | LayerType::RoPE { .. } | LayerType::Input))
+        .filter(|l| !matches!(l.layer_type, LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } | LayerType::Input))
         .count();
     let total_matmul_layers = circuit
         .layers
@@ -3941,7 +3980,10 @@ pub fn prove_gkr_decode_gpu_with_cache(
 
             LayerType::RMSNorm { dim, .. } => {
                 let input_matrix = get_intermediate(execution, layer.node_id)?;
-                reduce_rmsnorm_layer(&current_claim, input_matrix, *dim, channel)?
+                let affine_gamma = weights
+                    .get_named_weight(layer.node_id, "gamma")
+                    .map(|m| m.data.as_slice());
+                reduce_rmsnorm_layer_with_gamma(&current_claim, input_matrix, *dim, channel, affine_gamma)?
             }
 
             LayerType::Quantize { params, .. } => {
@@ -3965,7 +4007,7 @@ pub fn prove_gkr_decode_gpu_with_cache(
                 reduce_dequantize_layer(&current_claim, input_matrix, params, channel)?
             }
 
-            LayerType::Identity | LayerType::RoPE { .. } => continue,
+            LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } => continue,
 
             LayerType::Attention { config } => {
                 // Decode path: use pre-computed intermediates when available
@@ -4172,9 +4214,12 @@ pub fn prove_gkr_decode_gpu_with_cache(
             }
             LayerType::RMSNorm { dim, .. } => {
                 let input_matrix = get_intermediate(execution, rhs_layer.node_id)?;
+                let affine_gamma = weights
+                    .get_named_weight(rhs_layer.node_id, "gamma")
+                    .map(|m| m.data.as_slice());
                 mix_secure_field(channel, deferred_claim.value);
                 let (layer_proof, input_claim) =
-                    reduce_rmsnorm_layer(&deferred_claim, input_matrix, *dim, channel)?;
+                    reduce_rmsnorm_layer_with_gamma(&deferred_claim, input_matrix, *dim, channel, affine_gamma)?;
                 deferred_proofs.push(super::types::DeferredProof {
                     claim: deferred_claim.clone(),
                     layer_proof,
@@ -4232,7 +4277,7 @@ pub fn prove_gkr_decode_gpu_with_cache(
                     kind: super::types::DeferredProofKind::Weightless,
                 });
             }
-            LayerType::Identity | LayerType::RoPE { .. } | LayerType::Input => {
+            LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } | LayerType::Input => {
                 mix_secure_field(channel, deferred_claim.value);
                 let lhs_eval = deferred_claim.value;
                 let rhs_eval = SecureField::zero();
@@ -4953,7 +4998,10 @@ pub fn prove_gkr_simd_gpu_with_cache(
                 // CPU fallback for RMSNorm in SIMD path
                 let first_exec = &block_executions[0];
                 let input_matrix = get_intermediate(first_exec, layer.node_id)?;
-                reduce_rmsnorm_layer(&current_claim, input_matrix, *dim, channel)?
+                let affine_gamma = weights
+                    .get_named_weight(layer.node_id, "gamma")
+                    .map(|m| m.data.as_slice());
+                reduce_rmsnorm_layer_with_gamma(&current_claim, input_matrix, *dim, channel, affine_gamma)?
             }
 
             LayerType::Quantize { params, .. } => {
@@ -4991,7 +5039,7 @@ pub fn prove_gkr_simd_gpu_with_cache(
                 reduce_dequantize_layer(&current_claim, input_matrix, params, channel)?
             }
 
-            LayerType::Identity | LayerType::RoPE { .. } => continue,
+            LayerType::Identity | LayerType::RoPE { .. } | LayerType::TopK { .. } => continue,
             LayerType::Input => break,
 
             LayerType::Attention { config } => {
@@ -8477,10 +8525,18 @@ fn reduce_rmsnorm_layer_with_gamma(
         let c1 = dd1 - dd2 + two * dd3;
         let c2 = dd2 - three * dd3;
         let c3 = dd3;
+        let round_idx = linear_round_polys.len();
         linear_round_polys.push(RoundPolyDeg3 { c0, c1, c2, c3 });
 
+        if std::env::var("STWO_CHANNEL_TRACE").is_ok() && round_idx < 3 {
+            eprintln!("[PROVER RMSNorm] round {} c0={:?} c2={:?} c3={:?}", round_idx, c0, c2, c3);
+            eprintln!("[PROVER RMSNorm] round {} c1={:?}", round_idx, c1);
+        }
         channel.mix_poly_coeffs_deg3(c0, c1, c2, c3);
         let challenge = channel.draw_qm31();
+        if std::env::var("STWO_CHANNEL_TRACE").is_ok() && round_idx < 3 {
+            eprintln!("[PROVER RMSNorm] round {} challenge={:?} ch={:?}", round_idx, challenge, channel.digest());
+        }
         linear_challenges.push(challenge);
 
         fold_mle(&mut eq_evals, challenge, mid);

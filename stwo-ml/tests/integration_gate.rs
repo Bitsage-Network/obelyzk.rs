@@ -447,6 +447,7 @@ fn security_gate_rlc_only_default_rejects_streaming() {
         &raw_io,
         None,
         None,
+        starknet_ff::FieldElement::ZERO,
     );
 
     // If the proof was in AggregatedOracleSumcheck mode, streaming should reject.
@@ -541,6 +542,7 @@ fn streaming_calldata_roundtrip_integrity() {
         &raw_io,
         None,
         None,
+        starknet_ff::FieldElement::ZERO,
     );
 
     match calldata {
@@ -613,6 +615,7 @@ fn streaming_calldata_tampered_batch_audit_finding() {
         &raw_io,
         None,
         None,
+        starknet_ff::FieldElement::ZERO,
     );
 
     if let Ok(mut cd) = calldata {
@@ -651,6 +654,7 @@ fn streaming_output_mle_chunks_complete() {
         &raw_io,
         None,
         None,
+        starknet_ff::FieldElement::ZERO,
     );
 
     if let Ok(cd) = calldata {
@@ -696,6 +700,7 @@ fn streaming_session_metadata_consistent() {
         &raw_io,
         None,
         None,
+        starknet_ff::FieldElement::ZERO,
     );
 
     if let Ok(cd) = calldata {
@@ -747,6 +752,7 @@ fn streaming_calldata_kv_fields_present() {
         &raw_io,
         Some(kv_commit),
         Some(prev_kv),
+        starknet_ff::FieldElement::ZERO,
     );
 
     if let Ok(cd) = calldata {
@@ -1181,6 +1187,7 @@ fn streaming_io_commitment_matches_proof() {
         &raw_io,
         None,
         None,
+        starknet_ff::FieldElement::ZERO,
     );
 
     if let Ok(cd) = calldata {

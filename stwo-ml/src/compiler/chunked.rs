@@ -332,6 +332,7 @@ pub fn prove_model_chunked_auto(
             &sub_graph,
             &current_input,
             &sub_weights,
+            None,
         )
         .map_err(|e| ChunkedProvingError::ChunkFailed {
             chunk: chunk_idx,
@@ -438,6 +439,7 @@ pub fn prove_model_chunked_parallel_auto(
                 &chunk_graphs[chunk_idx],
                 chunk_input,
                 &chunk_weights[chunk_idx],
+                None,
             )
             .map_err(|e| ChunkedProvingError::ChunkFailed {
                 chunk: chunk_idx,
@@ -635,7 +637,7 @@ pub fn compose_chunk_proofs(
     weights: &GraphWeights,
 ) -> Result<AggregatedModelProofOnChain, ChunkedProvingError> {
     use stwo::prover::backend::simd::SimdBackend;
-    compose_chunk_proofs_inner::<SimdBackend>(chunks, graph, input, weights)
+    compose_chunk_proofs_inner::<SimdBackend>(chunks, graph, input, weights, None)
 }
 
 /// Compose chunk proofs with automatic GPU/CPU backend dispatch.
@@ -652,7 +654,7 @@ pub fn compose_chunk_proofs_auto(
     {
         if crate::backend::gpu_is_available() {
             return compose_chunk_proofs_inner::<stwo::prover::backend::gpu::GpuBackend>(
-                chunks, graph, input, weights,
+                chunks, graph, input, weights, None,
             );
         }
     }
@@ -665,6 +667,7 @@ fn compose_chunk_proofs_inner<B>(
     graph: &ComputationGraph,
     input: &M31Matrix,
     weights: &GraphWeights,
+    policy: Option<&crate::policy::PolicyConfig>,
 ) -> Result<AggregatedModelProofOnChain, ChunkedProvingError>
 where
     B: stwo::prover::backend::BackendForChannel<
@@ -799,6 +802,7 @@ where
             gkr_batch_data: None,
             kv_cache_commitment: None,
             prev_kv_cache_commitment: None,
+            policy_commitment: crate::policy::resolve(policy).policy_commitment(),
         });
     }
 
@@ -841,6 +845,7 @@ where
         gkr_batch_data: None,
         kv_cache_commitment: None,
         prev_kv_cache_commitment: None,
+        policy_commitment: FieldElement::ZERO, // TODO: thread policy through compose_chunk_proofs
     })
 }
 
@@ -1153,6 +1158,7 @@ pub fn prove_model_chunked_streaming_tiled(
             &chunk_inputs[chunk_idx],
             &GraphWeights::new(),
             precomputed,
+            None,
         )
         .map_err(|e| ChunkedProvingError::ChunkFailed {
             chunk: chunk_idx,
@@ -1317,6 +1323,7 @@ pub fn prove_model_chunked_multi_gpu_with_metrics(
                     &sub_graph,
                     chunk_input,
                     &sub_weights,
+                    None,
                 ) {
                     Ok(proof) => {
                         let elapsed = chunk_start.elapsed();
