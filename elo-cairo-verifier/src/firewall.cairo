@@ -160,13 +160,56 @@ fn extract_m31(packed_felts: Span<felt252>, m31_index: u32) -> u32 {
     crate::field::extract_m31_from_packed(packed_felts, m31_index)
 }
 
+/// Compute floor(log2(val)) + 1 for val > 0. Returns 0 for val == 0.
+/// Matches Rust's `128 - val.leading_zeros()`.
+fn bit_length_u128(val: u128) -> u32 {
+    if val == 0 {
+        return 0;
+    }
+    let mut bits: u32 = 0;
+    let mut v: u128 = val;
+    // Binary search: narrow down the bit position
+    if v >= 0x10000000000000000 { // >= 2^64
+        bits += 64;
+        v = v / 0x10000000000000000;
+    }
+    if v >= 0x100000000 { // >= 2^32
+        bits += 32;
+        v = v / 0x100000000;
+    }
+    if v >= 0x10000 { // >= 2^16
+        bits += 16;
+        v = v / 0x10000;
+    }
+    if v >= 0x100 { // >= 2^8
+        bits += 8;
+        v = v / 0x100;
+    }
+    if v >= 0x10 { // >= 2^4
+        bits += 4;
+        v = v / 0x10;
+    }
+    if v >= 4 { // >= 2^2
+        bits += 2;
+        v = v / 4;
+    }
+    if v >= 2 {
+        bits += 1;
+        v = v / 2;
+    }
+    if v >= 1 {
+        bits += 1;
+    }
+    bits
+}
+
 #[starknet::contract]
 pub mod AgentFirewallZK {
     use starknet::storage::{
         StoragePointerReadAccess, StoragePointerWriteAccess, Map, StoragePathEntry,
     };
     use starknet::{ContractAddress, get_caller_address, get_block_timestamp};
-    use super::{IVerifierDispatcher, IVerifierDispatcherTrait, extract_m31};
+    use super::{IVerifierDispatcher, IVerifierDispatcherTrait, extract_m31, bit_length_u128};
 
     // ── Constants ────────────────────────────────────────────────────
 
@@ -674,6 +717,56 @@ pub mod AgentFirewallZK {
                 onchain_age_u32 - encoded_age
             };
             assert!(age_diff <= 100, "INPUT_AGE_MISMATCH");
+
+            // Verify value_features (indices 33-36) — derivable from stored action_value.
+            // Feature 33: log2(value + 1)
+            let stored_value: felt252 = self.action_value.entry(action_id).read();
+            let value_u256: u256 = stored_value.into();
+            let value_low: u128 = value_u256.low;
+            let expected_log2: u32 = bit_length_u128(value_low);
+            let encoded_log2: u32 = extract_m31(packed_span, input_start + 33);
+            assert!(encoded_log2 == expected_log2, "INPUT_LOG2_VALUE_MISMATCH");
+
+            // Feature 35: is_max_approval (value == u128::MAX)
+            let expected_max_approval: u32 = if value_low == 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF {
+                1
+            } else {
+                0
+            };
+            let encoded_max_approval: u32 = extract_m31(packed_span, input_start + 35);
+            assert!(encoded_max_approval == expected_max_approval, "INPUT_MAX_APPROVAL_MISMATCH");
+
+            // Feature 36: is_zero_value
+            let expected_zero: u32 = if value_low == 0 { 1 } else { 0 };
+            let encoded_zero: u32 = extract_m31(packed_span, input_start + 36);
+            assert!(encoded_zero == expected_zero, "INPUT_ZERO_VALUE_MISMATCH");
+
+            // Verify selector_features (indices 37-40) — derivable from stored selector.
+            let sel: u32 = self.action_selector.entry(action_id).read();
+
+            // Feature 37: is_transfer (ERC20 transfer / transferFrom)
+            let expected_transfer: u32 = if sel == 0xa9059cbb || sel == 0x23b872dd { 1 } else { 0 };
+            let encoded_transfer: u32 = extract_m31(packed_span, input_start + 37);
+            assert!(encoded_transfer == expected_transfer, "INPUT_IS_TRANSFER_MISMATCH");
+
+            // Feature 38: is_approve
+            let expected_approve: u32 = if sel == 0x095ea7b3 { 1 } else { 0 };
+            let encoded_approve: u32 = extract_m31(packed_span, input_start + 38);
+            assert!(encoded_approve == expected_approve, "INPUT_IS_APPROVE_MISMATCH");
+
+            // Feature 39: is_swap (Uniswap/Sushi common selectors)
+            let expected_swap: u32 = if sel == 0x38ed1739 || sel == 0x7ff36ab5 || sel == 0x18cbafe5 {
+                1
+            } else {
+                0
+            };
+            let encoded_swap: u32 = extract_m31(packed_span, input_start + 39);
+            assert!(encoded_swap == expected_swap, "INPUT_IS_SWAP_MISMATCH");
+
+            // Feature 40: is_unknown (selector == 0)
+            let expected_unknown: u32 = if sel == 0 { 1 } else { 0 };
+            let encoded_unknown: u32 = extract_m31(packed_span, input_start + 40);
+            assert!(encoded_unknown == expected_unknown, "INPUT_IS_UNKNOWN_MISMATCH");
 
             // 7. Compute threat score on-chain (not caller-supplied!)
             let total: u64 = score_safe + score_suspicious + score_malicious;
