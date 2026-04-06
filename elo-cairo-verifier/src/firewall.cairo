@@ -622,6 +622,59 @@ pub mod AgentFirewallZK {
                 "INPUT_SELECTOR_MISMATCH"
             );
 
+            // Verify agent metadata features against on-chain state.
+            // These are the most dangerous soft features to fake — an attacker
+            // who lies about their trust score gets a more favorable classification.
+            //
+            // Feature 26: agent_trust_score (clamped to 100000 in encoder)
+            // Feature 27: agent_strikes
+            // Feature 28: agent_age_blocks
+            //
+            // We allow a tolerance of ±1 on trust_score because the score may
+            // have changed between submit_action and resolve_action_with_proof.
+            // Strikes and age are checked exactly.
+            let encoded_trust: u32 = extract_m31(packed_span, input_start + 26);
+            let onchain_trust: u64 = self.agent_trust_score.entry(agent_id).read();
+            let onchain_trust_clamped: u32 = if onchain_trust > 100000 {
+                100000
+            } else {
+                onchain_trust.try_into().unwrap()
+            };
+            // Allow ±5000 tolerance on trust score (score can change between submit and resolve)
+            let trust_diff: u32 = if encoded_trust > onchain_trust_clamped {
+                encoded_trust - onchain_trust_clamped
+            } else {
+                onchain_trust_clamped - encoded_trust
+            };
+            assert!(trust_diff <= 5000, "INPUT_TRUST_SCORE_MISMATCH");
+
+            // Feature 27: strikes must match exactly
+            let encoded_strikes: u32 = extract_m31(packed_span, input_start + 27);
+            let onchain_strikes: u32 = self.agent_strikes.entry(agent_id).read();
+            assert!(encoded_strikes == onchain_strikes, "INPUT_STRIKES_MISMATCH");
+
+            // Feature 28: agent age — compute from registration timestamp
+            // Allow ±100 blocks tolerance (block time variance)
+            let registered_at: u64 = self.agent_registered_at.entry(agent_id).read();
+            let current_time: u64 = get_block_timestamp();
+            let onchain_age: u64 = if current_time > registered_at {
+                current_time - registered_at
+            } else {
+                0
+            };
+            let encoded_age: u32 = extract_m31(packed_span, input_start + 28);
+            let onchain_age_u32: u32 = if onchain_age > 0x7FFFFFFF {
+                0x7FFFFFFF
+            } else {
+                onchain_age.try_into().unwrap()
+            };
+            let age_diff: u32 = if encoded_age > onchain_age_u32 {
+                encoded_age - onchain_age_u32
+            } else {
+                onchain_age_u32 - encoded_age
+            };
+            assert!(age_diff <= 100, "INPUT_AGE_MISMATCH");
+
             // 7. Compute threat score on-chain (not caller-supplied!)
             let total: u64 = score_safe + score_suspicious + score_malicious;
             let threat_score: u32 = if total == 0 {
