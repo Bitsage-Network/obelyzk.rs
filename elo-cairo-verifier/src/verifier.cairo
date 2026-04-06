@@ -190,6 +190,16 @@ pub trait ISumcheckVerifier<TContractState> {
     /// Check whether a model's decode chain has been initialized.
     fn is_decode_chain_initialized(self: @TContractState, model_id: felt252) -> bool;
 
+    /// Register a policy commitment for a model (owner only).
+    /// The policy_hash is the Poseidon hash of the PolicyConfig struct.
+    /// When set (non-zero), streaming verification requires matching policy.
+    fn register_model_policy(
+        ref self: TContractState, model_id: felt252, policy_hash: felt252,
+    );
+
+    /// Get the registered policy commitment for a model. Returns 0 if none set.
+    fn get_model_policy(self: @TContractState, model_id: felt252) -> felt252;
+
     // ─── Chunked GKR Session Entrypoints ─────────────────────────────
     // For proofs exceeding Starknet's per-TX calldata limit (~5K felts).
     // 4-step protocol: open → upload chunks → seal → verify.
@@ -264,7 +274,7 @@ pub trait ISumcheckVerifier<TContractState> {
         position_offset: u32,
         full_seq_len: u32,
         new_tokens: u32,
-        validate_decode_chain: u8,
+        policy_hash: felt252,
     );
 
     /// Evaluate output MLE in chunked TXs (splits expensive computation across
@@ -322,6 +332,18 @@ pub trait ISumcheckVerifier<TContractState> {
         weight_binding_data: Array<felt252>,
         deferred_proof_data: Array<felt252>,
         deferred_matmul_dims: Array<u32>,
+    );
+
+    /// Upload a chunk of weight binding calldata when it exceeds the TX limit.
+    ///
+    /// Stores chunks in contract storage. On the final chunk, reconstructs the
+    /// full calldata and calls verify_gkr_stream_weight_binding.
+    fn verify_gkr_stream_weight_binding_chunk(
+        ref self: TContractState,
+        session_id: u64,
+        chunk_idx: u32,
+        total_chunks: u32,
+        chunk_data: Array<felt252>,
     );
 
     /// Process input MLE chunks (after weight binding is done).
@@ -539,6 +561,22 @@ mod SumcheckVerifierContract {
         stream_new_tokens: Map<u64, u32>,
         /// session_id → whether to validate decode chain continuity.
         stream_decode_chain_validate: Map<u64, bool>,
+
+        // ─── Policy binding ─────────────────────────────────────────────
+        /// model_id → registered policy commitment hash (0 = no policy, permissive).
+        model_policy_hash: Map<felt252, felt252>,
+        /// session_id → policy commitment bound to this streaming session.
+        stream_policy_hash: Map<u64, felt252>,
+
+        // ─── Chunked weight binding ────────────────────────────────────
+        /// session_id → total chunks expected for weight binding.
+        stream_wb_total_chunks: Map<u64, u32>,
+        /// session_id → chunks received so far.
+        stream_wb_chunks_received: Map<u64, u32>,
+        /// (session_id, chunk_idx, felt_idx) → stored calldata felt.
+        stream_wb_chunk_data: Map<(u64, u32, u32), felt252>,
+        /// (session_id, chunk_idx) → number of felts in this chunk.
+        stream_wb_chunk_len: Map<(u64, u32), u32>,
     }
 
     #[event]
@@ -556,6 +594,7 @@ mod SumcheckVerifierContract {
         GkrStreamStarted: GkrStreamStarted,
         GkrStreamProgress: GkrStreamProgress,
         GkrStreamFinalized: GkrStreamFinalized,
+        ModelPolicyRegistered: ModelPolicyRegistered,
         // Audit/access/view events stripped for lean v18b deploy.
     }
 
@@ -588,6 +627,17 @@ mod SumcheckVerifierContract {
         position_offset: u32,
         full_seq_len: u32,
         new_tokens: u32,
+        /// Poseidon commitment of the PolicyConfig under which this proof was generated.
+        /// Zero means legacy proof (no policy binding).
+        policy_hash: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct ModelPolicyRegistered {
+        #[key]
+        model_id: felt252,
+        policy_hash: felt252,
+        registrar: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -897,6 +947,35 @@ mod SumcheckVerifierContract {
             self.model_circuit_hash.entry(model_id).write(streaming_circuit_hash);
         }
 
+        /// Register a policy commitment for a model (owner only).
+        ///
+        /// The policy_hash is the Poseidon hash of the PolicyConfig struct
+        /// (computed off-chain by the Rust prover). When registered (non-zero),
+        /// streaming verification requires the submitted policy to match.
+        /// Decode chain validation becomes automatically enforced for KV sessions.
+        fn register_model_policy(
+            ref self: ContractState,
+            model_id: felt252,
+            policy_hash: felt252,
+        ) {
+            assert!(get_caller_address() == self.owner.read(), "Only owner");
+            // Model must be registered (GKR or legacy)
+            let has_gkr = self.model_circuit_hash.entry(model_id).read() != 0;
+            let has_simple = self.model_commitments.entry(model_id).read() != 0;
+            assert!(has_gkr || has_simple, "MODEL_NOT_REGISTERED");
+
+            self.model_policy_hash.entry(model_id).write(policy_hash);
+            self.emit(ModelPolicyRegistered {
+                model_id,
+                policy_hash,
+                registrar: get_caller_address(),
+            });
+        }
+
+        fn get_model_policy(self: @ContractState, model_id: felt252) -> felt252 {
+            self.model_policy_hash.entry(model_id).read()
+        }
+
         // ─── Legacy single-TX entrypoints stubbed for lean v20 deploy ──────
         // Superseded by streaming verification (v25). Use stream_init → stream_layers → finalize.
         // Storage is preserved across upgrades; these can be restored from git history.
@@ -1101,7 +1180,7 @@ mod SumcheckVerifierContract {
             position_offset: u32,
             full_seq_len: u32,
             new_tokens: u32,
-            validate_decode_chain: u8,
+            policy_hash: felt252,
         ) {
             // Auth: must be session owner, session must be sealed
             assert!(self.session_sealed.entry(session_id).read(), "SESSION_NOT_SEALED");
@@ -1109,6 +1188,13 @@ mod SumcheckVerifierContract {
             let owner = self.session_owner.entry(session_id).read();
             assert!(caller == owner, "NOT_SESSION_OWNER");
             assert!(!self.stream_initialized.entry(session_id).read(), "STREAM_ALREADY_INITIALIZED");
+
+            // Policy validation: if model has a registered policy, submitted hash must match.
+            let model_id = self.session_model_id.entry(session_id).read();
+            let registered_policy = self.model_policy_hash.entry(model_id).read();
+            if registered_policy != 0 {
+                assert!(policy_hash == registered_policy, "POLICY_HASH_MISMATCH");
+            }
 
             // Compute IO commitment from packed felts
             let mut commitment_input: Array<felt252> = array![original_io_len.into()];
@@ -1149,6 +1235,13 @@ mod SumcheckVerifierContract {
             channel_mix_u64(ref ch, in_rows_v.into());
             channel_mix_u64(ref ch, in_cols.into());
 
+            // Bind policy commitment into Fiat-Shamir channel.
+            // Must match Rust prover's mix position (after depth/rows/cols, before output MLE).
+            // When policy_hash == 0 (legacy), skip the mix for backward compatibility.
+            if policy_hash != 0 {
+                channel_mix_felt(ref ch, policy_hash);
+            }
+
             // Save checkpoint state — output MLE will be evaluated in stream_init_output_mle
             self.stream_channel_digest.entry(session_id).write(ch.digest);
             self.stream_channel_counter.entry(session_id).write(ch.n_draws);
@@ -1179,7 +1272,14 @@ mod SumcheckVerifierContract {
             self.stream_position_offset.entry(session_id).write(position_offset);
             self.stream_full_seq_len.entry(session_id).write(full_seq_len);
             self.stream_new_tokens.entry(session_id).write(new_tokens);
-            self.stream_decode_chain_validate.entry(session_id).write(validate_decode_chain == 1);
+            // Decode chain validation is now policy-driven:
+            // When a policy is registered (non-zero), always validate decode chain for KV sessions.
+            // When no policy, default to permissive (backward compat with legacy proofs).
+            let should_validate_chain = registered_policy != 0 && has_kv_cache;
+            self.stream_decode_chain_validate.entry(session_id).write(should_validate_chain);
+
+            // Store policy commitment for this session
+            self.stream_policy_hash.entry(session_id).write(policy_hash);
 
             self.stream_initialized.entry(session_id).write(true);
             self.stream_output_mle_done.entry(session_id).write(false);
@@ -1190,7 +1290,7 @@ mod SumcheckVerifierContract {
             self.stream_kv_cache_commitment.entry(session_id).write(kv_cache_commitment);
             self.stream_prev_kv_cache_commitment.entry(session_id).write(prev_kv_cache_commitment);
 
-            let model_id = self.session_model_id.entry(session_id).read();
+            // model_id already read above (for policy validation)
             self.emit(GkrStreamStarted { session_id, model_id, num_layers });
         }
 
@@ -1694,6 +1794,134 @@ mod SumcheckVerifierContract {
             self.stream_weight_binding_done.entry(session_id).write(true);
         }
 
+        /// Upload a chunk of weight binding calldata for later verification.
+        ///
+        /// When the weight binding data exceeds the per-TX calldata limit (~5000 felts),
+        /// it is split into multiple chunks. Each chunk is stored in contract storage.
+        /// On the final chunk (chunk_idx == total_chunks - 1), all stored data is
+        /// reconstructed and passed to the existing verification logic.
+        fn verify_gkr_stream_weight_binding_chunk(
+            ref self: ContractState,
+            session_id: u64,
+            chunk_idx: u32,
+            total_chunks: u32,
+            chunk_data: Array<felt252>,
+        ) {
+            assert!(self.stream_initialized.entry(session_id).read(), "STREAM_NOT_INITIALIZED");
+            assert!(!self.stream_finalized.entry(session_id).read(), "STREAM_ALREADY_FINALIZED");
+            assert!(!self.stream_weight_binding_done.entry(session_id).read(), "WEIGHT_BINDING_ALREADY_DONE");
+            let caller = get_caller_address();
+            let owner = self.session_owner.entry(session_id).read();
+            assert!(caller == owner, "NOT_SESSION_OWNER");
+
+            let layers_verified = self.stream_layers_verified.entry(session_id).read();
+            let total_layers = self.stream_total_layers.entry(session_id).read();
+            assert!(layers_verified == total_layers, "STREAM_LAYERS_INCOMPLETE");
+
+            // Validate chunk ordering
+            let chunks_received = self.stream_wb_chunks_received.entry(session_id).read();
+            if chunk_idx == 0 {
+                // First chunk: initialize
+                self.stream_wb_total_chunks.entry(session_id).write(total_chunks);
+            } else {
+                let expected_total = self.stream_wb_total_chunks.entry(session_id).read();
+                assert!(total_chunks == expected_total, "WB_CHUNK_TOTAL_MISMATCH");
+            }
+            assert!(chunk_idx == chunks_received, "WB_CHUNK_OUT_OF_ORDER");
+
+            // Store chunk data
+            let chunk_len: u32 = chunk_data.len().try_into().unwrap();
+            self.stream_wb_chunk_len.entry((session_id, chunk_idx)).write(chunk_len);
+            let mut fi: u32 = 0;
+            loop {
+                if fi >= chunk_len {
+                    break;
+                }
+                self.stream_wb_chunk_data.entry((session_id, chunk_idx, fi)).write(*chunk_data.at(fi));
+                fi += 1;
+            };
+            self.stream_wb_chunks_received.entry(session_id).write(chunks_received + 1);
+
+            // If this is the last chunk, reconstruct full calldata and verify
+            if chunk_idx == total_chunks - 1 {
+                // Reconstruct full calldata from all stored chunks
+                let mut full_calldata: Array<felt252> = array![];
+                let mut ci: u32 = 0;
+                loop {
+                    if ci >= total_chunks {
+                        break;
+                    }
+                    let cl = self.stream_wb_chunk_len.entry((session_id, ci)).read();
+                    let mut fj: u32 = 0;
+                    loop {
+                        if fj >= cl {
+                            break;
+                        }
+                        full_calldata.append(
+                            self.stream_wb_chunk_data.entry((session_id, ci, fj)).read()
+                        );
+                        fj += 1;
+                    };
+                    ci += 1;
+                };
+
+                // Parse the reconstructed calldata into the expected format
+                // Format: [weight_expected_values_len, ...values,
+                //          weight_eval_points_len, ...points,
+                //          deferred_eval_points_len, ...points,
+                //          weight_binding_mode,
+                //          weight_binding_data_len, ...data,
+                //          deferred_proof_data_len, ...data,
+                //          deferred_matmul_dims_len, ...dims]
+                let fc = full_calldata.span();
+                let mut off: u32 = 0;
+
+                let wev_len: u32 = (*fc.at(off)).try_into().unwrap(); off += 1;
+                let mut weight_expected_values: Array<felt252> = array![];
+                let mut i: u32 = 0;
+                loop { if i >= wev_len { break; } weight_expected_values.append(*fc.at(off)); off += 1; i += 1; };
+
+                let wep_len: u32 = (*fc.at(off)).try_into().unwrap(); off += 1;
+                let mut weight_eval_points: Array<felt252> = array![];
+                i = 0;
+                loop { if i >= wep_len { break; } weight_eval_points.append(*fc.at(off)); off += 1; i += 1; };
+
+                let dep_len: u32 = (*fc.at(off)).try_into().unwrap(); off += 1;
+                let mut deferred_eval_points: Array<felt252> = array![];
+                i = 0;
+                loop { if i >= dep_len { break; } deferred_eval_points.append(*fc.at(off)); off += 1; i += 1; };
+
+                let weight_binding_mode: u32 = (*fc.at(off)).try_into().unwrap(); off += 1;
+
+                let wbd_len: u32 = (*fc.at(off)).try_into().unwrap(); off += 1;
+                let mut weight_binding_data: Array<felt252> = array![];
+                i = 0;
+                loop { if i >= wbd_len { break; } weight_binding_data.append(*fc.at(off)); off += 1; i += 1; };
+
+                let dpd_len: u32 = (*fc.at(off)).try_into().unwrap(); off += 1;
+                let mut deferred_proof_data: Array<felt252> = array![];
+                i = 0;
+                loop { if i >= dpd_len { break; } deferred_proof_data.append(*fc.at(off)); off += 1; i += 1; };
+
+                let dmd_len: u32 = (*fc.at(off)).try_into().unwrap(); off += 1;
+                let mut deferred_matmul_dims: Array<u32> = array![];
+                i = 0;
+                loop { if i >= dmd_len { break; } deferred_matmul_dims.append((*fc.at(off)).try_into().unwrap()); off += 1; i += 1; };
+
+                // Call the existing verification logic
+                self.verify_gkr_stream_weight_binding(
+                    session_id,
+                    weight_expected_values,
+                    weight_eval_points,
+                    deferred_eval_points,
+                    weight_binding_mode,
+                    weight_binding_data,
+                    deferred_proof_data,
+                    deferred_matmul_dims,
+                );
+            }
+        }
+
         fn verify_gkr_stream_finalize_input_mle(
             ref self: ContractState,
             session_id: u64,
@@ -1838,14 +2066,27 @@ mod SumcheckVerifierContract {
             let has_kv = self.stream_has_kv_cache.entry(session_id).read();
             let stored_kv = self.stream_kv_cache_commitment.entry(session_id).read();
             let stored_prev_kv = self.stream_prev_kv_cache_commitment.entry(session_id).read();
+            let policy = self.stream_policy_hash.entry(session_id).read();
             let proof_hash = if has_kv {
-                core::poseidon::poseidon_hash_span(
-                    array![ch_digest, stored_io_commitment, model_id, num_layers.into(), stored_kv, stored_prev_kv].span(),
-                )
+                if policy != 0 {
+                    core::poseidon::poseidon_hash_span(
+                        array![ch_digest, stored_io_commitment, model_id, num_layers.into(), stored_kv, stored_prev_kv, policy].span(),
+                    )
+                } else {
+                    core::poseidon::poseidon_hash_span(
+                        array![ch_digest, stored_io_commitment, model_id, num_layers.into(), stored_kv, stored_prev_kv].span(),
+                    )
+                }
             } else {
-                core::poseidon::poseidon_hash_span(
-                    array![ch_digest, stored_io_commitment, model_id, num_layers.into()].span(),
-                )
+                if policy != 0 {
+                    core::poseidon::poseidon_hash_span(
+                        array![ch_digest, stored_io_commitment, model_id, num_layers.into(), policy].span(),
+                    )
+                } else {
+                    core::poseidon::poseidon_hash_span(
+                        array![ch_digest, stored_io_commitment, model_id, num_layers.into()].span(),
+                    )
+                }
             };
 
             // Read decode metadata from session
@@ -1887,6 +2128,7 @@ mod SumcheckVerifierContract {
                 position_offset,
                 full_seq_len,
                 new_tokens,
+                policy_hash: policy,
             });
 
             self.stream_finalized.entry(session_id).write(true);

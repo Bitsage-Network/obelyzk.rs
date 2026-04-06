@@ -33,6 +33,23 @@ First-ever full GKR streaming proof verification of ML inference on Starknet. Mo
 
 **Technical stack**: STWO Circle STARKs, GKR sumcheck over M31, Poseidon252 Fiat-Shamir channel, aggregated weight binding with Poseidon Merkle trees, LogUp STARK proofs for activation/normalization layers.
 
+### Policy-Bound Verification
+
+Proofs are generated under a **policy** (strict, standard, or relaxed) that controls soundness gates. The policy is cryptographically bound to the proof via a Poseidon commitment mixed into the Fiat-Shamir channel.
+
+**On-chain enforcement**:
+- `register_model_policy(model_id, policy_hash)` locks a model to a specific policy
+- `verify_gkr_stream_init()` validates the submitted `policy_hash` matches the registered policy
+- `verify_gkr_stream_finalize()` includes `policy_hash` in the proof hash
+- `ModelGkrVerified` event emits the `policy_hash` for off-chain indexers
+
+When a model has a registered policy:
+- Proofs generated under a different policy are rejected at `stream_init`
+- Decode chain validation is automatically enforced for KV-cache sessions
+- The `policy_hash` appears in the `ModelGkrVerified` event alongside the proof hash
+
+Models without a registered policy (legacy) continue to work with `policy_hash = 0`.
+
 ### Earlier Verification Milestones
 
 | Model | Architecture | Layers Verified | Tx Status |
@@ -43,6 +60,27 @@ First-ever full GKR streaming proof verification of ML inference on Starknet. Mo
 | **D11** | Residual Network (DAG with skip connection) | MatMul, ReLU, MatMul, Add + Deferred | Accepted on L2 |
 
 > **Full documentation**: [`../docs/onchain-zkml-verification.md`](../docs/onchain-zkml-verification.md)
+
+### Agent Firewall Integration (Planned)
+
+The `AgentFirewallZK` contract will sit between AI agents and the blockchain. It consumes ZKML-proven classifier scores to gate agent transactions:
+
+```cairo
+// Agent submits action for evaluation
+let action_id = firewall.submit_action(agent_id, target, value, io_commitment);
+
+// After ZKML proof is verified on ObelyskVerifier...
+firewall.resolve_action_with_proof(action_id, proof_hash, threat_score, packed_output);
+
+// External contracts check before executing
+if firewall.is_action_approved(action_id) {
+    // safe to execute the agent's transaction
+}
+```
+
+Features: EMA trust scoring (alpha=0.3), strike mechanism (5 strikes = auto-freeze), policy-bound proofs (`PolicyConfig::strict` required).
+
+See [`../stwo-ml/docs/CLASSIFIER.md`](../stwo-ml/docs/CLASSIFIER.md) for the full architecture.
 
 ## Deployed Contracts (Starknet Sepolia)
 
@@ -304,12 +342,17 @@ trait ISumcheckVerifier<TContractState> {
         batched_proofs: Array<BatchedMatMulProof>,
         activation_stark_data: Array<felt252>) -> bool;
 
+    // -- Policy --
+    fn register_model_policy(ref self: TContractState, model_id: felt252, policy_hash: felt252);
+    fn get_model_policy(self: @TContractState, model_id: felt252) -> felt252;
+
     // -- Queries --
     fn get_verification_count(self: @TContractState, model_id: felt252) -> u64;
     fn is_proof_verified(self: @TContractState, proof_hash: felt252) -> bool;
     fn get_model_commitment(self: @TContractState, model_id: felt252) -> felt252;
     fn get_model_circuit_hash(self: @TContractState, model_id: felt252) -> felt252;
     fn get_model_gkr_weight_count(self: @TContractState, model_id: felt252) -> u32;
+    fn get_model_policy(self: @TContractState, model_id: felt252) -> felt252;
     fn get_owner(self: @TContractState) -> ContractAddress;
 
     // -- Upgradability (5-minute timelock) --

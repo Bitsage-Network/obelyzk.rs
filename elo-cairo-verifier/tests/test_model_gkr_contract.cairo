@@ -165,3 +165,92 @@ fn test_verify_model_gkr_unsupported_binding_mode() {
         array![],                        // weight_opening_proofs
     );
 }
+
+// ============================================================================
+// Test 7: Register and query a policy
+// ============================================================================
+
+#[test]
+fn test_register_and_query_policy() {
+    let dispatcher = deploy_verifier();
+    let owner: ContractAddress = 0x1234_felt252.try_into().unwrap();
+    snforge_std::start_cheat_caller_address(dispatcher.contract_address, owner);
+
+    let model_id: felt252 = 0xABC;
+
+    // Register model first (policy requires model to exist)
+    dispatcher.register_model_gkr(model_id, array![], array![1]);
+
+    // No policy registered yet
+    assert!(dispatcher.get_model_policy(model_id) == 0, "default policy should be 0");
+
+    // Register the "standard" policy commitment
+    let standard_hash: felt252 = 0x05baf1be3d54bcd383072f79923316ac7124670a117bd5c809b67b651209424b;
+    dispatcher.register_model_policy(model_id, standard_hash);
+
+    // Query returns the registered hash
+    assert!(
+        dispatcher.get_model_policy(model_id) == standard_hash,
+        "registered policy should match"
+    );
+}
+
+// ============================================================================
+// Test 8: Non-owner cannot register a policy
+// ============================================================================
+
+#[test]
+#[should_panic(expected: "Only owner")]
+fn test_register_policy_non_owner_rejected() {
+    let dispatcher = deploy_verifier();
+    let owner: ContractAddress = 0x1234_felt252.try_into().unwrap();
+
+    // Register model as owner first
+    snforge_std::start_cheat_caller_address(dispatcher.contract_address, owner);
+    dispatcher.register_model_gkr(0xABC, array![], array![1]);
+    snforge_std::stop_cheat_caller_address(dispatcher.contract_address);
+
+    // Try to register policy as non-owner
+    let attacker: ContractAddress = 0xBAD_felt252.try_into().unwrap();
+    snforge_std::start_cheat_caller_address(dispatcher.contract_address, attacker);
+    dispatcher.register_model_policy(0xABC, 0x12345);
+}
+
+// ============================================================================
+// Test 9: Cannot register policy for non-existent model
+// ============================================================================
+
+#[test]
+#[should_panic(expected: "MODEL_NOT_REGISTERED")]
+fn test_register_policy_unregistered_model_rejected() {
+    let dispatcher = deploy_verifier();
+    let owner: ContractAddress = 0x1234_felt252.try_into().unwrap();
+    snforge_std::start_cheat_caller_address(dispatcher.contract_address, owner);
+
+    // No model registered — should fail
+    dispatcher.register_model_policy(0xDEAD, 0x12345);
+}
+
+// ============================================================================
+// Test 10: Policy can be updated (overwritten by owner)
+// ============================================================================
+
+#[test]
+fn test_policy_can_be_updated() {
+    let dispatcher = deploy_verifier();
+    let owner: ContractAddress = 0x1234_felt252.try_into().unwrap();
+    snforge_std::start_cheat_caller_address(dispatcher.contract_address, owner);
+
+    let model_id: felt252 = 0xABC;
+    dispatcher.register_model_gkr(model_id, array![], array![1]);
+
+    // Register strict policy
+    let strict_hash: felt252 = 0x0370c9348ed6edddf310baf5d8104d57c07f36962deea9738dd00519d9948449;
+    dispatcher.register_model_policy(model_id, strict_hash);
+    assert!(dispatcher.get_model_policy(model_id) == strict_hash, "strict should be set");
+
+    // Update to standard policy
+    let standard_hash: felt252 = 0x05baf1be3d54bcd383072f79923316ac7124670a117bd5c809b67b651209424b;
+    dispatcher.register_model_policy(model_id, standard_hash);
+    assert!(dispatcher.get_model_policy(model_id) == standard_hash, "standard should replace strict");
+}
