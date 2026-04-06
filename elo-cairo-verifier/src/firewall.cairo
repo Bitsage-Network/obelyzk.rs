@@ -24,6 +24,20 @@ pub trait IVerifier<TContractState> {
     fn get_proof_model_id(self: @TContractState, proof_hash: felt252) -> felt252;
 }
 
+/// ERC20 interface (subset for balanceOf query).
+#[starknet::interface]
+pub trait IERC20<TContractState> {
+    fn balanceOf(self: @TContractState, account: ContractAddress) -> u256;
+}
+
+/// Contract registry interface (for is_verified / has_source lookups).
+#[starknet::interface]
+pub trait IRegistry<TContractState> {
+    fn is_verified(self: @TContractState, contract_address: felt252) -> bool;
+    fn has_source(self: @TContractState, contract_address: felt252) -> bool;
+    fn is_attested(self: @TContractState, contract_address: felt252) -> bool;
+}
+
 /// Agent Firewall interface.
 #[starknet::interface]
 pub trait IAgentFirewall<TContractState> {
@@ -93,6 +107,12 @@ pub trait IAgentFirewall<TContractState> {
 
     /// Accept pending ownership transfer (new owner only).
     fn accept_ownership(ref self: TContractState);
+
+    /// Set the contract registry address for target_flags lookups (owner only).
+    fn set_contract_registry(ref self: TContractState, registry_address: ContractAddress);
+
+    /// Set the ERC20 token address for value_balance_ratio lookups (owner only).
+    fn set_token_address(ref self: TContractState, token_address: ContractAddress);
 
     /// Update verifier contract address (contract owner only).
     fn set_verifier(ref self: TContractState, verifier_address: ContractAddress);
@@ -209,7 +229,12 @@ pub mod AgentFirewallZK {
         StoragePointerReadAccess, StoragePointerWriteAccess, Map, StoragePathEntry,
     };
     use starknet::{ContractAddress, get_caller_address, get_block_timestamp};
-    use super::{IVerifierDispatcher, IVerifierDispatcherTrait, extract_m31, bit_length_u128};
+    use super::{
+        IVerifierDispatcher, IVerifierDispatcherTrait,
+        IERC20Dispatcher, IERC20DispatcherTrait,
+        IRegistryDispatcher, IRegistryDispatcherTrait,
+        extract_m31, bit_length_u128,
+    };
 
     // ── Constants ────────────────────────────────────────────────────
 
@@ -255,6 +280,10 @@ pub mod AgentFirewallZK {
         /// Poseidon hash of all weight Merkle roots — prevents model substitution.
         /// Set at construction, verified during resolve_action_with_proof.
         classifier_weight_root_hash: felt252,
+        /// ContractRegistry address for target_flags (is_verified, has_source) lookups.
+        contract_registry: ContractAddress,
+        /// ERC20 token contract for value_balance_ratio computation.
+        token_address: ContractAddress,
 
         // ── Agent registry ───────────────────────────────────────────
         agent_owner: Map<felt252, ContractAddress>,
@@ -832,6 +861,53 @@ pub mod AgentFirewallZK {
             let encoded_unknown: u32 = extract_m31(packed_span, input_start + 40);
             assert!(encoded_unknown == expected_unknown, "INPUT_IS_UNKNOWN_MISMATCH");
 
+            // Verify target_flags (indices 29-31) via ContractRegistry cross-contract call.
+            // If a registry is configured (non-zero address), cross-check proven features
+            // against the registry's attestations. If no registry, skip (permissive).
+            let registry_addr = self.contract_registry.read();
+            let zero_addr: ContractAddress = 0_felt252.try_into().unwrap();
+            if registry_addr != zero_addr {
+                let registry = IRegistryDispatcher { contract_address: registry_addr };
+                let target_felt: felt252 = self.action_target.entry(action_id).read();
+
+                // Only check if the registry has an attestation for this target
+                if registry.is_attested(target_felt) {
+                    // Feature 29: is_verified
+                    let onchain_verified: u32 = if registry.is_verified(target_felt) { 1 } else { 0 };
+                    let encoded_verified: u32 = extract_m31(packed_span, input_start + 29);
+                    assert!(encoded_verified == onchain_verified, "INPUT_IS_VERIFIED_MISMATCH");
+
+                    // Feature 31: has_source
+                    let onchain_source: u32 = if registry.has_source(target_felt) { 1 } else { 0 };
+                    let encoded_source: u32 = extract_m31(packed_span, input_start + 31);
+                    assert!(encoded_source == onchain_source, "INPUT_HAS_SOURCE_MISMATCH");
+                }
+                // If not attested, skip checks (no data to verify against)
+            }
+
+            // Verify value_balance_ratio (feature 34) via ERC20 balanceOf cross-contract call.
+            // If a token address is configured, query the agent owner's balance and compute ratio.
+            let token_addr = self.token_address.read();
+            if token_addr != zero_addr {
+                let token = IERC20Dispatcher { contract_address: token_addr };
+                let agent_addr = self.agent_owner.entry(agent_id).read();
+                let balance: u256 = token.balanceOf(agent_addr);
+                let balance_low: u128 = balance.low;
+
+                if balance_low > 0 {
+                    // Ratio = (value / balance) * 100000 (fixed-point)
+                    let onchain_ratio: u32 = ((value_low * 100000) / balance_low).try_into().unwrap();
+                    let encoded_ratio: u32 = extract_m31(packed_span, input_start + 34);
+                    // Allow ±5000 tolerance (balance can change between submit and resolve)
+                    let ratio_diff: u32 = if encoded_ratio > onchain_ratio {
+                        encoded_ratio - onchain_ratio
+                    } else {
+                        onchain_ratio - encoded_ratio
+                    };
+                    assert!(ratio_diff <= 5000, "INPUT_VALUE_BALANCE_RATIO_MISMATCH");
+                }
+            }
+
             // Verify behavioral features (indices 41-44) from contract-internal tracking.
             // Feature 32: interaction_count for this (agent, target) pair
             let stored_target_for_behavioral: felt252 = self.action_target.entry(action_id).read();
@@ -1096,6 +1172,16 @@ pub mod AgentFirewallZK {
             let zero_addr: ContractAddress = 0_felt252.try_into().unwrap();
             self.pending_owner.write(zero_addr);
             self.emit(OwnershipTransferred { previous_owner: previous, new_owner: caller });
+        }
+
+        fn set_contract_registry(ref self: ContractState, registry_address: ContractAddress) {
+            assert!(get_caller_address() == self.owner.read(), "ONLY_OWNER");
+            self.contract_registry.write(registry_address);
+        }
+
+        fn set_token_address(ref self: ContractState, token_address: ContractAddress) {
+            assert!(get_caller_address() == self.owner.read(), "ONLY_OWNER");
+            self.token_address.write(token_address);
         }
 
         fn set_verifier(ref self: ContractState, verifier_address: ContractAddress) {
