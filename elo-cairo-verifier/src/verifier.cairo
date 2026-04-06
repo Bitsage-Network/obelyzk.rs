@@ -200,6 +200,12 @@ pub trait ISumcheckVerifier<TContractState> {
     /// Get the registered policy commitment for a model. Returns 0 if none set.
     fn get_model_policy(self: @TContractState, model_id: felt252) -> felt252;
 
+    /// Get the IO commitment for a verified proof. Returns 0 if not found.
+    fn get_proof_io_commitment(self: @TContractState, proof_hash: felt252) -> felt252;
+
+    /// Get the model ID for a verified proof. Returns 0 if not found.
+    fn get_proof_model_id(self: @TContractState, proof_hash: felt252) -> felt252;
+
     // ─── Chunked GKR Session Entrypoints ─────────────────────────────
     // For proofs exceeding Starknet's per-TX calldata limit (~5K felts).
     // 4-step protocol: open → upload chunks → seal → verify.
@@ -415,6 +421,12 @@ mod SumcheckVerifierContract {
         vm31_public_hash: Map<felt252, PackedDigest>,
         /// proof_hash → whether a VM31 public hash binding exists.
         vm31_public_hash_set: Map<felt252, bool>,
+        /// proof_hash → IO commitment for the verified proof.
+        /// Allows external contracts (e.g. AgentFirewallZK) to verify
+        /// that a proof covers a specific input/output.
+        proof_io_commitment: Map<felt252, felt252>,
+        /// proof_hash → model_id that generated this proof.
+        proof_model_id: Map<felt252, felt252>,
         /// model_id → number of GKR weight commitments.
         model_gkr_weight_count: Map<felt252, u32>,
         /// (model_id, idx) → Poseidon Merkle root of weight MLE.
@@ -765,6 +777,14 @@ mod SumcheckVerifierContract {
 
         fn is_proof_verified(self: @ContractState, proof_hash: felt252) -> bool {
             self.verified_proofs.entry(proof_hash).read()
+        }
+
+        fn get_proof_io_commitment(self: @ContractState, proof_hash: felt252) -> felt252 {
+            self.proof_io_commitment.entry(proof_hash).read()
+        }
+
+        fn get_proof_model_id(self: @ContractState, proof_hash: felt252) -> felt252 {
+            self.proof_model_id.entry(proof_hash).read()
         }
 
         fn bind_vm31_public_hash(
@@ -2116,6 +2136,8 @@ mod SumcheckVerifierContract {
             // Record proof on-chain
             assert!(!self.verified_proofs.entry(proof_hash).read(), "PROOF_ALREADY_VERIFIED");
             self.verified_proofs.entry(proof_hash).write(true);
+            self.proof_io_commitment.entry(proof_hash).write(stored_io_commitment);
+            self.proof_model_id.entry(proof_hash).write(model_id);
             let count = self.verification_counts.entry(model_id).read();
             self.verification_counts.entry(model_id).write(count + 1);
             self.emit(ModelGkrVerified {

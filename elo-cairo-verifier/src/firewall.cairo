@@ -19,6 +19,8 @@ use starknet::ContractAddress;
 pub trait IVerifier<TContractState> {
     fn is_proof_verified(self: @TContractState, proof_hash: felt252) -> bool;
     fn get_model_policy(self: @TContractState, model_id: felt252) -> felt252;
+    fn get_proof_io_commitment(self: @TContractState, proof_hash: felt252) -> felt252;
+    fn get_proof_model_id(self: @TContractState, proof_hash: felt252) -> felt252;
 }
 
 /// Agent Firewall interface.
@@ -357,8 +359,18 @@ pub mod AgentFirewallZK {
             };
             assert!(verifier.is_proof_verified(proof_hash), "PROOF_NOT_VERIFIED");
 
-            // 2. Verify the classifier model has a policy registered (strict required)
+            // 2. Verify the proof's IO commitment matches this action's commitment.
+            // This proves the classifier scored THIS specific transaction, not a different one.
+            let proof_io = verifier.get_proof_io_commitment(proof_hash);
+            let action_io = self.action_io_commitment.entry(action_id).read();
+            assert!(proof_io == action_io, "IO_COMMITMENT_MISMATCH");
+
+            // 3. Verify the proof came from the registered classifier model.
             let model_id = self.classifier_model_id.read();
+            let proof_model = verifier.get_proof_model_id(proof_hash);
+            assert!(proof_model == model_id, "MODEL_ID_MISMATCH");
+
+            // 4. Verify the classifier model has a policy registered (strict required)
             let registered_policy = verifier.get_model_policy(model_id);
             assert!(registered_policy != 0, "NO_POLICY_REGISTERED");
 
