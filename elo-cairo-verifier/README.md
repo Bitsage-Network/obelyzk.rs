@@ -5,15 +5,30 @@
 |                                                                           |
 |    ON-CHAIN ZKML VERIFIER FOR STARKNET                                   |
 |                                                                           |
-|    100% on-chain neural network verification using GKR interactive       |
-|    proofs. No FRI, no dictionaries, no recursion. Single transaction.    |
+|    Fully trustless ML inference verification.                            |
+|    Single transaction. Full STARK verification (OODS+Merkle+FRI+PoW).   |
 |                                                                           |
 +===========================================================================+
 ```
 
-Verifies STWO ML proofs — GKR model walk with per-layer sumchecks, LogUp lookup arguments, deferred proofs for DAG circuits, batched proofs, and unified model proofs — directly on-chain with full Fiat-Shamir transcript replay. No token dependencies, no payment logic — pure cryptographic verification.
+Verifies STWO ML proofs on Starknet — recursive STARK verification in a single TX, plus streaming GKR verification for fallback. Pure cryptographic verification, no trust assumptions.
 
 ## Verified On-Chain (Starknet Sepolia)
+
+### Recursive STARK Verification — 1 TX, Fully Trustless (April 2026)
+
+Single-transaction verification of a 30-layer SmolLM2-135M transformer proof. The Cairo contract performs full OODS + Merkle + FRI + PoW STARK verification on-chain.
+
+| Field | Value |
+|-------|-------|
+| **Contract** | [`0x707819dea6210ab58b358151419a604ffdb16809b568bf6f8933067c2a28715`](https://sepolia.starkscan.co/contract/0x707819dea6210ab58b358151419a604ffdb16809b568bf6f8933067c2a28715) |
+| **Class hash** | `0x05057fff1ced4c9044d3613256b0e9718e05b07760b6570c5f883aad73e163ea` |
+| **Verified proof TX** | [`0x276c6a44...`](https://sepolia.starkscan.co/tx/0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc) |
+| **Calldata** | 942 felts (49x compression from 46,148 GKR felts) |
+| **Model** | SmolLM2-135M, 30 layers, 211 GKR layers |
+| **Prove time** | 102s (A10G GPU) + 3.55s recursive |
+
+**Key**: This is NOT record-based. The Cairo contract re-executes the STARK verifier, checking every polynomial evaluation, every Merkle path, every FRI fold, and the proof-of-work nonce.
 
 ### Full GKR Streaming Verification — 6/6 TX SUCCEEDED (March 2026)
 

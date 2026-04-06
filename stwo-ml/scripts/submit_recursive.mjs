@@ -34,13 +34,9 @@ if (!proofPath) {
 }
 
 const provider = new RpcProvider({ nodeUrl: RPC });
-const account = new Account({ provider, address: ADDR, signer: KEY });
+const account = new Account(provider, ADDR, KEY);
 
-const GAS = {
-  l2_gas: { max_amount: 0x40000000n, max_price_per_unit: 0x2cb417800n },
-  l1_gas: { max_amount: 0n, max_price_per_unit: 0x59d9328b3166n },
-  l1_data_gas: { max_amount: 0x10000n, max_price_per_unit: 0x7ed13c779n },
-};
+// Let starknet.js auto-estimate fees (v7 compatible)
 
 async function main() {
   const raw = JSON.parse(readFileSync(proofPath, "utf-8"));
@@ -98,18 +94,15 @@ async function main() {
 
   // Step 2: Submit verify_recursive
   process.stdout.write("Submitting:    ");
-  const tx = await account.execute(
-    {
-      contractAddress: CONTRACT,
-      entrypoint: "verify_recursive",
-      calldata: CallData.compile({
-        model_id: modelId,
-        io_commitment: ioCommitment,
-        stark_proof_data: calldata,
-      }),
-    },
-    { resourceBounds: GAS }
-  );
+  const tx = await account.execute({
+    contractAddress: CONTRACT,
+    entrypoint: "verify_recursive",
+    calldata: CallData.compile({
+      model_id: modelId,
+      io_commitment: ioCommitment,
+      stark_proof_data: calldata,
+    }),
+  });
   console.log("tx=" + tx.transaction_hash);
 
   // Step 3: Wait for confirmation

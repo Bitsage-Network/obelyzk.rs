@@ -192,9 +192,11 @@ These are not part of PolicyConfig (they affect performance, not soundness):
 | Variable | Description |
 |----------|-------------|
 | `STARKNET_ACCOUNT` | Starknet account address for on-chain submission. |
-| `STARKNET_PRIVATE_KEY` | Private key for signing Starknet transactions. |
-| `STARKNET_RPC` | Starknet RPC endpoint URL. Defaults to Alchemy Sepolia. |
-| `CONTRACT_ADDRESS` | GKR verifier contract address. |
+| `STARKNET_PRIVATE_KEY` | Private key for signing Starknet transactions. Required for `--on-chain` flag. |
+| `STARKNET_RPC` | Starknet RPC endpoint URL. Defaults to Alchemy Sepolia. Do not hardcode API keys -- use env vars. |
+| `RECURSIVE_CONTRACT` | Recursive verifier contract address. Defaults to trustless verifier on Sepolia (`0x707819dea...`). |
+| `OBELYSK_RECURSIVE_SCRIPT` | Path to `submit_recursive.mjs`. The CLI auto-detects if not set. |
+| `CONTRACT_ADDRESS` | Streaming GKR verifier contract address. |
 | `SESSION_ID` | Session ID for resuming streaming submission. |
 | `AVNU_API_KEY` | API key for AVNU paymaster (gasless transactions). |
 | `PROVE_SERVER_API_KEY` | Bearer token for prove-server authentication. |

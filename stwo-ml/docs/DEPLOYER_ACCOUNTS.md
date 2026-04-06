@@ -1,6 +1,6 @@
 # Starknet Deployer Accounts and Contract Registry
 
-**Last updated**: April 5, 2026
+**Last updated**: April 6, 2026
 **Network**: Starknet Sepolia
 
 ---
@@ -42,23 +42,17 @@ Never use testnet keys on mainnet.
 
 ### Account Constructor
 
-The v2 account uses `starknet.js` v8.9.2 Account constructor with the options
-object format:
+The v2 account uses `starknet.js` v7.1.0 with the positional Account constructor:
 
 ```javascript
-import { Account, RpcProvider } from "starknet";
+const { Account, RpcProvider } = require("starknet");
 
 const provider = new RpcProvider({ nodeUrl: RPC_URL });
-const account = new Account({
-  provider,
-  address: ADDR,
-  signer: PRIVATE_KEY,
-});
+const account = new Account(provider, ADDR, PRIVATE_KEY);
 ```
 
-Note: starknet.js v8.9.2 changed the `Account` constructor from positional
-arguments to an options object. Older versions used
-`new Account(provider, address, privateKey)`.
+Note: starknet.js v7.x uses positional arguments. v8+ changed to an options
+object: `new Account({ provider, address, signer })`. Our scripts use v7 syntax.
 
 ### Funding
 
@@ -75,16 +69,24 @@ contract classes cost approximately:
 
 ## 3. Contract Addresses
 
-### 3.1 Recursive Verifier -- Phase 1 (Record-Based, on Sepolia)
+### 3.1 Recursive Verifier -- Fully Trustless (LIVE)
 
 | Field | Value |
 |-------|-------|
 | **Contract** | `0x707819dea6210ab58b358151419a604ffdb16809b568bf6f8933067c2a28715` |
-| **Deployer** | v2 account |
+| **Class hash** | `0x05057fff1ced4c9044d3613256b0e9718e05b07760b6570c5f883aad73e163ea` |
+| **Deployer** | `0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344` |
 | **Source** | `elo-cairo-verifier/src/recursive_verifier.cairo` |
-| **Deploy script** | `scripts/deploy_recursive_v2.mjs` |
+| **Declare TX** | `0x024a1644356e9ca09cc1658797b6240f2215d29a895689d1bcf5bc17177c4796` |
+| **Deploy TX** | `0x7ece3bd67b20376b777d68a3e5d92eee6c3d82d37477df2e33f478be55f68c1` |
+| **First verified proof** | `0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc` |
+| **MIN_POW_BITS** | 10 |
 | **Constructor** | `{ owner: DEPLOYER_ADDRESS }` |
-| **Status** | Phase 1 -- records proof hashes, validates public input bindings |
+| **Status** | **LIVE on Sepolia -- fully trustless STARK verification** |
+
+Performs full on-chain STARK verification: OODS sampling, Merkle decommitment,
+FRI layer folding, and proof-of-work validation. A single Starknet transaction
+verifies an entire ML model execution.
 
 Entrypoints:
 - `register_model_recursive(model_id, circuit_hash, weight_super_root)`
@@ -93,17 +95,11 @@ Entrypoints:
 - `get_recursive_verification_count(model_id) -> u64`
 - `get_recursive_model_info(model_id) -> RecursiveModelInfo`
 
-### 3.1b Recursive Verifier -- Fully Trustless (Pending Deploy)
-
-| Field | Value |
-|-------|-------|
-| **Class hash** | `0x006d4ff2332af0f7b1ac4601e266f7bcd7ef3b529f72012677b15445289ce820` |
-| **Status** | Verified on devnet (OODS + Merkle + FRI + PoW all pass). Pending Sepolia declaration. |
-| **Requires** | Juno full node for class declaration (class exceeds Alchemy gateway limits) |
-
-This class will replace the Phase 1 contract via the timelock upgrade mechanism.
-Once deployed, a single Starknet transaction performs full cryptographic STARK
-verification of the recursive proof.
+**Deployment notes**: The contract required removing all `Felt252Dict` usage from
+the stwo-cairo verifier to avoid the `squashed_felt252_dict_entries` libfunc
+(requires Sierra 1.8.0, not yet supported by stable Scarb). The CASM hash was
+obtained using `starkli --casm-hash` with the sequencer's expected hash, as
+local Scarb and the Sepolia sequencer produce different CASM.
 
 ### 3.2 Streaming GKR Verifier v32
 
@@ -148,7 +144,9 @@ Key entrypoints (streaming flow):
 
 | Version | Class Hash | Notes |
 |---------|------------|-------|
-| Fully trustless | `0x006d4ff2332af0f7b1ac4601e266f7bcd7ef3b529f72012677b15445289ce820` | Pending Sepolia declaration |
+| **Trustless recursive** | `0x05057fff1ced4c9044d3613256b0e9718e05b07760b6570c5f883aad73e163ea` | **LIVE** -- full OODS+Merkle+FRI+PoW |
+| Trustless (test, pow=0) | `0x0223790f285eec0571cde551a331e42db0833a2f8eff121a2058ff7772649567` | Test deploy, MIN_POW_BITS=0 |
+| Trustless (old, dict) | `0x006d4ff2332af0f7b1ac4601e266f7bcd7ef3b529f72012677b15445289ce820` | Rejected by sequencer (Sierra 1.8.0 libfunc) |
 | v32 | `0x5dca646786c36f9d68bab802d5c5c4995c37aa7c25bfa59ff20144a283f0956` | Production streaming |
 | v31 | `0x6a6b7a75d5ec1f63d715617d352bc0d353042b2a033d98fa28ffbaf6c5b5439` | 14/14 steps pass |
 | v30 | `0x38e9f407...` | Diagnostic |

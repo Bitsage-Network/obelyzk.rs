@@ -17,7 +17,7 @@ There are two verification paths:
 
 | Path | TXs | Calldata | Status |
 |------|-----|----------|--------|
-| **Recursive STARK** (preferred) | 1 | 718--981 felts | Fully trustless on devnet; Phase 1 (record-based) on Sepolia |
+| **Recursive STARK** (preferred) | 1 | 718--942 felts | **Fully trustless on Sepolia** (OODS + Merkle + FRI + PoW) |
 | **Streaming GKR** (fallback) | 6+ | 8,744--255,100 felts | Fully deployed, 14/14 steps passing on-chain |
 
 **Why recursive is preferred.** The streaming pipeline sends the raw GKR proof
@@ -52,11 +52,11 @@ Six key fixes made this work:
 
 ### Compression Ratios
 
-| Model | Streaming felts | Recursive felts | Compression |
-|-------|----------------|-----------------|-------------|
-| SmolLM2 1-layer | 8,744 | 718 | 12.2x |
-| SmolLM2 30-layer | 255,100 | 981 | 260x |
-| Qwen3-14B 40-layer | ~112,000 | ~500 (projected) | ~224x |
+| Model | GKR felts | Recursive felts | Compression | Verified |
+|-------|-----------|-----------------|-------------|----------|
+| SmolLM2 1-layer | 8,744 | 718 | 12.2x | Devnet |
+| SmolLM2 30-layer | 46,148 | 942 | 49x | **Sepolia** |
+| Qwen3-14B 40-layer | ~112,000 | ~950 (projected) | ~118x | Pending |
 
 ---
 
@@ -114,30 +114,44 @@ by stwo-cairo-verifier (Cairo's native Poseidon for Fiat-Shamir and Merkle).
 
 ## 3. Contracts on Starknet Sepolia
 
-### 3.1 Recursive Verifier (Phase 1 -- Record-Based)
+### 3.1 Recursive Verifier (Fully Trustless)
 
 | Field | Value |
 |-------|-------|
 | **Contract address** | `0x707819dea6210ab58b358151419a604ffdb16809b568bf6f8933067c2a28715` |
+| **Class hash** | `0x05057fff1ced4c9044d3613256b0e9718e05b07760b6570c5f883aad73e163ea` |
 | **Source** | `elo-cairo-verifier/src/recursive_verifier.cairo` |
-| **Entrypoints** | `register_model_recursive`, `verify_recursive`, `is_recursive_proof_verified`, `get_recursive_verification_count` |
-| **Status** | Deployed on Sepolia. Records proof hashes and validates public input bindings. |
+| **Deployer** | `0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344` |
+| **Declare TX** | `0x024a1644356e9ca09cc1658797b6240f2215d29a895689d1bcf5bc17177c4796` |
+| **Deploy TX** | `0x7ece3bd67b20376b777d68a3e5d92eee6c3d82d37477df2e33f478be55f68c1` |
+| **First verification** | `0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc` |
+| **MIN_POW_BITS** | 10 (production hardened) |
+| **Status** | **Live on Sepolia. Fully trustless STARK verification.** |
 
-Phase 1 records proof hashes and validates public input bindings on Sepolia.
-The Rust-side recursive STARK is fully trustless (OODS, Merkle, FRI, PoW all
-pass on devnet). The Phase 1 contract will be upgraded to the fully trustless
-class once declared on Sepolia.
+This contract performs **full cryptographic STARK verification** on-chain:
 
-### 3.1b Fully Trustless Recursive Verifier (Pending Deploy)
+- **OODS sampling** -- verifies polynomial evaluations at the out-of-domain point
+- **Merkle decommitment** -- verifies Poseidon252 Merkle paths for all queried columns
+- **FRI layer folding** -- verifies the full FRI proximity proof (14 layers)
+- **PoW validation** -- requires proof-of-work nonce (MIN_POW_BITS=10)
 
-| Field | Value |
-|-------|-------|
-| **Class hash** | `0x006d4ff2332af0f7b1ac4601e266f7bcd7ef3b529f72012677b15445289ce820` |
-| **Status** | Verified on devnet. Pending Sepolia declaration (requires Juno full node for large class). |
+**Entrypoints:**
 
-This class performs full STARK verification on-chain: OODS sampling, Merkle
-decommitment, FRI layer folding, and proof-of-work. Once declared on Sepolia,
-the Phase 1 contract will be upgraded to this class via the timelock mechanism.
+| Function | Description |
+|----------|-------------|
+| `register_model_recursive(model_id, circuit_hash, weight_super_root)` | Register a model for verification |
+| `verify_recursive(model_id, io_commitment, stark_proof_data)` | Submit and verify a recursive STARK proof |
+| `is_recursive_proof_verified(proof_hash)` | Query whether a proof has been verified |
+| `get_recursive_verification_count(model_id)` | Get total verifications for a model |
+| `get_recursive_model_info(model_id)` | Get model registration details |
+
+**Key deployment details:**
+
+The Cairo contract was deployed by removing all `Felt252Dict` usage from the
+stwo-cairo verifier (which generates `squashed_felt252_dict_entries`, a Sierra
+1.8.0 libfunc not supported by stable Scarb). Replaced with array-based
+`QueryPositionMap` for query position lookups, insertion sort for query
+deduplication, and bucket arrays for column grouping.
 
 ### 3.2 Streaming GKR Verifier v32
 

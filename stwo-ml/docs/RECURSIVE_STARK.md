@@ -3,7 +3,7 @@
 **Author**: Bitsage Network
 **Date**: March 17, 2026
 **Branch**: `feat/recursive-stark`
-**Status**: Implementation in progress
+**Status**: **DEPLOYED** -- fully trustless verification live on Starknet Sepolia (OODS + Merkle + FRI + PoW)
 
 ---
 
@@ -597,3 +597,46 @@ The feature is complete when:
 5. All 850+ existing tests still pass
 6. Recursive proving overhead < 60s on H100
 7. Paper updated with recursive STARK benchmarks
+
+---
+
+## 12. Deployment Results (April 6, 2026)
+
+All success criteria met. The recursive STARK verifier is **live on Starknet Sepolia**.
+
+### On-Chain Verification
+
+| Field | Value |
+|-------|-------|
+| **Contract** | `0x707819dea6210ab58b358151419a604ffdb16809b568bf6f8933067c2a28715` |
+| **Class hash** | `0x05057fff1ced4c9044d3613256b0e9718e05b07760b6570c5f883aad73e163ea` |
+| **First verified proof** | [`0x276c6a44...`](https://sepolia.starkscan.co/tx/0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc) |
+| **MIN_POW_BITS** | 10 (production) |
+
+### Benchmarks (A10G GPU, SmolLM2-135M 30-layer)
+
+| Metric | Value |
+|--------|-------|
+| GKR proving | 102s |
+| Recursive STARK | 3.55s |
+| Total wall time | ~106s |
+| Recursive calldata | 942 felts |
+| GKR calldata (raw) | 46,148 felts |
+| Compression ratio | 49x |
+| Poseidon perms | 14,126 |
+| Trace size | 16,384 rows x 28 cols |
+| On-chain TXs | **1** |
+
+### Deployment Challenges Solved
+
+1. **Sierra 1.8.0 libfunc**: The Sepolia sequencer's Sierra compiler rejected
+   `squashed_felt252_dict_entries` in Sierra 1.7.0. Fixed by removing all
+   `Felt252Dict` usage from stwo-cairo-verifier (6 files), replacing with
+   array-based `QueryPositionMap`.
+
+2. **CASM hash mismatch**: Local Scarb produces different CASM from the sequencer.
+   Fixed using `starkli --casm-hash` with the sequencer's expected hash.
+
+3. **Policy commitment threading**: The recursive witness generator needed
+   `PolicyConfig` threaded through to match the prover's Fiat-Shamir transcript.
+   Added `prove_recursive_with_policy()` API.
