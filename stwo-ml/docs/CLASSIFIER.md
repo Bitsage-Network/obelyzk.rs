@@ -362,13 +362,158 @@ let model = ClassifierModel {
 | Synthetic generators | Approval drains, flash loans | Unlimited | programmatic labels |
 | Agent behavioral logs | Normal agent activity | Variable | baseline (safe) |
 
+## Deployed Infrastructure (Starknet Sepolia)
+
+| Component | Address | Status |
+|-----------|---------|--------|
+| **AgentFirewallZK** | [`0x043b51f6f571137d0e7c3afa4ca689e84271ba97c5b6fc83349a3fe1275634f0`](https://sepolia.starkscan.co/contract/0x043b51f6f571137d0e7c3afa4ca689e84271ba97c5b6fc83349a3fe1275634f0) | Live, agent registered |
+| **ContractRegistry** | [`0x075f9812753666ee506509de0de10bdea3ad1a79d4ed31817a0e2534c9d90607`](https://sepolia.starkscan.co/contract/0x075f9812753666ee506509de0de10bdea3ad1a79d4ed31817a0e2534c9d90607) | Live, linked to firewall |
+| **ObelyskVerifier** | [`0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005) | Live, streaming GKR |
+| **Recursive Verifier** | [`0x707819dea6210ab58b358151419a604ffdb16809b568bf6f8933067c2a28715`](https://sepolia.starkscan.co/contract/0x707819dea6210ab58b358151419a604ffdb16809b568bf6f8933067c2a28715) | Live, 1-TX STARK |
+| **Prover (A10G GPU)** | `https://prover.bitsage.network` | Live, `/api/v1/classify` |
+
+## Prove-Server API
+
+```bash
+curl -X POST https://prover.bitsage.network/api/v1/classify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
+    "value": "1000000000000000000",
+    "selector": "0xa9059cbb",
+    "agent_trust_score": 5000,
+    "agent_strikes": 0,
+    "agent_age_blocks": 50000,
+    "target_verified": true,
+    "target_has_source": true,
+    "tx_frequency": 10,
+    "unique_targets_24h": 5
+  }'
+```
+
+Response (282ms on A10G GPU):
+```json
+{
+  "request_id": "20059293-7b30-4389-bd19-bf2d5adfc864",
+  "decision": "approve",
+  "threat_score": 24005,
+  "scores": [745069812, 2062743355, 886939347],
+  "io_commitment": "0x0543908225041becc8c0048743b5674e2840d0f226ee290fb0003988a1940b3f",
+  "policy_commitment": "0x0370c9348ed6edddf310baf5d8104d57c07f36962deea9738dd00519d9948449",
+  "prove_time_ms": 282
+}
+```
+
+Request fields: `target` (required), `value`, `selector`, `calldata`, `agent_trust_score`, `agent_strikes`, `agent_age_blocks`, `target_verified`, `target_is_proxy`, `target_has_source`, `target_interaction_count`, `tx_frequency`, `unique_targets_24h`, `avg_value_24h`, `max_value_24h`.
+
+## AgentFirewallZK Contract
+
+The on-chain firewall contract at `0x043b51...` manages agents, queues actions, and resolves them using verified ZKML proofs with **21 sequential security checks** in `resolve_action_with_proof`:
+
+```
+ 1. ACTION_NOT_FOUND
+ 2. ACTION_ALREADY_RESOLVED
+ 3. CONTRACT_PAUSED (emergency pause)
+ 4. ACTION_EXPIRED (MAX_ACTION_AGE=3600s)
+ 5. NOT_AGENT_OR_CONTRACT_OWNER
+ 6. AGENT_FROZEN
+ 7. PROOF_NOT_VERIFIED (cross-contract ObelyskVerifier)
+ 8. PROOF_ALREADY_USED (replay protection)
+ 9. IO_COMMITMENT_MISMATCH (Poseidon recomputation from calldata)
+10. PROOF_IO_MISMATCH (double-check against proof storage)
+11-16. IO structure validation (6 bounds checks)
+17. INPUT_TARGET_MISMATCH (248-bit address reconstruction)
+18. INPUT_SELECTOR_MISMATCH (31-bit match)
+19. INPUT_TRUST_SCORE_MISMATCH (±5000 vs on-chain)
+20. INPUT_STRIKES_MISMATCH (exact match)
+21. INPUT_AGE_MISMATCH (±100 blocks)
+```
+
+Plus value/selector feature derivation, behavioral tracking cross-checks, ContractRegistry lookups, ERC20 balance queries, weight root hash verification, and policy enforcement.
+
+**Threat score is computed ON-CHAIN** from the proven IO data — not caller-supplied. The 3 output neurons (safe, suspicious, malicious) are extracted from packed M31 values and the score is computed as `(malicious * 100000) / total`.
+
+**Asymmetric EMA trust scoring**: alpha_up=0.5 (bad actions hit hard), alpha_down=0.1 (safe actions forgive slowly). Auto-freeze at 5 strikes.
+
+## TypeScript SDK
+
+```typescript
+import { AgentFirewallSDK } from '@obelyzk/sdk/firewall'
+
+const firewall = new AgentFirewallSDK({
+  proverUrl: 'https://prover.bitsage.network',
+  firewallContract: '0x043b51f6f571137d0e7c3afa4ca689e84271ba97c5b6fc83349a3fe1275634f0',
+  verifierContract: '0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005',
+  rpcUrl: process.env.STARKNET_RPC,
+  account: myAccount,
+})
+
+// Classify a transaction (282ms GPU proving)
+const result = await firewall.classify({
+  target: '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7',
+  value: '1000000000000000000',
+  selector: '0xa9059cbb',
+  agentTrustScore: 5000,
+})
+console.log(result.decision)      // "approve" | "escalate" | "block"
+console.log(result.threatScore)   // 0-100000
+console.log(result.ioCommitment)  // for on-chain submission
+
+// Register an agent
+await firewall.registerAgent('my-agent-001')
+
+// Check trust status
+const status = await firewall.getAgentStatus('my-agent-001')
+console.log(status.trusted)       // true
+console.log(status.trustScore)    // 0
+console.log(status.strikes)       // 0
+```
+
+## Recursive STARK (Single TX)
+
+The classifier proof compresses via recursive STARK:
+
+```
+GKR proof (2277 felts) → Recursive STARK (635 felts) → 1 TX on Starknet
+```
+
+```bash
+prove-model --model-dir ./smollm2 --layers 1 --gkr --format ml_gkr \
+  --policy strict --recursive --output proof.json
+```
+
+Performance on A10G:
+- GKR prove: 1.4s
+- Recursive compress: 0.65s
+- Total: 2.1s
+- Calldata: 635 felts (single TX)
+
+## Security Audit Status
+
+| Attack | Status | Fix |
+|--------|--------|-----|
+| Score manipulation | **CLOSED** | On-chain extraction, 12 bounds checks |
+| Model substitution | **CLOSED** | Weight root hash cross-check |
+| Feature forgery | **95% CLOSED** | 47/48 features verified on-chain |
+| EMA dilution | **CLOSED** | Asymmetric decay (0.5 up, 0.1 down) |
+| Classifier capacity | **By design** | Escalation path for ambiguous scores |
+| Action expiry | **CLOSED** | MAX_ACTION_AGE=3600s |
+| Emergency controls | **Added** | Pause/unpause, 2-step ownership transfer |
+| Rate limiting | **Added** | 10 pending actions per agent max |
+| Proof replay | **Added** | used_proof_hashes map |
+
 ## Roadmap
 
-| Priority | Item | Status |
-|----------|------|--------|
-| 1 | Cairo `AgentFirewallZK` contract | Designed |
-| 2 | prove-server `/api/v1/classify` endpoint | Designed |
-| 3 | ObelyskVerifier `proof_io_commitment` getter | Designed |
-| 4 | Firewall SDK (`@obelyzk/firewall-sdk`) | Designed |
-| 5 | Training pipeline (PyTorch → weights JSON) | Guide written |
-| 6 | Real training data collection + labeling | Not started |
+| Item | Status |
+|------|--------|
+| PolicyConfig framework | **DONE** — 21 tests, Fiat-Shamir bound |
+| ZKML classifier module | **DONE** — 10 tests, 282ms GPU |
+| AgentFirewallZK contract | **DONE** — 30 tests, deployed Sepolia |
+| ContractRegistry | **DONE** — deployed Sepolia |
+| proof_io_commitment getter | **DONE** — verifier extended |
+| `/api/v1/classify` endpoint | **DONE** — live on A10G |
+| Firewall SDK (TypeScript) | **DONE** — `@obelyzk/sdk/firewall` |
+| Recursive STARK with policy | **DONE** — 635 felts, 1 TX |
+| On-chain behavioral tracking | **DONE** — 24h window, 5 features |
+| Real training data | Remaining |
+| Trained production model | Remaining |

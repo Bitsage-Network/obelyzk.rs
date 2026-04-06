@@ -76,26 +76,36 @@ Models without a registered policy (legacy) continue to work with `policy_hash =
 
 > **Full documentation**: [`../docs/onchain-zkml-verification.md`](../docs/onchain-zkml-verification.md)
 
-### Agent Firewall Integration (Planned)
+### AgentFirewallZK — DEPLOYED (April 2026)
 
-The `AgentFirewallZK` contract will sit between AI agents and the blockchain. It consumes ZKML-proven classifier scores to gate agent transactions:
+On-chain guardrails for AI agent transactions. Deployed at [`0x043b51f6f571137d0e7c3afa4ca689e84271ba97c5b6fc83349a3fe1275634f0`](https://sepolia.starkscan.co/contract/0x043b51f6f571137d0e7c3afa4ca689e84271ba97c5b6fc83349a3fe1275634f0).
+
+The contract scores transactions using a ZKML-proven classifier and enforces decisions on-chain with 21 sequential security checks.
 
 ```cairo
-// Agent submits action for evaluation
-let action_id = firewall.submit_action(agent_id, target, value, io_commitment);
+// 1. Register agent
+firewall.register_agent(agent_id);
 
-// After ZKML proof is verified on ObelyskVerifier...
-firewall.resolve_action_with_proof(action_id, proof_hash, threat_score, packed_output);
+// 2. Submit action for evaluation
+let action_id = firewall.submit_action(agent_id, target, value, selector, io_commitment);
 
-// External contracts check before executing
+// 3. After ZKML proof is verified on ObelyskVerifier, resolve with proven IO data
+firewall.resolve_action_with_proof(action_id, proof_hash, original_io_len, packed_raw_io);
+// → threat_score computed ON-CHAIN from proven output neurons
+// → EMA trust score updated with asymmetric decay
+// → strikes incremented if score >= escalation threshold
+
+// 4. External contracts check before executing
 if firewall.is_action_approved(action_id) {
     // safe to execute the agent's transaction
 }
 ```
 
-Features: EMA trust scoring (alpha=0.3), strike mechanism (5 strikes = auto-freeze), policy-bound proofs (`PolicyConfig::strict` required).
+**Also deployed:** [`ContractRegistry`](https://sepolia.starkscan.co/contract/0x075f9812753666ee506509de0de10bdea3ad1a79d4ed31817a0e2534c9d90607) for `is_verified`/`has_source` target attestations.
 
-See [`../stwo-ml/docs/CLASSIFIER.md`](../stwo-ml/docs/CLASSIFIER.md) for the full architecture.
+**Security**: 21 sequential checks in `resolve_action_with_proof`, asymmetric EMA (fast up 0.5, slow down 0.1), auto-freeze at 5 strikes, emergency pause, 2-step ownership transfer, per-agent rate limiting, proof replay protection, on-chain score extraction (not caller-supplied), 47/48 input features verified against on-chain state.
+
+**30 Cairo tests, 4 Rust E2E tests, all passing.** See [`../stwo-ml/docs/CLASSIFIER.md`](../stwo-ml/docs/CLASSIFIER.md) for the full architecture.
 
 ## Deployed Contracts (Starknet Sepolia)
 
