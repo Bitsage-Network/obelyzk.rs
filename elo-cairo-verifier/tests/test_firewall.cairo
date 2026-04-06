@@ -82,7 +82,7 @@ fn test_submit_action() {
     start_cheat_caller_address(fw.contract_address, agent_addr);
 
     fw.register_agent(0xA1);
-    let action_id = fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xCAFE);
+    let action_id = fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xa9059cbb, 0xCAFE);
 
     assert!(action_id == 1, "first action should have id 1");
     assert!(fw.get_action_decision(action_id) == 0, "action should be pending");
@@ -102,7 +102,7 @@ fn test_submit_action_frozen_agent_rejected() {
 
     fw.register_agent(0xA1);
     fw.deactivate_agent(0xA1);
-    fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xCAFE); // should panic
+    fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xa9059cbb, 0xCAFE); // should panic
 }
 
 // ============================================================================
@@ -196,9 +196,9 @@ fn test_action_ids_increment() {
     start_cheat_caller_address(fw.contract_address, agent_owner_addr());
 
     fw.register_agent(0xA1);
-    let id1 = fw.submit_action(0xA1, 0xDEAD, 0x100, 0xCAFE);
-    let id2 = fw.submit_action(0xA1, 0xBEEF, 0x200, 0xFACE);
-    let id3 = fw.submit_action(0xA1, 0xF00D, 0x300, 0xDECA);
+    let id1 = fw.submit_action(0xA1, 0xDEAD, 0x100, 0xa9059cbb, 0xCAFE);
+    let id2 = fw.submit_action(0xA1, 0xBEEF, 0x200, 0x095ea7b3, 0xFACE);
+    let id3 = fw.submit_action(0xA1, 0xF00D, 0x300, 0x38ed1739, 0xDECA);
 
     assert!(id1 == 1, "first action id should be 1");
     assert!(id2 == 2, "second action id should be 2");
@@ -219,7 +219,7 @@ fn test_submit_action_non_owner_rejected() {
 
     let attacker: ContractAddress = 0xBAD_felt252.try_into().unwrap();
     start_cheat_caller_address(fw.contract_address, attacker);
-    fw.submit_action(0xA1, 0xDEAD, 0x100, 0xCAFE); // should panic
+    fw.submit_action(0xA1, 0xDEAD, 0x100, 0xa9059cbb, 0xCAFE); // should panic
 }
 
 // ============================================================================
@@ -231,7 +231,7 @@ fn test_submit_action_non_owner_rejected() {
 fn test_submit_action_unregistered_agent_rejected() {
     let fw = deploy_firewall();
     start_cheat_caller_address(fw.contract_address, agent_owner_addr());
-    fw.submit_action(0xDEAD, 0xBEEF, 0x100, 0xCAFE); // no agent registered
+    fw.submit_action(0xDEAD, 0xBEEF, 0x100, 0xa9059cbb, 0xCAFE); // no agent registered
 }
 
 // ============================================================================
@@ -285,7 +285,7 @@ fn test_query_action_metadata() {
     start_cheat_caller_address(fw.contract_address, agent_owner_addr());
 
     fw.register_agent(0xA1);
-    let action_id = fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xCAFE);
+    let action_id = fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xa9059cbb, 0xCAFE);
 
     assert!(fw.get_action_io_commitment(action_id) == 0xCAFE, "io_commitment should match");
     assert!(fw.get_action_threat_score(action_id) == 0, "unresolved action threat score should be 0");
@@ -355,7 +355,7 @@ fn test_submit_action_zero_io_commitment_rejected() {
     start_cheat_caller_address(fw.contract_address, agent_owner_addr());
 
     fw.register_agent(0xA1);
-    fw.submit_action(0xA1, 0xDEAD, 0x1000, 0); // zero io_commitment → rejected
+    fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xa9059cbb, 0); // zero io_commitment → rejected
 }
 
 // ============================================================================
@@ -382,7 +382,7 @@ fn test_get_action_agent() {
     start_cheat_caller_address(fw.contract_address, agent_owner_addr());
 
     fw.register_agent(0xA1);
-    let action_id = fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xCAFE);
+    let action_id = fw.submit_action(0xA1, 0xDEAD, 0x1000, 0xa9059cbb, 0xCAFE);
     assert!(fw.get_action_agent(action_id) == 0xA1, "action agent should match");
 }
 
@@ -423,8 +423,8 @@ fn test_multiple_actions_same_agent() {
     start_cheat_caller_address(fw.contract_address, agent_owner_addr());
 
     fw.register_agent(0xA1);
-    let id1 = fw.submit_action(0xA1, 0xDEAD, 0x100, 0xCAFE);
-    let id2 = fw.submit_action(0xA1, 0xBEEF, 0x200, 0xFACE);
+    let id1 = fw.submit_action(0xA1, 0xDEAD, 0x100, 0xa9059cbb, 0xCAFE);
+    let id2 = fw.submit_action(0xA1, 0xBEEF, 0x200, 0x095ea7b3, 0xFACE);
 
     // Both pending
     assert!(fw.get_action_decision(id1) == 0, "first should be pending");

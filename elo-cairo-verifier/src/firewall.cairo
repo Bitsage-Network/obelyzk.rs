@@ -43,6 +43,7 @@ pub trait IAgentFirewall<TContractState> {
         agent_id: felt252,
         target: felt252,
         value: felt252,
+        selector: u32,
         io_commitment: felt252,
     ) -> u64;
 
@@ -194,6 +195,7 @@ pub mod AgentFirewallZK {
         action_agent: Map<u64, felt252>,
         action_target: Map<u64, felt252>,
         action_value: Map<u64, felt252>,
+        action_selector: Map<u64, u32>,
         action_io_commitment: Map<u64, felt252>,
         action_resolved: Map<u64, bool>,
         /// 0=pending, 1=approved, 2=escalated, 3=blocked
@@ -256,6 +258,7 @@ pub mod AgentFirewallZK {
         agent_id: felt252,
         target: felt252,
         value: felt252,
+        selector: u32,
         io_commitment: felt252,
     }
 
@@ -360,6 +363,7 @@ pub mod AgentFirewallZK {
             agent_id: felt252,
             target: felt252,
             value: felt252,
+            selector: u32,
             io_commitment: felt252,
         ) -> u64 {
             // Agent must be registered and active
@@ -379,12 +383,13 @@ pub mod AgentFirewallZK {
             self.action_agent.entry(action_id).write(agent_id);
             self.action_target.entry(action_id).write(target);
             self.action_value.entry(action_id).write(value);
+            self.action_selector.entry(action_id).write(selector);
             self.action_io_commitment.entry(action_id).write(io_commitment);
             self.action_resolved.entry(action_id).write(false);
             self.action_decision.entry(action_id).write(0); // pending
             self.action_submitted_at.entry(action_id).write(get_block_timestamp());
 
-            self.emit(ActionSubmitted { action_id, agent_id, target, value, io_commitment });
+            self.emit(ActionSubmitted { action_id, agent_id, target, value, selector, io_commitment });
 
             action_id
         }
@@ -501,7 +506,52 @@ pub mod AgentFirewallZK {
             let score_suspicious: u64 = extract_m31(packed_span, score_start + 1).into();
             let score_malicious: u64 = extract_m31(packed_span, score_start + 2).into();
 
-            // 6. Compute threat score on-chain (not caller-supplied!)
+            // 6. Cross-check hard transaction data against action's stored values.
+            // Features 0-7 encode the target address as 8 x 31-bit M31 chunks.
+            // Feature 16 encodes the function selector (31-bit masked).
+            // These are inside the proven IO — an attacker cannot fake them
+            // without breaking the io_commitment Poseidon hash.
+            let input_start: u32 = 3; // after in_rows, in_cols, in_len header
+
+            // Reconstruct target from 8 M31 chunks (31 bits each, big-endian chunked)
+            // The encoding splits felt252 bytes into 4-byte chunks masked to 31 bits.
+            // We reconstruct a truncated target and compare against the stored action_target.
+            // Full felt252 reconstruction would require 9 chunks (252 bits / 31 = ~9).
+            // We verify the lower 248 bits (8 x 31 = 248) which is sufficient for
+            // Starknet addresses (251-bit felt252, top 3 bits usually zero).
+            let stored_target: felt252 = self.action_target.entry(action_id).read();
+            let mut reconstructed: u256 = 0;
+            let mut shift: u256 = 1; // 2^0
+            let mut chunk_idx: u32 = 0;
+            loop {
+                if chunk_idx >= 8 {
+                    break;
+                }
+                // Chunks are stored big-endian by the encoder (chunk 0 = MSB bytes)
+                // but M31 index 0 = chunk 0. Reconstruct by treating chunk 0 as lowest.
+                let chunk_val: u256 = extract_m31(packed_span, input_start + chunk_idx).into();
+                reconstructed = reconstructed + chunk_val * shift;
+                shift = shift * 0x80000000; // 2^31
+                chunk_idx += 1;
+            };
+            // Compare lower 248 bits of target against reconstructed
+            let target_u256: u256 = stored_target.into();
+            let mask_248: u256 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF; // 2^248 - 1
+            assert!(
+                (reconstructed & mask_248) == (target_u256 & mask_248),
+                "INPUT_TARGET_MISMATCH"
+            );
+
+            // Verify selector: feature 16 at M31 index (input_start + 16)
+            let encoded_selector: u32 = extract_m31(packed_span, input_start + 16);
+            let stored_selector: u32 = self.action_selector.entry(action_id).read();
+            // Selector is masked to 31 bits in the encoder (& 0x7FFFFFFF)
+            assert!(
+                encoded_selector == (stored_selector & 0x7FFFFFFF),
+                "INPUT_SELECTOR_MISMATCH"
+            );
+
+            // 7. Compute threat score on-chain (not caller-supplied!)
             let total: u64 = score_safe + score_suspicious + score_malicious;
             let threat_score: u32 = if total == 0 {
                 50000 // ambiguous → escalate by default
