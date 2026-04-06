@@ -155,10 +155,19 @@ pub mod AgentFirewallZK {
 
     // ── Constants ────────────────────────────────────────────────────
 
-    /// EMA alpha numerator (300 / 1000 = 0.3, same as ENShell).
-    const EMA_ALPHA_NUM: u64 = 300;
+    /// EMA alpha for INCREASING scores (score > prev): fast up.
+    /// 500 / 1000 = 0.5 — bad actions raise the score quickly.
+    const EMA_ALPHA_UP_NUM: u64 = 500;
+    /// EMA alpha for DECREASING scores (score <= prev): slow down.
+    /// 100 / 1000 = 0.1 — safe actions lower the score slowly.
+    /// This asymmetry prevents EMA dilution (Attack 4).
+    const EMA_ALPHA_DOWN_NUM: u64 = 100;
     /// EMA alpha denominator.
     const EMA_ALPHA_DEN: u64 = 1000;
+
+    /// Maximum age (seconds) for a pending action before it expires.
+    /// Actions older than this cannot be resolved (Attack 6).
+    const MAX_ACTION_AGE: u64 = 3600; // 1 hour
 
     /// Default escalation threshold (40000 / 100000).
     const DEFAULT_ESCALATE_THRESHOLD: u32 = 40000;
@@ -406,6 +415,11 @@ pub mod AgentFirewallZK {
             assert!(agent_id != 0, "ACTION_NOT_FOUND");
             assert!(!self.action_resolved.entry(action_id).read(), "ACTION_ALREADY_RESOLVED");
 
+            // Action must not be expired (Attack 6: stale action exploitation)
+            let submitted_at = self.action_submitted_at.entry(action_id).read();
+            let now = get_block_timestamp();
+            assert!(now - submitted_at <= MAX_ACTION_AGE, "ACTION_EXPIRED");
+
             // Caller must be agent owner or contract owner
             let caller = get_caller_address();
             let agent_owner = self.agent_owner.entry(agent_id).read();
@@ -595,10 +609,20 @@ pub mod AgentFirewallZK {
                 1 // approve
             };
 
-            // 8. Update EMA trust score (alpha = 0.3)
+            // 8. Update EMA trust score with ASYMMETRIC decay.
+            // Score going UP (bad action): alpha = 0.5 (fast)
+            // Score going DOWN (safe action): alpha = 0.1 (slow)
+            // This prevents EMA dilution — an attacker can't quickly wash
+            // away a high score by submitting safe transactions.
             let prev_score = self.agent_trust_score.entry(agent_id).read();
-            let new_score = (EMA_ALPHA_NUM * threat_score.into()
-                + (EMA_ALPHA_DEN - EMA_ALPHA_NUM) * prev_score)
+            let threat_u64: u64 = threat_score.into();
+            let alpha_num = if threat_u64 > prev_score {
+                EMA_ALPHA_UP_NUM    // 0.5 — bad scores hit hard
+            } else {
+                EMA_ALPHA_DOWN_NUM  // 0.1 — safe scores forgive slowly
+            };
+            let new_score = (alpha_num * threat_u64
+                + (EMA_ALPHA_DEN - alpha_num) * prev_score)
                 / EMA_ALPHA_DEN;
             self.agent_trust_score.entry(agent_id).write(new_score);
             self.emit(TrustScoreUpdated {

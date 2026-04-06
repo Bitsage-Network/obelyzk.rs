@@ -20,7 +20,8 @@ use stwo_ml::policy::PolicyConfig;
 
 // ─── Firewall Logic (mirrors Cairo AgentFirewallZK exactly) ──────────────────
 
-const EMA_ALPHA_NUM: u64 = 300;
+const EMA_ALPHA_UP: u64 = 500;   // fast up (bad actions)
+const EMA_ALPHA_DOWN: u64 = 100; // slow down (safe actions)
 const EMA_ALPHA_DEN: u64 = 1000;
 const DEFAULT_ESCALATE: u32 = 40_000;
 const DEFAULT_BLOCK: u32 = 70_000;
@@ -38,9 +39,17 @@ impl Agent {
     }
 
     fn apply_score(&mut self, threat_score: u32) -> u8 {
-        // 1. EMA update (matches Cairo: 300*new + 700*old / 1000)
-        let new_score = (EMA_ALPHA_NUM * threat_score as u64
-            + (EMA_ALPHA_DEN - EMA_ALPHA_NUM) * self.trust_score)
+        // 1. Asymmetric EMA update (matches Cairo contract)
+        // Fast up (alpha=0.5): bad actions raise score quickly
+        // Slow down (alpha=0.1): safe actions lower score slowly
+        let threat_u64 = threat_score as u64;
+        let alpha = if threat_u64 > self.trust_score {
+            EMA_ALPHA_UP     // 0.5
+        } else {
+            EMA_ALPHA_DOWN   // 0.1
+        };
+        let new_score = (alpha * threat_u64
+            + (EMA_ALPHA_DEN - alpha) * self.trust_score)
             / EMA_ALPHA_DEN;
         self.trust_score = new_score;
 
@@ -156,9 +165,10 @@ fn test_e2e_classifier_prove_verify_approve() {
     // so we can assert specific behavior
     assert!(result.threat_score <= 100_000, "score must be in range");
 
-    // Whatever the decision, EMA must be applied correctly
-    let expected_ema = (EMA_ALPHA_NUM * result.threat_score as u64) / EMA_ALPHA_DEN;
-    assert_eq!(agent.trust_score, expected_ema, "EMA must match (first score, prev=0)");
+    // Whatever the decision, asymmetric EMA must be applied correctly.
+    // First score: prev=0, so score > prev → alpha_up=0.5
+    let expected_ema = (EMA_ALPHA_UP * result.threat_score as u64) / EMA_ALPHA_DEN;
+    assert_eq!(agent.trust_score, expected_ema, "asymmetric EMA must match (first score, prev=0)");
 }
 
 #[test]
@@ -231,13 +241,14 @@ fn test_e2e_repeated_suspicious_triggers_freeze() {
     assert_eq!(agent.strikes, 5, "should have exactly 5 strikes");
     assert!(!agent.is_trusted(), "frozen agent should not be trusted");
 
-    // EMA after 5 scores of 75000 starting from 0:
-    // Round 1: 300*75000/1000 = 22500
-    // Round 2: 300*75000 + 700*22500 / 1000 = 22500 + 15750 = 38250
-    // Round 3: 300*75000 + 700*38250 / 1000 = 22500 + 26775 = 49275
-    // Round 4: 300*75000 + 700*49275 / 1000 = 22500 + 34492 = 56992
-    // Round 5: 300*75000 + 700*56992 / 1000 = 22500 + 39894 = 62394
-    assert_eq!(agent.trust_score, 62394, "EMA after 5 rounds of 75000 should be 62394");
+    // Asymmetric EMA after 5 scores of 75000 starting from 0:
+    // All rounds: 75000 > prev → alpha_up = 0.5
+    // Round 1: 500*75000/1000 = 37500
+    // Round 2: 500*75000 + 500*37500 / 1000 = 37500 + 18750 = 56250
+    // Round 3: 500*75000 + 500*56250 / 1000 = 37500 + 28125 = 65625
+    // Round 4: 500*75000 + 500*65625 / 1000 = 37500 + 32812 = 70312
+    // Round 5: 500*75000 + 500*70312 / 1000 = 37500 + 35156 = 72656
+    assert_eq!(agent.trust_score, 72656, "asymmetric EMA after 5 rounds of 75000 (alpha_up=0.5)");
 }
 
 #[test]
