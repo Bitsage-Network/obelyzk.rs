@@ -417,3 +417,93 @@ fn test_verify_bit_flip_rejected() {
         tampered,
     );
 }
+
+// ═══════════════════════════════════════════════════════════════
+// GROUP D: Upgrade Timelock Tests
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_propose_upgrade() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    let new_class: starknet::ClassHash = 0xABCDEF.try_into().unwrap();
+    verifier.propose_upgrade(new_class);
+
+    let (pending, _ts) = verifier.get_pending_upgrade();
+    assert!(pending == new_class, "pending should match proposed class");
+}
+
+#[test]
+#[should_panic(expected: "Only owner")]
+fn test_propose_upgrade_non_owner_rejected() {
+    let verifier = deploy_verifier();
+    let attacker: ContractAddress = ATTACKER_ADDR.try_into().unwrap();
+    start_cheat_caller_address(verifier.contract_address, attacker);
+
+    let new_class: starknet::ClassHash = 0xABCDEF.try_into().unwrap();
+    verifier.propose_upgrade(new_class);
+}
+
+#[test]
+#[should_panic(expected: "Class hash cannot be zero")]
+fn test_propose_upgrade_zero_class_rejected() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    let zero_class: starknet::ClassHash = 0.try_into().unwrap();
+    verifier.propose_upgrade(zero_class);
+}
+
+#[test]
+#[should_panic(expected: "Upgrade already pending")]
+fn test_propose_upgrade_double_rejected() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    let class1: starknet::ClassHash = 0xAAA.try_into().unwrap();
+    let class2: starknet::ClassHash = 0xBBB.try_into().unwrap();
+    verifier.propose_upgrade(class1);
+    verifier.propose_upgrade(class2); // should fail
+}
+
+#[test]
+fn test_cancel_upgrade() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    let new_class: starknet::ClassHash = 0xABCDEF.try_into().unwrap();
+    verifier.propose_upgrade(new_class);
+    verifier.cancel_upgrade();
+
+    let (pending, _ts) = verifier.get_pending_upgrade();
+    let pending_felt: felt252 = pending.into();
+    assert!(pending_felt == 0, "pending should be cleared after cancel");
+}
+
+#[test]
+#[should_panic(expected: "No upgrade pending")]
+fn test_cancel_upgrade_when_none_pending() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    verifier.cancel_upgrade(); // nothing to cancel
+}
+
+#[test]
+#[should_panic(expected: "No upgrade pending")]
+fn test_execute_upgrade_when_none_pending() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    verifier.execute_upgrade(); // nothing to execute
+}
+
+#[test]
+fn test_get_pending_upgrade_default_zero() {
+    let verifier = deploy_verifier();
+    let (pending, ts) = verifier.get_pending_upgrade();
+    let pending_felt: felt252 = pending.into();
+    assert!(pending_felt == 0, "default pending should be zero");
+    assert!(ts == 0, "default timestamp should be zero");
+}

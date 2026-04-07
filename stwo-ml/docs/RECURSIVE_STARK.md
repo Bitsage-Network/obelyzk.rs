@@ -608,7 +608,7 @@ All success criteria met. The recursive STARK verifier is **live on Starknet Sep
 
 | Field | Value |
 |-------|-------|
-| **Contract** | `0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c` |
+| **Contract** | `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` |
 | **Class hash** | `0x0300ff964fe615d094af601074b76b7193b564e0c7215c7b98bc046334c35bcf` |
 | **First verified proof** | [`0x276c6a44...`](https://sepolia.starkscan.co/tx/0x61a60a7fcf899d38da5e0f4632746f48843e1c537dabe57ea7df42ad71c0ba6) |
 | **MIN_POW_BITS** | 10 (production) |

@@ -229,7 +229,7 @@ identical cryptography and are covered by equivalence tests.
 
 | Item | Value |
 |------|-------|
-| **Recursive verifier contract** | `0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c` |
+| **Recursive verifier contract** | `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` |
 | **Recursive verifier class hash** | `0x0300ff964fe615d094af601074b76b7193b564e0c7215c7b98bc046334c35bcf` |
 | **Streaming GKR class (v31)** | `0x6a6b7a75d5ec1f63d715617d352bc0d353042b2a033d98fa28ffbaf6c5b5439` |
 | **Deployer account** | `0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344` |

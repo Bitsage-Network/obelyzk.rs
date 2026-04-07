@@ -2866,7 +2866,7 @@ fn main() {
                 "register_calldata": register_calldata_obj,
                 "recursive_proof": if let (Some(ref cd), Some(ref summ)) = (&recursive_calldata, &recursive_summary) {
                     let recursive_contract = std::env::var("RECURSIVE_CONTRACT")
-                        .unwrap_or_else(|_| "0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c".to_string());
+                        .unwrap_or_else(|_| "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7".to_string());
                     // Pack QM31 public inputs as felt252 for on-chain registration
                     let pack_qm31 = |limbs: &[starknet_ff::FieldElement]| -> String {
                         let shift31 = starknet_ff::FieldElement::from(1u64 << 31);
@@ -3781,7 +3781,7 @@ fn submit_recursive_proof_onchain(cli: &Cli) {
 
     let proof_path = cli.output.display().to_string();
     let contract = std::env::var("RECURSIVE_CONTRACT")
-        .unwrap_or_else(|_| "0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c".to_string());
+        .unwrap_or_else(|_| "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7".to_string());
     let rpc = std::env::var("STARKNET_RPC")
         .unwrap_or_else(|_| "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/demo".to_string());
 

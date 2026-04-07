@@ -441,7 +441,7 @@ allows:
 
 ### 7.4 No Contract Upgrade Timelock on Recursive Verifier
 
-The recursive STARK verifier contract (`0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c`)
+The recursive STARK verifier contract (`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`)
 supports upgrades via a propose-then-execute pattern, but the timelock duration may
 be insufficient for the community to detect and respond to a malicious upgrade
 proposal. The streaming GKR verifier has a 5-minute timelock; the recursive verifier

@@ -84,6 +84,18 @@ pub trait IRecursiveVerifier<TContractState> {
     fn get_model_policy(
         self: @TContractState, model_id: felt252,
     ) -> felt252;
+
+    /// Propose a contract class upgrade (owner only, subject to timelock).
+    fn propose_upgrade(ref self: TContractState, new_class_hash: starknet::ClassHash);
+
+    /// Execute a proposed upgrade after the timelock has elapsed.
+    fn execute_upgrade(ref self: TContractState);
+
+    /// Cancel a pending upgrade.
+    fn cancel_upgrade(ref self: TContractState);
+
+    /// Get the pending upgrade class hash and proposal timestamp.
+    fn get_pending_upgrade(self: @TContractState) -> (starknet::ClassHash, u64);
 }
 
 #[starknet::contract]
@@ -115,13 +127,25 @@ pub mod RecursiveVerifierContract {
 
         /// Verification count per model.
         recursive_count: Map<felt252, u64>,
+
+        /// Pending upgrade class hash (0 = no pending upgrade).
+        pending_upgrade: starknet::ClassHash,
+
+        /// Timestamp when upgrade was proposed.
+        upgrade_proposed_at: u64,
     }
+
+    /// Minimum delay (seconds) between propose_upgrade and execute_upgrade.
+    const UPGRADE_DELAY: u64 = 300; // 5 minutes
 
     #[event]
     #[derive(Drop, starknet::Event)]
     pub enum Event {
         RecursiveModelRegistered: RecursiveModelRegistered,
         RecursiveProofVerified: RecursiveProofVerified,
+        UpgradeProposed: UpgradeProposed,
+        UpgradeExecuted: UpgradeExecuted,
+        UpgradeCancelled: UpgradeCancelled,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -141,6 +165,25 @@ pub mod RecursiveVerifierContract {
         #[key]
         pub proof_hash: felt252,
         pub io_commitment: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct UpgradeProposed {
+        pub new_class_hash: starknet::ClassHash,
+        pub proposed_at: u64,
+        pub proposer: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct UpgradeExecuted {
+        pub new_class_hash: starknet::ClassHash,
+        pub executed_at: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct UpgradeCancelled {
+        pub cancelled_class_hash: starknet::ClassHash,
+        pub cancelled_by: ContractAddress,
     }
 
     #[constructor]
@@ -349,6 +392,60 @@ pub mod RecursiveVerifierContract {
             self: @ContractState, model_id: felt252,
         ) -> felt252 {
             self.recursive_models.read(model_id).policy_commitment
+        }
+
+        fn propose_upgrade(ref self: ContractState, new_class_hash: starknet::ClassHash) {
+            assert!(get_caller_address() == self.owner.read(), "Only owner");
+            assert!(new_class_hash.into() != 0_felt252, "Class hash cannot be zero");
+
+            let existing: felt252 = self.pending_upgrade.read().into();
+            assert!(existing == 0, "Upgrade already pending, cancel first");
+
+            let now = starknet::get_block_timestamp();
+            self.pending_upgrade.write(new_class_hash);
+            self.upgrade_proposed_at.write(now);
+
+            self.emit(UpgradeProposed {
+                new_class_hash, proposed_at: now, proposer: get_caller_address(),
+            });
+        }
+
+        fn execute_upgrade(ref self: ContractState) {
+            assert!(get_caller_address() == self.owner.read(), "Only owner");
+
+            let new_class_hash = self.pending_upgrade.read();
+            assert!(new_class_hash.into() != 0_felt252, "No upgrade pending");
+
+            let proposed_at = self.upgrade_proposed_at.read();
+            let now = starknet::get_block_timestamp();
+            assert!(now >= proposed_at + UPGRADE_DELAY, "Upgrade delay not elapsed");
+
+            self.pending_upgrade.write(0.try_into().unwrap());
+            self.upgrade_proposed_at.write(0);
+
+            self.emit(UpgradeExecuted {
+                new_class_hash, executed_at: now,
+            });
+
+            starknet::syscalls::replace_class_syscall(new_class_hash).unwrap();
+        }
+
+        fn cancel_upgrade(ref self: ContractState) {
+            assert!(get_caller_address() == self.owner.read(), "Only owner");
+
+            let pending: starknet::ClassHash = self.pending_upgrade.read();
+            assert!(pending.into() != 0_felt252, "No upgrade pending");
+
+            self.pending_upgrade.write(0.try_into().unwrap());
+            self.upgrade_proposed_at.write(0);
+
+            self.emit(UpgradeCancelled {
+                cancelled_class_hash: pending, cancelled_by: get_caller_address(),
+            });
+        }
+
+        fn get_pending_upgrade(self: @ContractState) -> (starknet::ClassHash, u64) {
+            (self.pending_upgrade.read(), self.upgrade_proposed_at.read())
         }
     }
 

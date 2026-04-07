@@ -19,7 +19,7 @@ All three paths submit proofs to the same on-chain verifier:
 | Property | Value |
 |----------|-------|
 | Network | Starknet Sepolia |
-| Contract | `0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c` |
+| Contract | `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` |
 | Proof type | Recursive STARK (single transaction) |
 
 For on-chain submission or verification queries you also need:
@@ -170,7 +170,7 @@ cd stwo-ml
 npm install starknet
 
 STARKNET_PRIVATE_KEY=0x... \
-RECURSIVE_CONTRACT=0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c \
+RECURSIVE_CONTRACT=0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 \
 node scripts/submit_recursive.mjs proof.json
 ```
 
@@ -283,7 +283,7 @@ cd stwo-ml
 npm install starknet
 
 STARKNET_PRIVATE_KEY=0x... \
-RECURSIVE_CONTRACT=0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c \
+RECURSIVE_CONTRACT=0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 \
 node scripts/submit_recursive.mjs proof.json
 ```
 
@@ -298,7 +298,7 @@ const provider = new RpcProvider({
 
 const count = await provider.callContract({
   contractAddress:
-    "0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c",
+    "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7",
   entrypoint: "get_recursive_verification_count",
   calldata: [modelId],
 });
@@ -317,7 +317,7 @@ const provider = new RpcProvider({
 
 const contract = new Contract(
   abi,
-  "0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c",
+  "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7",
   provider
 );
 
@@ -355,7 +355,7 @@ The script will:
 
 ## 7. Contract Interface Reference
 
-The recursive verifier contract at `0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c` exposes the following entrypoints:
+The recursive verifier contract at `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` exposes the following entrypoints:
 
 | Entrypoint | Type | Description |
 |------------|------|-------------|
@@ -455,4 +455,4 @@ export STWO_GPU_MERKLE_THRESHOLD=2048
 | PyPI SDK | https://pypi.org/project/obelyzk |
 | Documentation | https://docs.obelysk.xyz |
 | Paper | https://arxiv.org/abs/2026.obelyzk |
-| Contract (Sepolia) | https://sepolia.starkscan.co/contract/0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c |
+| Contract (Sepolia) | https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 |

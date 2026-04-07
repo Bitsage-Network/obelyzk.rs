@@ -137,7 +137,7 @@ Every proof is verified trustlessly on Starknet. The Cairo contract performs com
 
 | Contract | Address |
 |---|---|
-| Recursive Verifier | [`0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c`](https://sepolia.voyager.online/contract/0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c) |
+| Recursive Verifier | [`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`](https://sepolia.voyager.online/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7) |
 | Class Hash | `0x05057fff1ced4c9044d3613256b0e9718e05b07760b6570c5f883aad73e163ea` |
 | Deployer | [`0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344`](https://sepolia.voyager.online/contract/0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344) |
 
@@ -162,7 +162,7 @@ console.log(status.verified); // true
 Or query the contract directly:
 
 ```bash
-starkli call 0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c \
+starkli call 0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 \
   is_verified 0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc
 ```
 

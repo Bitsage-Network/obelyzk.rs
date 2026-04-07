@@ -26,7 +26,7 @@ function packQm31ToFelt252(limbs) {
 }
 
 const DEFAULT_RPC = process.env.STARKNET_RPC || "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/demo";
-const DEFAULT_CONTRACT = "0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c";
+const DEFAULT_CONTRACT = "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7";
 const DEFAULT_ACCOUNT = "0x57a93709bb92879f0f9f2cb81a87f9ca47d2d7e54af87dbde2831b0b7e81c1f";
 
 const RPC = process.env.STARKNET_RPC || DEFAULT_RPC;

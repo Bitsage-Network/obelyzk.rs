@@ -118,7 +118,7 @@ by stwo-cairo-verifier (Cairo's native Poseidon for Fiat-Shamir and Merkle).
 
 | Field | Value |
 |-------|-------|
-| **Contract address** | `0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c` |
+| **Contract address** | `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` |
 | **Class hash** | `0x0300ff964fe615d094af601074b76b7193b564e0c7215c7b98bc046334c35bcf` |
 | **Source** | `elo-cairo-verifier/src/recursive_verifier.cairo` |
 | **Deployer** | `0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344` |
@@ -487,7 +487,7 @@ remaining step is deploying the class to Sepolia.
 The fully trustless class hash (`0x006d4ff2332af0f7b1ac4601e266f7bcd7ef3b529f72012677b15445289ce820`)
 needs to be declared on Sepolia. This requires a Juno full node because the
 class size exceeds Alchemy's gateway limits. Once declared, the Phase 1 contract
-at `0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c`
+at `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`
 will be upgraded via the timelock mechanism:
 
 1. Declare the class via Juno node
@@ -524,7 +524,7 @@ Environment variables for on-chain submission:
 ```bash
 export STARKNET_PRIVATE_KEY="<your-key>"
 export STARKNET_RPC="<your-rpc-url>"              # defaults to Alchemy Sepolia
-export RECURSIVE_CONTRACT="0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c"
+export RECURSIVE_CONTRACT="0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7"
 ```
 
 ### API: `/api/v1/attest` Endpoint

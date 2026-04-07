@@ -22,7 +22,7 @@ const SIERRA_PATH = resolve(CAIRO_DIR, "target/dev/elo_cairo_verifier_RecursiveV
 const CASM_PATH = resolve(CAIRO_DIR, "target/dev/elo_cairo_verifier_RecursiveVerifierContract.compiled_contract_class.json");
 
 const DEFAULT_ACCOUNT = "0x57a93709bb92879f0f9f2cb81a87f9ca47d2d7e54af87dbde2831b0b7e81c1f";
-const PHASE1_CONTRACT = "0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c";
+const PHASE1_CONTRACT = "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7";
 
 const RPCS = [
   process.env.STARKNET_RPC,
