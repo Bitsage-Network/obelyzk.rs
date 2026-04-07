@@ -1435,6 +1435,89 @@ fn load_weights_from_shards(
     Ok(weights)
 }
 
+/// Load MoE expert weights from safetensors shards into a weight bank.
+///
+/// Returns one MoEWeightBank per MoE layer. Each bank holds all expert weight
+/// triples (gate_proj, up_proj, down_proj) for that layer.
+pub fn load_moe_weight_banks(
+    shard_paths: &[std::path::PathBuf],
+    name_map: &HashMap<usize, String>,
+    moe_infos: &[(usize, crate::compiler::graph::MoESlotInfo)],
+    strategy: QuantStrategy,
+) -> Result<Vec<(usize, crate::compiler::graph::MoEWeightBank)>, crate::compiler::quantize_weights::WeightError> {
+    use crate::compiler::quantize_weights::WeightError;
+
+    if moe_infos.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Memory-map shards
+    let mut shard_mmaps: Vec<memmap2::Mmap> = Vec::new();
+    for path in shard_paths {
+        let file = std::fs::File::open(path).map_err(|e| WeightError::IoError(e.to_string()))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| WeightError::IoError(e.to_string()))?;
+        shard_mmaps.push(mmap);
+    }
+
+    let mut banks = Vec::with_capacity(moe_infos.len());
+
+    for (layer_idx, info) in moe_infos {
+        let mut experts = Vec::with_capacity(info.num_experts);
+
+        for expert_idx in 0..info.num_experts {
+            // Keys: 30000 + layer*1000 + expert*10 + {0=gate, 1=up, 2=down}
+            let gate_key = 30000 + layer_idx * 1000 + expert_idx * 10;
+            let up_key = gate_key + 1;
+            let down_key = gate_key + 2;
+
+            let load_tensor = |key: usize| -> Result<M31Matrix, WeightError> {
+                let tensor_name = name_map.get(&key).ok_or_else(|| {
+                    WeightError::IoError(format!("MoE tensor key {} not in name_map (layer={}, expert={})", key, layer_idx, expert_idx))
+                })?;
+
+                for mmap in &shard_mmaps {
+                    let Ok(tensors) = safetensors::SafeTensors::deserialize(mmap) else { continue };
+                    let Ok(tensor) = tensors.tensor(tensor_name) else { continue };
+
+                    let data = tensor_to_f32(tensor.data(), tensor.dtype());
+                    let shape = tensor.shape();
+                    let (rows, cols) = if shape.len() == 2 { (shape[0], shape[1]) } else { (data.len(), 1) };
+
+                    // Transpose: HF (out_features, in_features) → matmul (in_features, out_features)
+                    let mut transposed = vec![0.0f32; data.len()];
+                    for r in 0..rows {
+                        for c in 0..cols {
+                            transposed[c * rows + r] = data[r * cols + c];
+                        }
+                    }
+                    let (quantized, _) = crate::gadgets::quantize::quantize_tensor(&transposed, strategy);
+                    return Ok(M31Matrix { rows: cols, cols: rows, data: quantized });
+                }
+                Err(WeightError::IoError(format!("tensor '{}' not found in any shard", tensor_name)))
+            };
+
+            let gate_proj = load_tensor(gate_key)?;
+            let up_proj = load_tensor(up_key)?;
+            let down_proj = load_tensor(down_key)?;
+
+            experts.push(crate::compiler::graph::MoEExpertWeights { gate_proj, up_proj, down_proj });
+        }
+
+        let bank = crate::compiler::graph::MoEWeightBank {
+            experts,
+            slot_gate_ids: info.slot_gate_ids.clone(),
+            slot_down_ids: info.slot_down_ids.clone(),
+            router_node_id: info.router_node_id,
+            num_experts: info.num_experts,
+            top_k: info.top_k,
+        };
+        banks.push((*layer_idx, bank));
+        eprintln!("  Loaded MoE weight bank: layer {}, {} experts × 3 matrices", layer_idx, info.num_experts);
+    }
+
+    Ok(banks)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Decode Graph (Attention-aware) — for decode-step proving
 // ─────────────────────────────────────────────────────────────────────────────
