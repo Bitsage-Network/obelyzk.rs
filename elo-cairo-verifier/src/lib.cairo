@@ -16,8 +16,8 @@ pub mod vm31_merkle;
 // pub mod vm31_verifier;   // stripped for lean v32
 // pub mod vm31_pool;       // stripped for lean v32
 pub mod aggregated_binding;
-// pub mod recursive_air;     // temporarily disabled (pre-existing compilation issues)
-// pub mod recursive_verifier; // temporarily disabled
+pub mod recursive_air;
+pub mod recursive_verifier;
 pub mod firewall;
 pub mod registry;
 pub mod verifier;
