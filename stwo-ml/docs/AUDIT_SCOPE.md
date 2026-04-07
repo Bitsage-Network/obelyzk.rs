@@ -3,7 +3,7 @@
 **Version**: 1.0
 **Date**: April 6, 2026
 **Engagement type**: Third-party security audit
-**Contact**: dev@obelysk.com
+**Contact**: dev@obelysk.xyz
 
 ---
 
@@ -476,8 +476,8 @@ storage is consistent between prover and verifier.
 
 | Role | Contact |
 |------|---------|
-| **Engineering lead** | dev@obelysk.com |
-| **Security questions** | dev@obelysk.com |
+| **Engineering lead** | dev@obelysk.xyz |
+| **Security questions** | dev@obelysk.xyz |
 | **Repository access** | Provided via GitHub invitation upon engagement |
 | **Test environment** | Starknet Sepolia (public) |
 | **Prover instance** | Available upon request for end-to-end testing |

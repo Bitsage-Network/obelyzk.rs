@@ -31,12 +31,12 @@ For on-chain submission or verification queries you also need:
 
 ## 2. Option 1: Hosted API (Fastest)
 
-The hosted fleet at **https://api.obelysk.com** handles model loading, GPU proving, and on-chain submission. No local GPU or Rust toolchain required.
+The hosted fleet at **https://api.obelysk.xyz** handles model loading, GPU proving, and on-chain submission. No local GPU or Rust toolchain required.
 
 ### Prove with curl
 
 ```bash
-curl -X POST https://api.obelysk.com/api/v1/prove \
+curl -X POST https://api.obelysk.xyz/api/v1/prove \
   -H "Authorization: Bearer $OBELYZK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -450,9 +450,9 @@ export STWO_GPU_MERKLE_THRESHOLD=2048
 | Resource | URL |
 |----------|-----|
 | GitHub | https://github.com/obelyzk/stwo-ml |
-| Hosted API | https://api.obelysk.com |
+| Hosted API | https://api.obelysk.xyz |
 | npm SDK | https://www.npmjs.com/package/@obelyzk/sdk |
 | PyPI SDK | https://pypi.org/project/obelyzk |
-| Documentation | https://docs.obelysk.com |
+| Documentation | https://docs.obelysk.xyz |
 | Paper | https://arxiv.org/abs/2026.obelyzk |
 | Contract (Sepolia) | https://sepolia.starkscan.co/contract/0x526fcdb940f92dc50bc3a234ffafe6d08d7b2e3b69f6cb41678331ee6a5a03c |
