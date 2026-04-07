@@ -11,9 +11,10 @@ function packQm31ToFelt252(limbs) {
   return "0x" + r.toString(16);
 }
 
-const RPC = "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/demo";
-const ADDR = "0x57a93709bb92879f0f9f2cb81a87f9ca47d2d7e54af87dbde2831b0b7e81c1f";
+const RPC = process.env.STARKNET_RPC;
+const ADDR = process.env.DEPLOYER_ADDRESS;
 const KEY = process.env.STARKNET_PRIVATE_KEY;
+if (!RPC || !ADDR || !KEY) { console.error("ERROR: Set STARKNET_RPC, DEPLOYER_ADDRESS, STARKNET_PRIVATE_KEY env vars"); process.exit(1); }
 
 const provider = new RpcProvider({ nodeUrl: RPC });
 const account = new Account({ provider, address: ADDR, signer: KEY });

@@ -33,5 +33,15 @@ node_modules/
 # Python
 __pycache__/
 
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+
+# Backup files
+*.bak
+
 # OS
 .DS_Store
