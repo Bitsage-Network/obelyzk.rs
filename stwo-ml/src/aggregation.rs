@@ -4084,7 +4084,7 @@ pub fn prove_model_pure_gkr(
     input: &M31Matrix,
     weights: &GraphWeights,
 ) -> Result<AggregatedModelProofOnChain, AggregationError> {
-    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, None, None, None)
+    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, None, None, None, None)
 }
 
 /// Pure GKR with auto GPU dispatch for the unified STARK backend.
@@ -4116,11 +4116,11 @@ pub fn prove_model_pure_gkr_auto_with_cache(
     {
         if crate::backend::gpu_is_available() {
             return prove_model_pure_gkr_inner::<stwo::prover::backend::gpu::GpuBackend>(
-                graph, input, weights, weight_cache, None, policy,
+                graph, input, weights, weight_cache, None, policy, None,
             );
         }
     }
-    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, weight_cache, None, policy)
+    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, weight_cache, None, policy, None)
 }
 
 /// Prove a prefill batch (seq_len >= 1) with KV-cache support.
@@ -4152,11 +4152,11 @@ pub fn prove_model_pure_gkr_prefill_with_cache(
     {
         if crate::backend::gpu_is_available() {
             return prove_model_pure_gkr_inner::<stwo::prover::backend::gpu::GpuBackend>(
-                graph, input, weights, weight_cache, Some(kv_cache), policy,
+                graph, input, weights, weight_cache, Some(kv_cache), policy, None,
             );
         }
     }
-    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, weight_cache, Some(kv_cache), policy)
+    prove_model_pure_gkr_inner::<SimdBackend>(graph, input, weights, weight_cache, Some(kv_cache), policy, None)
 }
 
 /// Streaming prefill: split a long prompt into chunks and prove each independently.
@@ -4328,6 +4328,7 @@ fn prove_model_pure_gkr_inner<B>(
     weight_cache: Option<&crate::weight_cache::SharedWeightCache>,
     mut kv_cache: Option<&mut crate::components::attention::ModelKVCache>,
     policy: Option<&crate::policy::PolicyConfig>,
+    moe_banks: Option<&[(usize, crate::compiler::graph::MoEWeightBank)]>,
 ) -> Result<AggregatedModelProofOnChain, AggregationError>
 where
     B: BackendForChannel<Blake2sMerkleChannel> + PolyOps + ColumnOps<BaseField>,
@@ -4377,6 +4378,10 @@ where
     let mut dequantize_layers: Vec<DequantizeLayerData> = Vec::new();
     let mut rope_layers: Vec<RoPELayerData> = Vec::new();
 
+    // For MoE models: clone weights so we can dynamically bind expert weights per token.
+    let has_moe = graph.nodes.iter().any(|n| matches!(n.op, GraphOp::MoE { .. }));
+    let mut moe_weights = if has_moe { Some(weights.clone()) } else { None };
+
     let topo = graph.topological_order();
     let total_nodes = topo.len();
     eprintln!("Phase 1/3: Forward pass ({} nodes)...", total_nodes);
@@ -4396,15 +4401,17 @@ where
         match &node.op {
             GraphOp::MatMul { dims } => {
                 let (m, k, n) = *dims;
-                let weight = weights
+                // For MoE: check dynamically-bound weights first, then original
+                let active_w = moe_weights.as_ref().unwrap_or(weights);
+                let weight = active_w
                     .get_weight(node.id)
+                    .or_else(|| weights.get_weight(node.id))
                     .ok_or(ModelError::MissingWeight(node.id))?;
 
                 // Gated FFN: if this node has an "up_proj" named weight, compute
                 // gate * up before the down_proj MatMul.
-                // The up_proj input is the ORIGINAL input to the FFN block (before gate_proj),
-                // which we find by walking back through the graph to the norm output.
-                if let Some(up_weight) = weights.get_named_weight(node.id, "up_proj") {
+                if let Some(up_weight) = active_w.get_named_weight(node.id, "up_proj")
+                    .or_else(|| weights.get_named_weight(node.id, "up_proj")) {
                     // Find the FFN block input: walk back 3 nodes (down_proj ← SiLU ← gate_proj ← norm)
                     // The norm output is the input to gate_proj, which is 2 nodes before this one.
                     // In topo order: ..., norm, gate_proj, silu, DOWN_PROJ(this)
@@ -4875,10 +4882,17 @@ where
                 // Run TopK selection on router logits (first row = first token)
                 let selection = crate::components::topk::select_top_k(&current.data[..current.cols], *top_k);
 
-                // TODO: MoE weight binding will be added when moe_weight_banks is
-                // plumbed through. For now, expert template slots use whatever
-                // weights were loaded for them (works for non-MoE models).
-                let _ = &selection; // used by TopK prover later
+                // Bind selected expert weights into template slots
+                if let (Some(ref mut mw), Some(banks)) = (&mut moe_weights, moe_banks) {
+                    let router_id = node.id.saturating_sub(1);
+                    for (_, bank) in banks.iter() {
+                        if bank.router_node_id == router_id {
+                            bank.bind_experts(&selection.selected_indices, mw);
+                            eprintln!("    [MoE] bound experts {:?} for router node {}", selection.selected_indices, router_id);
+                            break;
+                        }
+                    }
+                }
 
                 node_outputs.insert(node.id, current.clone());
             }
