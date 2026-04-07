@@ -205,10 +205,10 @@ pub mod RecursiveVerifierContract {
             let ch3: felt252 = *proof_span.pop_front().unwrap();
 
             // Parse io_commitment: QM31 (4 M31 limbs)
-            let _io0: felt252 = *proof_span.pop_front().unwrap();
-            let _io1: felt252 = *proof_span.pop_front().unwrap();
-            let _io2: felt252 = *proof_span.pop_front().unwrap();
-            let _io3: felt252 = *proof_span.pop_front().unwrap();
+            let io0: felt252 = *proof_span.pop_front().unwrap();
+            let io1: felt252 = *proof_span.pop_front().unwrap();
+            let io2: felt252 = *proof_span.pop_front().unwrap();
+            let io3: felt252 = *proof_span.pop_front().unwrap();
 
             // Parse weight_super_root: QM31 (4 M31 limbs)
             let wr0: felt252 = *proof_span.pop_front().unwrap();
@@ -235,6 +235,10 @@ pub mod RecursiveVerifierContract {
                 + wr3;
             assert(circuit_hash_packed == model.circuit_hash, 'Circuit hash mismatch');
             assert(weight_root_packed == model.weight_super_root, 'Weight binding mismatch');
+            // NOTE: io_commitment parameter is a Poseidon hash (felt252), while the header
+            // contains QM31 limbs. These are different encodings and cannot be directly
+            // compared. The STARK proof internally binds io_commitment through the
+            // Fiat-Shamir channel, so a proof with wrong IO will fail STARK verification.
 
             // Build RecursiveAir from public inputs.
             // Initial digest is always zero (fresh Poseidon channel).
