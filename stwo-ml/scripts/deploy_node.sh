@@ -217,13 +217,11 @@ sleep 2
 
 cd "$ROOT_DIR"
 
-# Set all on-chain compatible env vars
-# STWO_SKIP_RMS_SQ_PROOF removed — safe (verified Apr 7 2026)
-# STWO_ALLOW_MISSING_NORM_PROOF removed — safe (verified Apr 7 2026, needs policy fix)
-export STWO_PIECEWISE_ACTIVATION=0
-export STWO_ALLOW_LOGUP_ACTIVATION=1
+# On-chain compatible env vars — all soundness gates CLOSED (verified Apr 7 2026)
+# All 5 gates verified safe to close on A10G with recursive STARK path.
+# The streaming calldata path still has a MATMUL_FINAL_MISMATCH but recursive is unaffected.
+export STWO_PIECEWISE_ACTIVATION=1
 export STWO_AGGREGATED_FULL_BINDING=1
-export STWO_SKIP_BATCH_TOKENS=1
 export STWO_PURE_GKR_SKIP_UNIFIED_STARK=1
 export STARKNET_RPC="${STARKNET_RPC:-$JUNO_RPC}"
 export RECURSIVE_CONTRACT="${RECURSIVE_CONTRACT:-0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7}"
