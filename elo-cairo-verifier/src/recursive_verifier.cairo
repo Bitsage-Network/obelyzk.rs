@@ -32,6 +32,8 @@ pub struct RecursiveModelInfo {
     pub circuit_hash: felt252,
     /// Expected weight super root (from registration).
     pub weight_super_root: felt252,
+    /// Expected policy commitment (Poseidon hash of PolicyConfig). 0 = any policy.
+    pub policy_commitment: felt252,
     /// Owner who registered the model.
     pub owner: starknet::ContractAddress,
 }
@@ -47,6 +49,7 @@ pub trait IRecursiveVerifier<TContractState> {
         model_id: felt252,
         circuit_hash: felt252,
         weight_super_root: felt252,
+        policy_commitment: felt252,
     );
 
     /// Verify a recursive STARK proof for a registered model.
@@ -76,6 +79,11 @@ pub trait IRecursiveVerifier<TContractState> {
     fn get_recursive_model_info(
         self: @TContractState, model_id: felt252,
     ) -> RecursiveModelInfo;
+
+    /// Get the registered policy commitment for a model. Returns 0 if no policy bound.
+    fn get_model_policy(
+        self: @TContractState, model_id: felt252,
+    ) -> felt252;
 }
 
 #[starknet::contract]
@@ -122,6 +130,7 @@ pub mod RecursiveVerifierContract {
         pub model_id: felt252,
         pub circuit_hash: felt252,
         pub weight_super_root: felt252,
+        pub policy_commitment: felt252,
         pub owner: ContractAddress,
     }
 
@@ -146,6 +155,7 @@ pub mod RecursiveVerifierContract {
             model_id: felt252,
             circuit_hash: felt252,
             weight_super_root: felt252,
+            policy_commitment: felt252,
         ) {
             // Only owner can register models
             let caller = get_caller_address();
@@ -154,6 +164,7 @@ pub mod RecursiveVerifierContract {
             let info = RecursiveModelInfo {
                 circuit_hash,
                 weight_super_root,
+                policy_commitment,
                 owner: caller,
             };
             self.recursive_models.write(model_id, info);
@@ -162,6 +173,7 @@ pub mod RecursiveVerifierContract {
                 model_id,
                 circuit_hash,
                 weight_super_root,
+                policy_commitment,
                 owner: caller,
             });
         }
@@ -331,6 +343,12 @@ pub mod RecursiveVerifierContract {
             self: @ContractState, model_id: felt252,
         ) -> RecursiveModelInfo {
             self.recursive_models.read(model_id)
+        }
+
+        fn get_model_policy(
+            self: @ContractState, model_id: felt252,
+        ) -> felt252 {
+            self.recursive_models.read(model_id).policy_commitment
         }
     }
 

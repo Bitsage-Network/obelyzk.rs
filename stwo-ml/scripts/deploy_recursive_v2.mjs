@@ -61,7 +61,7 @@ async function main() {
     const t = await account.execute({
       contractAddress: CONTRACT,
       entrypoint: "register_model_recursive",
-      calldata: CallData.compile({ model_id: modelId, circuit_hash: circuitHash, weight_super_root: weightSuperRoot }),
+      calldata: CallData.compile({ model_id: modelId, circuit_hash: circuitHash, weight_super_root: weightSuperRoot, policy_commitment: proof.policy_commitment || "0x0" }),
     });
     await provider.waitForTransaction(t.transaction_hash);
   })();

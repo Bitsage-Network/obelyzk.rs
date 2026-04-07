@@ -71,6 +71,7 @@ async function main() {
         model_id: modelId,
         circuit_hash: circuitHash,
         weight_super_root: weightSuperRoot,
+        policy_commitment: proof.policy_commitment || "0x0",
       }),
     });
     await provider.waitForTransaction(t.transaction_hash);

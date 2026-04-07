@@ -10,6 +10,7 @@ const MODEL_ID: felt252 = 0xABC;
 const CIRCUIT_HASH: felt252 = 0x123456;
 const WEIGHT_ROOT: felt252 = 0x789ABC;
 const IO_COMMITMENT: felt252 = 0xDEF123;
+const POLICY_COMMITMENT: felt252 = 0x0370c9;
 
 fn deploy_verifier() -> IRecursiveVerifierDispatcher {
     let contract = declare("RecursiveVerifierContract").unwrap().contract_class();
@@ -55,7 +56,7 @@ fn test_register_recursive_model() {
     let verifier = deploy_verifier();
     as_owner(@verifier);
 
-    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
 
     let info = verifier.get_recursive_model_info(MODEL_ID);
     assert!(info.circuit_hash == CIRCUIT_HASH, "circuit_hash mismatch");
@@ -72,7 +73,7 @@ fn test_register_recursive_model_non_owner_rejected() {
     let attacker: ContractAddress = ATTACKER_ADDR.try_into().unwrap();
     start_cheat_caller_address(verifier.contract_address, attacker);
 
-    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
 }
 
 #[test]
@@ -105,8 +106,8 @@ fn test_register_multiple_models() {
     let verifier = deploy_verifier();
     as_owner(@verifier);
 
-    verifier.register_model_recursive(0x1, 0xAA, 0xBB);
-    verifier.register_model_recursive(0x2, 0xCC, 0xDD);
+    verifier.register_model_recursive(0x1, 0xAA, 0xBB, POLICY_COMMITMENT);
+    verifier.register_model_recursive(0x2, 0xCC, 0xDD, POLICY_COMMITMENT);
 
     let info1 = verifier.get_recursive_model_info(0x1);
     let info2 = verifier.get_recursive_model_info(0x2);
@@ -122,8 +123,8 @@ fn test_re_register_model_overwrites() {
     let verifier = deploy_verifier();
     as_owner(@verifier);
 
-    verifier.register_model_recursive(MODEL_ID, 0x111, 0x222);
-    verifier.register_model_recursive(MODEL_ID, 0x333, 0x444);
+    verifier.register_model_recursive(MODEL_ID, 0x111, 0x222, 0);
+    verifier.register_model_recursive(MODEL_ID, 0x333, 0x444, 0);
 
     let info = verifier.get_recursive_model_info(MODEL_ID);
     assert!(info.circuit_hash == 0x333, "re-register should overwrite circuit_hash");
@@ -135,7 +136,7 @@ fn test_register_model_owner_stored_correctly() {
     let verifier = deploy_verifier();
     as_owner(@verifier);
 
-    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
 
     let info = verifier.get_recursive_model_info(MODEL_ID);
     let owner: ContractAddress = OWNER_ADDR.try_into().unwrap();
@@ -150,7 +151,7 @@ fn test_register_with_zero_circuit_hash() {
     // Zero circuit_hash is allowed at registration time
     // but verify_recursive will reject it with "Model not registered"
     // because the check is `model.circuit_hash != 0`
-    verifier.register_model_recursive(MODEL_ID, 0, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, 0, WEIGHT_ROOT, 0);
 
     let info = verifier.get_recursive_model_info(MODEL_ID);
     assert!(info.circuit_hash == 0, "zero circuit_hash should be stored");
@@ -177,7 +178,7 @@ fn test_verify_proof_too_short() {
     let verifier = deploy_verifier();
     as_owner(@verifier);
 
-    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
 
     // Submit proof with only 10 felts (need >= 20)
     let short_proof: Array<felt252> = array![0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -191,7 +192,7 @@ fn test_verify_circuit_hash_mismatch() {
     as_owner(@verifier);
 
     // Register model with CIRCUIT_HASH
-    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
 
     // Build proof with DIFFERENT circuit_hash (0xBADBAD instead of 0x123456)
     let tampered_proof = build_fake_proof(0xBADBAD, IO_COMMITMENT, WEIGHT_ROOT);
@@ -205,7 +206,7 @@ fn test_verify_weight_binding_mismatch() {
     as_owner(@verifier);
 
     // Register model with WEIGHT_ROOT
-    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
 
     // Build proof with correct circuit_hash but WRONG weight_root
     let tampered_proof = build_fake_proof(CIRCUIT_HASH, IO_COMMITMENT, 0xBADBAD);
@@ -221,7 +222,7 @@ fn test_verify_weight_binding_mismatch() {
 fn test_verify_empty_proof_rejected() {
     let verifier = deploy_verifier();
     as_owner(@verifier);
-    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
 
     let empty_proof: Array<felt252> = array![];
     verifier.verify_recursive(MODEL_ID, IO_COMMITMENT, empty_proof);
@@ -232,7 +233,7 @@ fn test_verify_empty_proof_rejected() {
 fn test_verify_proof_boundary_19_felts_rejected() {
     let verifier = deploy_verifier();
     as_owner(@verifier);
-    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
 
     // Exactly 19 felts — one short of the 20 minimum
     let mut short: Array<felt252> = array![];
@@ -253,7 +254,7 @@ fn test_verify_model_with_zero_circuit_hash_rejected() {
     // Register model with circuit_hash=0, then try to verify
     // The verify_recursive check is `model.circuit_hash != 0`
     // so this should be rejected even though the model was "registered"
-    verifier.register_model_recursive(MODEL_ID, 0, WEIGHT_ROOT);
+    verifier.register_model_recursive(MODEL_ID, 0, WEIGHT_ROOT, 0);
 
     let fake_proof = build_fake_proof(0, IO_COMMITMENT, WEIGHT_ROOT);
     verifier.verify_recursive(MODEL_ID, IO_COMMITMENT, fake_proof);
@@ -266,12 +267,61 @@ fn test_verify_swapped_models_rejected() {
     as_owner(@verifier);
 
     // Register two models with different circuit hashes
-    verifier.register_model_recursive(0x1, 0xAAA, WEIGHT_ROOT);
-    verifier.register_model_recursive(0x2, 0xBBB, WEIGHT_ROOT);
+    verifier.register_model_recursive(0x1, 0xAAA, WEIGHT_ROOT, POLICY_COMMITMENT);
+    verifier.register_model_recursive(0x2, 0xBBB, WEIGHT_ROOT, POLICY_COMMITMENT);
 
     // Try to verify model 0x1 with model 0x2's circuit hash
     let wrong_proof = build_fake_proof(0xBBB, IO_COMMITMENT, WEIGHT_ROOT);
     verifier.verify_recursive(0x1, IO_COMMITMENT, wrong_proof);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GROUP B2: Policy Commitment Tests
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_register_model_with_policy() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, POLICY_COMMITMENT);
+
+    let info = verifier.get_recursive_model_info(MODEL_ID);
+    assert!(info.policy_commitment == POLICY_COMMITMENT, "policy_commitment mismatch");
+
+    let policy = verifier.get_model_policy(MODEL_ID);
+    assert!(policy == POLICY_COMMITMENT, "get_model_policy should return policy");
+}
+
+#[test]
+fn test_register_model_without_policy() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    // Zero policy = any policy accepted (backward compatible)
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, 0);
+
+    let policy = verifier.get_model_policy(MODEL_ID);
+    assert!(policy == 0, "zero policy should be stored");
+}
+
+#[test]
+fn test_unregistered_model_policy_is_zero() {
+    let verifier = deploy_verifier();
+    let policy = verifier.get_model_policy(0xDEAD);
+    assert!(policy == 0, "unregistered model policy should be 0");
+}
+
+#[test]
+fn test_re_register_model_updates_policy() {
+    let verifier = deploy_verifier();
+    as_owner(@verifier);
+
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, 0x111);
+    verifier.register_model_recursive(MODEL_ID, CIRCUIT_HASH, WEIGHT_ROOT, 0x222);
+
+    let policy = verifier.get_model_policy(MODEL_ID);
+    assert!(policy == 0x222, "re-register should update policy");
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -292,6 +342,7 @@ fn test_verify_recursive_proof_valid() {
         test_recursive_data::smollm2_model_id(),
         test_recursive_data::smollm2_circuit_hash(),
         test_recursive_data::smollm2_weight_root(),
+        0, // policy_commitment: 0 = any policy (until test data module provides real value)
     );
 
     let result = verifier.verify_recursive(
@@ -318,6 +369,7 @@ fn test_verify_proof_replay_rejected() {
         test_recursive_data::smollm2_model_id(),
         test_recursive_data::smollm2_circuit_hash(),
         test_recursive_data::smollm2_weight_root(),
+        0, // policy_commitment: 0 = any policy (until test data module provides real value)
     );
 
     verifier.verify_recursive(
@@ -345,6 +397,7 @@ fn test_verify_bit_flip_rejected() {
         test_recursive_data::smollm2_model_id(),
         test_recursive_data::smollm2_circuit_hash(),
         test_recursive_data::smollm2_weight_root(),
+        0, // policy_commitment: 0 = any policy (until test data module provides real value)
     );
 
     let real = test_recursive_data::smollm2_calldata();
