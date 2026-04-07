@@ -10228,18 +10228,22 @@ pub(crate) fn reduce_attention_layer_decode(
     });
     sub_claim_values.push(output_claim.value);
 
-    // Split intermediates per head — K/V are full_seq_len rows, Q is new_tokens rows
-    let k_heads = split_heads(&intermediates.k, num_heads);
-    let v_heads = split_heads(&intermediates.v, num_heads);
+    // Split intermediates per head — K/V use num_kv_heads (GQA), Q uses num_heads
+    let num_kv_heads = config.num_kv_heads;
+    let group_size = config.group_size();
+    let k_heads = split_heads(&intermediates.k, num_kv_heads);
+    let v_heads = split_heads(&intermediates.v, num_kv_heads);
     let q_heads = split_heads(&intermediates.q, num_heads);
 
     // --- Per-head sub-proofs (h = H-1..0) ---
     for h in (0..num_heads).rev() {
+        let kv_idx = h / group_size; // GQA: multiple Q heads share one KV head
+
         // Context: softmax × V_full → (new_tokens, d_k)
         // dims: new_tokens × full_seq_len × d_k
         let (ctx_proof, _ctx_input, ctx_value) = prove_sub_matmul(
             &intermediates.softmax_outputs[h],
-            &v_heads[h],
+            &v_heads[kv_idx],
             new_tokens,
             full_seq_len,
             d_k,
@@ -10250,7 +10254,7 @@ pub(crate) fn reduce_attention_layer_decode(
 
         // Score: Q_h × K_full^T → (new_tokens, full_seq_len)
         // dims: new_tokens × d_k × full_seq_len
-        let k_h_t = transpose_m31(&k_heads[h]);
+        let k_h_t = transpose_m31(&k_heads[kv_idx]);
         let (score_proof, _score_input, score_value) =
             prove_sub_matmul(&q_heads[h], &k_h_t, new_tokens, d_k, full_seq_len, channel)?;
         sub_proofs.push(score_proof);
@@ -10258,25 +10262,27 @@ pub(crate) fn reduce_attention_layer_decode(
     }
 
     // --- Projection matmuls: V, K, Q = input × W ---
-    // V projection (new_tokens × d_model × d_model)
+    let kv_dim = num_kv_heads * d_k; // GQA: K/V output dimension < d_model
+
+    // V projection (new_tokens × d_model × kv_dim)
     let (v_proof, _v_input, v_value) = prove_sub_matmul(
         input_matrix,
         &attn_weights.w_v,
         new_tokens,
         d_model,
-        d_model,
+        kv_dim,
         channel,
     )?;
     sub_proofs.push(v_proof);
     sub_claim_values.push(v_value);
 
-    // K projection
+    // K projection (new_tokens × d_model × kv_dim)
     let (k_proof, _k_input, k_value) = prove_sub_matmul(
         input_matrix,
         &attn_weights.w_k,
         new_tokens,
         d_model,
-        d_model,
+        kv_dim,
         channel,
     )?;
     sub_proofs.push(k_proof);
