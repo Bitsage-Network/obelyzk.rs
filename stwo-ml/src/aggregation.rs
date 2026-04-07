@@ -251,6 +251,24 @@ pub fn compute_io_commitment(input: &M31Matrix, output: &M31Matrix) -> FieldElem
     starknet_crypto::poseidon_hash_many(&hash_inputs)
 }
 
+/// Compute batch IO commitment: Poseidon hash of N individual IO commitments.
+///
+/// Each input/output pair gets its own IO commitment, then all are hashed
+/// together with the batch size. This allows per-input verification while
+/// binding the entire batch.
+pub fn compute_batch_io_commitment(
+    inputs: &[M31Matrix],
+    outputs: &[M31Matrix],
+) -> FieldElement {
+    assert_eq!(inputs.len(), outputs.len(), "batch size mismatch");
+    let mut hash_inputs = Vec::with_capacity(1 + inputs.len());
+    hash_inputs.push(FieldElement::from(inputs.len() as u64));
+    for (input, output) in inputs.iter().zip(outputs.iter()) {
+        hash_inputs.push(compute_io_commitment(input, output));
+    }
+    starknet_crypto::poseidon_hash_many(&hash_inputs)
+}
+
 /// Compute IO commitment from packed IO data.
 ///
 /// Matches the on-chain `verify_model_gkr_v4_packed_io` commitment:

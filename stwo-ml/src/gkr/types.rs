@@ -612,6 +612,7 @@ pub struct GKRProof {
     pub weight_opening_transcript_mode: WeightOpeningTranscriptMode,
 
     /// IO commitment binding model input and output.
+    /// For batch proofs, this is the batch IO commitment (Poseidon of N individual commitments).
     pub io_commitment: starknet_ff::FieldElement,
 
     /// Deferred proofs for rhs branches of DAG Add layers (residual connections).
