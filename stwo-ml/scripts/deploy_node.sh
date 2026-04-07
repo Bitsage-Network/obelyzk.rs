@@ -218,8 +218,8 @@ sleep 2
 cd "$ROOT_DIR"
 
 # Set all on-chain compatible env vars
-# STWO_SKIP_RMS_SQ_PROOF removed — safe to generate RMS² proofs (verified Apr 7 2026)
-export STWO_ALLOW_MISSING_NORM_PROOF=1
+# STWO_SKIP_RMS_SQ_PROOF removed — safe (verified Apr 7 2026)
+# STWO_ALLOW_MISSING_NORM_PROOF removed — safe (verified Apr 7 2026, needs policy fix)
 export STWO_PIECEWISE_ACTIVATION=0
 export STWO_ALLOW_LOGUP_ACTIVATION=1
 export STWO_AGGREGATED_FULL_BINDING=1
