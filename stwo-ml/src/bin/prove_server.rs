@@ -3449,10 +3449,44 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
+    // Auto-load model from OBELYSK_MODEL_DIR if set
+    let mut initial_models = HashMap::new();
+    if let Ok(model_dir) = std::env::var("OBELYSK_MODEL_DIR") {
+        let path = std::path::PathBuf::from(&model_dir);
+        if path.exists() && path.join("config.json").exists() {
+            eprintln!("  Auto-loading model from {model_dir}...");
+            match load_hf_model(&path, None) {
+                Ok(hf) => {
+                    let model_name = path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "default".to_string());
+                    let registration = prepare_model_registration(&hf.graph, &hf.weights, &model_name);
+                    let model_id = format!("0x{:x}", registration.model_id);
+                    let wc = format!("0x{:x}", registration.weight_commitment);
+                    eprintln!("  Auto-loaded: {} ({} layers, id={})", model_name, registration.num_layers, &model_id[..18]);
+                    initial_models.insert(model_name.clone(), LoadedModel {
+                        model_id,
+                        name: model_name,
+                        weight_commitment: wc,
+                        num_layers: registration.num_layers,
+                        input_shape: hf.input_shape,
+                        graph: Arc::new(hf.graph),
+                        weights: Arc::new(hf.weights),
+                        #[cfg(feature = "server-audit")]
+                        capture_hook: None,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("  WARNING: Failed to auto-load model from {model_dir}: {e}");
+                }
+            }
+        }
+    }
+
     let state = Arc::new(AppState {
         jobs: RwLock::new(HashMap::new()),
         privacy_jobs: RwLock::new(HashMap::new()),
-        models: RwLock::new(HashMap::new()),
+        models: RwLock::new(initial_models),
         proofs: RwLock::new(HashMap::new()),
         started_at: Instant::now(),
         api_key: api_key.clone(),
