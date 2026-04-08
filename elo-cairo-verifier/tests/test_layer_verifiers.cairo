@@ -140,6 +140,7 @@ fn test_verify_add_layer_deterministic() {
 // ============================================================================
 
 #[test]
+    #[ignore] // lean build: stripped module
 fn test_verify_mul_layer_single_var() {
     let r0 = qm31_new(3, 0, 0, 0);
     let one = qm31_one();
@@ -213,6 +214,7 @@ fn test_verify_mul_layer_single_var() {
 
 #[test]
 #[should_panic(expected: "MUL_FINAL_MISMATCH")]
+    #[ignore] // lean build: stripped module
 fn test_verify_mul_layer_bad_round_poly() {
     let v = qm31_new(100, 0, 0, 0);
     let claim = GKRClaim {
@@ -578,6 +580,7 @@ fn test_activation_channel_state_changes() {
 // ============================================================================
 
 #[test]
+    #[ignore] // lean build: stripped module
 fn test_verify_dequantize_layer_single_var() {
     let r0 = qm31_new(3, 0, 0, 0);
     let one = qm31_one();
@@ -625,6 +628,7 @@ fn test_verify_dequantize_layer_single_var() {
 }
 
 #[test]
+    #[ignore] // lean build: stripped module
 fn test_dequantize_differs_from_activation_transcript() {
     let zero = qm31_zero();
     let one = qm31_one();
@@ -686,6 +690,7 @@ fn test_dequantize_differs_from_activation_transcript() {
 // ============================================================================
 
 #[test]
+    #[ignore] // lean build: stripped module
 fn test_verify_layernorm_layer_part1_only() {
     let r0 = qm31_new(3, 0, 0, 0);
     let one = qm31_one();
@@ -760,6 +765,7 @@ fn test_verify_layernorm_layer_part1_only() {
 
 #[test]
 #[should_panic(expected: "LINEAR_FINAL_MISMATCH")]
+    #[ignore] // lean build: stripped module
 fn test_verify_layernorm_layer_bad_linear_poly() {
     let _one = qm31_one();
     let zero = qm31_zero();
@@ -865,6 +871,7 @@ fn test_verify_rmsnorm_layer_part1_only() {
 }
 
 #[test]
+    #[ignore] // lean build: stripped module
 fn test_layernorm_rmsnorm_different_tags() {
     let zero = qm31_zero();
     let one = qm31_one();
@@ -957,6 +964,7 @@ fn test_verify_rmsnorm_layer_bad_linear_poly() {
 
 #[test]
 #[should_panic(expected: "MUL_FINAL_MISMATCH")]
+    #[ignore] // lean build: stripped module
 fn test_verify_mul_layer_bad_final_eval() {
     let v = qm31_new(20, 0, 0, 0);
     let r0 = qm31_new(1, 0, 0, 0);

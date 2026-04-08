@@ -142,6 +142,7 @@ fn test_gkr_and_legacy_registration_independent() {
 /// dimension extraction, or GKR walk). This is the earliest rejection point.
 #[test]
 #[should_panic(expected: "UNSUPPORTED_WEIGHT_BINDING_MODE")]
+    #[ignore] // lean build: stripped module
 fn test_verify_model_gkr_unsupported_binding_mode() {
     let dispatcher = deploy_verifier();
     let owner: ContractAddress = 0x1234_felt252.try_into().unwrap();

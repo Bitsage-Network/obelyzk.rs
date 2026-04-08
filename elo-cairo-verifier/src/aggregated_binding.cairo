@@ -970,9 +970,10 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected: "BINDING_SUPER_ROOT_FAILED")]
     fn test_verify_aggregated_binding_rejects_tampered_super_root() {
         // Construct a proof with mismatched super_root.
-        // verify_aggregated_binding should return false at step 1 (verify_super_root).
+        // verify_aggregated_binding panics at step 1 (verify_super_root).
         let a: felt252 = 0x1111;
         let b: felt252 = 0x2222;
         let _correct_root = poseidon_hash_2(a, b);
@@ -1012,13 +1013,14 @@ mod tests {
         let commitments: Array<felt252> = array![a];
 
         let mut ch = channel_default();
-        let result = verify_aggregated_binding(
+        // This will panic with "BINDING_SUPER_ROOT_FAILED"
+        verify_aggregated_binding(
             @proof, claims.span(), commitments.span(), ref ch,
         );
-        assert!(!result, "tampered super_root should fail verification");
     }
 
     #[test]
+    #[should_panic(expected: "BINDING_SUBTREE_COMMITMENTS_FAILED")]
     fn test_verify_aggregated_binding_rejects_tampered_subtree_root() {
         // Proof has a correct super_root but subtree_roots don't match weight commitments.
         // Should fail at step 1b (verify_subtree_commitments).
@@ -1063,13 +1065,14 @@ mod tests {
         let commitments: Array<felt252> = array![real_commitment]; // doesn't match fake_subtree
 
         let mut ch = channel_default();
-        let result = verify_aggregated_binding(
+        // This will panic with "BINDING_SUBTREE_COMMITMENTS_FAILED"
+        verify_aggregated_binding(
             @proof, claims.span(), commitments.span(), ref ch,
         );
-        assert!(!result, "tampered subtree root should fail at commitment check");
     }
 
     #[test]
+    #[should_panic]
     fn test_verify_aggregated_binding_rejects_wrong_round_count() {
         // Proof has correct super-root and subtree bindings, but wrong number of sumcheck rounds.
         // Should fail at step 4 (round_polys.len != n_global).
@@ -1111,9 +1114,9 @@ mod tests {
         let commitments: Array<felt252> = array![commitment];
 
         let mut ch = channel_default();
-        let result = verify_aggregated_binding(
+        // This will panic due to round count mismatch
+        verify_aggregated_binding(
             @proof, claims.span(), commitments.span(), ref ch,
         );
-        assert!(!result, "wrong round count should fail");
     }
 }

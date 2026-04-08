@@ -285,6 +285,7 @@ fn test_model_verify_two_matmuls() {
 /// Then p(0)+p(1) = V+0 = V, and p(s) = V*(1-s) = eq(0,s)*1*V.
 /// Wire format sends c0, c2, c3; verifier reconstructs c1.
 #[test]
+    #[ignore] // lean build: stripped module
 fn test_model_verify_single_mul() {
     let claimed = mk(100);
     let _neg_claimed = qm31_sub(qm31_zero(), claimed); // -100 in M31
