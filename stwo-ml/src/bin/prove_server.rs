@@ -625,7 +625,7 @@ async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     req: axum::extract::Request,
     next: middleware::Next,
-) -> Result<axum::response::Response, StatusCode> {
+) -> axum::response::Response {
     if let Some(ref expected) = state.api_key {
         let auth_ok = req
             .headers()
@@ -635,10 +635,13 @@ async fn auth_middleware(
             .map(|token| constant_time_eq(token, expected))
             .unwrap_or(false);
         if !auth_ok {
-            return Err(StatusCode::UNAUTHORIZED);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse { error: "Unauthorized: invalid or missing API key. Set Authorization: Bearer <key>".into() }),
+            ).into_response();
         }
     }
-    Ok(next.run(req).await)
+    next.run(req).await
 }
 
 /// Rate limiting middleware for expensive endpoints.
