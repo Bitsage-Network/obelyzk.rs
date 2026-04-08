@@ -2302,12 +2302,16 @@ fn main() {
             // Compute real public inputs for the recursive proof
             let recursive_io = compute_io_commitment(&input, &proof.execution.output);
             let recursive_io_qm31 = stwo_ml::crypto::poseidon_channel::felt_to_securefield(recursive_io);
-            // Weight super root: hash of all weight commitment roots
-            let recursive_weight_root = if !gkr.weight_claims.is_empty() {
+            // Weight super root: Poseidon hash of all weight Merkle roots.
+            // Uses weight_commitments (Poseidon Merkle roots of weight matrices)
+            // instead of weight_claims (Fiat-Shamir-dependent evaluated values).
+            // This makes weight_super_root INPUT-INDEPENDENT — same model weights
+            // always produce the same root regardless of inference input.
+            let recursive_weight_root = if !gkr.weight_commitments.is_empty() {
                 let mut hasher = stwo_ml::crypto::poseidon_channel::PoseidonChannel::new();
-                hasher.mix_u64(gkr.weight_claims.len() as u64);
-                for wc in &gkr.weight_claims {
-                    hasher.mix_felt(stwo_ml::crypto::poseidon_channel::securefield_to_felt(wc.expected_value));
+                hasher.mix_u64(gkr.weight_commitments.len() as u64);
+                for wc_root in &gkr.weight_commitments {
+                    hasher.mix_felt(*wc_root);
                 }
                 hasher.draw_qm31()
             } else {
