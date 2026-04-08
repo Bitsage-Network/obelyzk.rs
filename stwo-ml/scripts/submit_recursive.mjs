@@ -75,15 +75,44 @@ async function main() {
   console.log("Weight Root:   " + weightSuperRoot);
   console.log("Calldata:      " + calldata.length + " felts");
 
-  // Step 1: Register model (skip if already registered)
+  // Step 1: Register model (or re-register if weight binding changed)
   try {
     const r = await provider.callContract({
       contractAddress: CONTRACT,
       entrypoint: "get_recursive_verification_count",
       calldata: [modelId],
     });
-    // If the call succeeds, model is registered (or at least the contract responds)
-    console.log("Register:      skip (already registered, count=" + Number(BigInt(r[0])) + ")");
+    const count = Number(BigInt(r[0]));
+
+    // Check if registered weight_super_root matches the proof's
+    const info = await provider.callContract({
+      contractAddress: CONTRACT,
+      entrypoint: "get_recursive_model_info",
+      calldata: [modelId],
+    });
+    const registeredWeightRoot = info[1]; // weight_super_root field
+
+    // Compare — normalize both to lowercase hex for comparison
+    const proofRoot = weightSuperRoot.toLowerCase();
+    const chainRoot = registeredWeightRoot.toLowerCase();
+
+    if (chainRoot !== "0x0" && chainRoot !== proofRoot && proofRoot !== "0x0") {
+      console.log("Register:      re-registering (weight_super_root changed: " + chainRoot.slice(0, 12) + "... → " + proofRoot.slice(0, 12) + "...)");
+      const regTx = await account.execute({
+        contractAddress: CONTRACT,
+        entrypoint: "register_model_recursive",
+        calldata: CallData.compile({
+          model_id: modelId,
+          circuit_hash: circuitHash,
+          weight_super_root: weightSuperRoot,
+          policy_commitment: raw.policy_commitment || recursive.policy_commitment || "0x0",
+        }),
+      });
+      await provider.waitForTransaction(regTx.transaction_hash);
+      console.log("               done (tx=" + regTx.transaction_hash.slice(0, 18) + "...)");
+    } else {
+      console.log("Register:      skip (already registered, count=" + count + ")");
+    }
   } catch {
     // Model not registered — register it
     process.stdout.write("Register:      ");
