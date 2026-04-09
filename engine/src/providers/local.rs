@@ -186,6 +186,75 @@ impl LocalProvider {
         Ok((predicted_text, result, trace))
     }
 
+    /// Generate multiple tokens autoregressively.
+    ///
+    /// Runs the fast forward pass in a loop: embed → forward → project_to_logits → next token.
+    /// Calls `on_token` for each generated token (for streaming display).
+    /// Stops at `max_tokens` or when an EOS token is generated.
+    /// Returns the full generated text and all token IDs.
+    pub fn generate(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        mut on_token: impl FnMut(&str, u32, usize),
+    ) -> Result<(String, Vec<u32>), LocalProviderError> {
+        // Tokenize the prompt
+        let encoding = self.tokenizer.encode(prompt, false)
+            .map_err(|e| LocalProviderError::TokenizeFailed(format!("{e}")))?;
+        let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
+        if prompt_ids.is_empty() {
+            return Err(LocalProviderError::EmptyPrompt);
+        }
+
+        // EOS tokens (common across models)
+        let eos_ids: Vec<u32> = vec![
+            0, 1, 2,       // common EOS/BOS/PAD
+            self.tokenizer.token_to_id("<|endoftext|>").unwrap_or(u32::MAX),
+            self.tokenizer.token_to_id("</s>").unwrap_or(u32::MAX),
+            self.tokenizer.token_to_id("<|im_end|>").unwrap_or(u32::MAX),
+        ];
+
+        let mut generated_ids: Vec<u32> = Vec::new();
+        let mut generated_text = String::new();
+        let mut current_token = *prompt_ids.last().unwrap();
+
+        for step in 0..max_tokens {
+            // Embed the current token
+            let (input_matrix, _) = crate::compiler::hf_loader::load_embedding_row(
+                &self.model_dir, self.hidden_size, current_token,
+            ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
+
+            // Fast forward pass (no proving)
+            let output = crate::aggregation::execute_forward_pass_fast(
+                &self.graph, &input_matrix, &self.weights,
+            ).map_err(|e| LocalProviderError::ProveFailed(format!("{e}")))?;
+
+            // Project to logits → argmax → next token
+            let (next_id, _score) = crate::compiler::hf_loader::project_to_logits(
+                &self.model_dir, &output,
+            ).map_err(|e| LocalProviderError::ProveFailed(format!("{e}")))?;
+
+            // Check EOS
+            if eos_ids.contains(&next_id) {
+                break;
+            }
+
+            // Decode token to text
+            let token_text = self.tokenizer.decode(&[next_id], true)
+                .unwrap_or_default();
+
+            generated_ids.push(next_id);
+            generated_text.push_str(&token_text);
+
+            // Stream callback
+            on_token(&token_text, next_id, step);
+
+            current_token = next_id;
+        }
+
+        Ok((generated_text, generated_ids))
+    }
+
     /// Fast inference — forward pass ONLY, no proving.
     ///
     /// Returns the predicted text in ~2-8s instead of ~90s.

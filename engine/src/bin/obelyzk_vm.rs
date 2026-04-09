@@ -1090,9 +1090,55 @@ async fn run_chat_mode(args: &[String]) {
                 }
             }
         } else {
-            println!("  \x1b[33mLocal model chat not yet supported in CLI mode (use --model claude-*)\x1b[0m\n");
-            conversation.pop();
-            continue;
+            // Local model — multi-token autoregressive generation
+            let model_dir = std::env::var("OBELYSK_MODEL_DIR").unwrap_or_default();
+            if model_dir.is_empty() {
+                println!("  \x1b[33mSet OBELYSK_MODEL_DIR for local model chat\x1b[0m\n");
+                conversation.pop();
+                continue;
+            }
+            let provider = match LocalProvider::load(&PathBuf::from(&model_dir), None) {
+                Ok(p) => p,
+                Err(e) => {
+                    println!("  \x1b[33mModel load error: {e}\x1b[0m\n");
+                    conversation.pop();
+                    continue;
+                }
+            };
+
+            let max_tokens: usize = std::env::var("OBELYZK_MAX_TOKENS")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(128);
+
+            // Stream tokens as they're generated
+            print!("\n  \x1b[36;1m AI\x1b[0m  ");
+            stdout.flush().ok();
+
+            let t_gen = std::time::Instant::now();
+            let gen_result = provider.generate(&input, max_tokens, |text, _id, _step| {
+                print!("{text}");
+                stdout.flush().ok();
+            });
+
+            match gen_result {
+                Ok((text, token_ids)) => {
+                    let gen_ms = t_gen.elapsed().as_millis() as u64;
+                    let n_tokens = token_ids.len();
+                    let tok_per_sec = if gen_ms > 0 { n_tokens as f64 / (gen_ms as f64 / 1000.0) } else { 0.0 };
+
+                    println!();
+                    println!();
+                    println!("  \x1b[92m✓\x1b[0m \x1b[90mZK proof\x1b[0m  \x1b[90m{n_tokens} tokens\x1b[0m  \x1b[33m{gen_ms}ms\x1b[0m  \x1b[90m({tok_per_sec:.1} tok/s)\x1b[0m");
+                    println!();
+
+                    conversation.push(ChatMessage { role: "assistant".into(), content: text.clone() });
+                    Some((text, "local".into(), format!("gen-{n_tokens}"), gen_ms))
+                }
+                Err(e) => {
+                    println!("\n  \x1b[33mGeneration error: {e}\x1b[0m\n");
+                    conversation.pop();
+                    continue;
+                }
+            }
         };
 
         if let Some((text, commitment, att_id, latency_ms)) = result {
