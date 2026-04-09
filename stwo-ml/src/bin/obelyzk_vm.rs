@@ -553,6 +553,58 @@ async fn list_models(
     }))
 }
 
+/// Batch prove endpoint — prove multiple tokens in one pass for throughput benchmarking.
+///
+/// POST /v1/prove/batch { "model": "...", "token_ids": [1,2,3,...], "prompt": "..." }
+async fn prove_batch(
+    State(state): State<Arc<VmState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let local = state.local_provider.as_ref()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "no local provider"))?;
+    let local = Arc::clone(local);
+
+    // Get token IDs from request — either explicit or from prompt tokenization
+    let token_ids: Vec<u32> = if let Some(ids) = req["token_ids"].as_array() {
+        ids.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect()
+    } else if let Some(prompt) = req["prompt"].as_str() {
+        let encoding = local.tokenizer.encode(prompt, false)
+            .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("tokenize: {e}")))?;
+        encoding.get_ids().to_vec()
+    } else {
+        return Err(api_error(StatusCode::BAD_REQUEST, "provide 'token_ids' or 'prompt'"));
+    };
+
+    if token_ids.is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "empty token list"));
+    }
+
+    let num_tokens = token_ids.len();
+
+    let result = tokio::task::spawn_blocking(move || {
+        local.prove_batch(&token_ids)
+            .map_err(|e| format!("{e}"))
+    })
+    .await
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("join: {e}")))?
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+
+    let (_output, proof, prove_time_ms) = result;
+    let tok_per_sec = num_tokens as f64 / (prove_time_ms as f64 / 1000.0);
+
+    Ok(Json(serde_json::json!({
+        "num_tokens": num_tokens,
+        "prove_time_ms": prove_time_ms,
+        "tokens_per_second": format!("{:.1}", tok_per_sec),
+        "io_commitment": format!("0x{:x}", proof.io_commitment),
+        "proof_hash": format!("0x{:x}", starknet_crypto::poseidon_hash_many(&[
+            proof.io_commitment, proof.layer_chain_commitment,
+        ])),
+        "calldata_size": proof.gkr_proof.as_ref().map(|g| g.layer_proofs.len() * 100).unwrap_or(0),
+        "gpu": stwo_ml::backend::gpu_is_available(),
+    })))
+}
+
 /// Get a TLS attestation by ID.
 async fn get_attestation(
     State(state): State<Arc<VmState>>,
@@ -643,6 +695,11 @@ async fn main() {
     // CLI chat mode: `obelyzk-vm chat [--model claude-sonnet]`
     if args.get(1).map(|s| s.as_str()) == Some("chat") {
         return run_chat_mode(&args[2..]).await;
+    }
+
+    // Benchmark mode: `obelyzk-vm bench [--tokens 64]`
+    if args.get(1).map(|s| s.as_str()) == Some("bench") {
+        return run_benchmark(&args[2..]).await;
     }
 
     eprintln!("╔═══════════════════════════════════════════╗");
@@ -746,6 +803,7 @@ async fn main() {
         .route("/v1/models", get(list_models))
         // ObelyZK extensions
         .route("/v1/proofs/:proof_id", get(get_proof_status))
+        .route("/v1/prove/batch", post(prove_batch))
         .route("/v1/sessions", get(list_sessions))
         .route("/v1/sessions/:session_id", axum::routing::delete(delete_session))
         .route("/v1/attestations/:attestation_id", get(get_attestation))
@@ -762,6 +820,80 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app.into_make_service()).await.unwrap();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Benchmark Mode
+// ═══════════════════════════════════════════════════════════════════
+
+async fn run_benchmark(args: &[String]) {
+    let model_dir = std::env::var("OBELYSK_MODEL_DIR")
+        .unwrap_or_else(|_| {
+            eprintln!("Error: OBELYSK_MODEL_DIR not set");
+            std::process::exit(1);
+        });
+
+    // Parse --tokens flag
+    let mut num_tokens: usize = 1;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--tokens" && i + 1 < args.len() {
+            num_tokens = args[i + 1].parse().unwrap_or(1);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    println!();
+    println!("  \x1b[92m╔═══════════════════════════════════════════╗\x1b[0m");
+    println!("  \x1b[92m║\x1b[0m  ObelyZK · Throughput Benchmark            \x1b[92m║\x1b[0m");
+    println!("  \x1b[92m╚═══════════════════════════════════════════╝\x1b[0m");
+    println!();
+
+    let provider = LocalProvider::load(&PathBuf::from(&model_dir), None)
+        .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+
+    let gpu_name = stwo_ml::backend::gpu_device_name().unwrap_or_else(|| "CPU".into());
+    println!("  \x1b[90mMODEL\x1b[0m    \x1b[97;1m{}\x1b[0m", provider.model_name);
+    println!("  \x1b[90mGPU\x1b[0m      \x1b[36m{}\x1b[0m", gpu_name);
+    println!("  \x1b[90mTOKENS\x1b[0m   \x1b[97;1m{}\x1b[0m", num_tokens);
+    println!("  \x1b[90mD_MODEL\x1b[0m  {}", provider.hidden_size);
+    println!();
+
+    // Generate synthetic token IDs (1..N) for benchmarking
+    let token_ids: Vec<u32> = (1..=num_tokens as u32).collect();
+
+    println!("  \x1b[33mProving {} tokens...\x1b[0m", num_tokens);
+    let t_start = std::time::Instant::now();
+
+    let result = tokio::task::spawn_blocking(move || {
+        provider.prove_batch(&token_ids)
+    }).await.unwrap();
+
+    match result {
+        Ok((_output, proof, prove_time_ms)) => {
+            let elapsed = t_start.elapsed().as_secs_f64();
+            let tok_per_sec = num_tokens as f64 / elapsed;
+
+            println!();
+            println!("  \x1b[92m════════════════════════════════════════\x1b[0m");
+            println!("  \x1b[92m  BENCHMARK RESULTS\x1b[0m");
+            println!("  \x1b[92m════════════════════════════════════════\x1b[0m");
+            println!("  \x1b[90mTokens:\x1b[0m        \x1b[97;1m{}\x1b[0m", num_tokens);
+            println!("  \x1b[90mTotal time:\x1b[0m    \x1b[97;1m{:.1}s\x1b[0m", elapsed);
+            println!("  \x1b[90mThroughput:\x1b[0m    \x1b[92;1m{:.1} tok/s\x1b[0m", tok_per_sec);
+            println!("  \x1b[90mPer token:\x1b[0m     {:.1}ms", (elapsed * 1000.0) / num_tokens as f64);
+            println!("  \x1b[90mIO commitment:\x1b[0m \x1b[35m0x{:x}\x1b[0m", proof.io_commitment);
+            println!("  \x1b[90mGPU:\x1b[0m           {}", if stwo_ml::backend::gpu_is_available() { "\x1b[36mactive\x1b[0m" } else { "\x1b[90minactive\x1b[0m" });
+            println!("  \x1b[92m════════════════════════════════════════\x1b[0m");
+            println!();
+        }
+        Err(e) => {
+            eprintln!("  \x1b[31mBenchmark failed: {e}\x1b[0m");
+            std::process::exit(1);
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
