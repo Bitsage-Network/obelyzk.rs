@@ -188,17 +188,23 @@ impl LocalProvider {
 
     /// Generate multiple tokens autoregressively.
     ///
-    /// Runs the fast forward pass in a loop: embed → forward → project_to_logits → next token.
-    /// Calls `on_token` for each generated token (for streaming display).
-    /// Stops at `max_tokens` or when an EOS token is generated.
-    /// Returns the full generated text and all token IDs.
+    /// Phase 1 (prefill): Embeds ALL prompt tokens into a batch matrix,
+    /// runs one forward pass to get the full-context output.
+    /// Phase 2 (decode): Uses the last position's output to predict next tokens
+    /// in a loop, feeding each new token through the forward pass.
+    ///
+    /// Note: Without KV-cache in the fast path, each decode step only sees
+    /// its own embedding (not the full history). The prefill gives the first
+    /// prediction good context, but subsequent tokens degrade. This is a
+    /// known limitation of the fast path — the full proving path with KV-cache
+    /// maintains full context.
     pub fn generate(
         &self,
         prompt: &str,
         max_tokens: usize,
         mut on_token: impl FnMut(&str, u32, usize),
     ) -> Result<(String, Vec<u32>), LocalProviderError> {
-        // Tokenize the prompt
+        // Tokenize the full prompt
         let encoding = self.tokenizer.encode(prompt, false)
             .map_err(|e| LocalProviderError::TokenizeFailed(format!("{e}")))?;
         let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
@@ -206,35 +212,46 @@ impl LocalProvider {
             return Err(LocalProviderError::EmptyPrompt);
         }
 
-        // EOS tokens (common across models)
+        // EOS tokens
         let eos_ids: Vec<u32> = vec![
-            0, 1, 2,       // common EOS/BOS/PAD
+            0, 1, 2,
             self.tokenizer.token_to_id("<|endoftext|>").unwrap_or(u32::MAX),
             self.tokenizer.token_to_id("</s>").unwrap_or(u32::MAX),
             self.tokenizer.token_to_id("<|im_end|>").unwrap_or(u32::MAX),
+            self.tokenizer.token_to_id("<|end|>").unwrap_or(u32::MAX),
         ];
+
+        // Phase 1: Prefill — embed ALL prompt tokens as a batch
+        // This gives the model full context for the first prediction.
+        let input_matrix = crate::compiler::hf_loader::load_embedding_batch(
+            &self.model_dir, self.hidden_size, &prompt_ids,
+        ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
+
+        // Reshape graph for the prompt length
+        let prefill_graph = self.graph.with_seq_len(prompt_ids.len());
+
+        // Run prefill forward pass (full context)
+        let output = crate::aggregation::execute_forward_pass_fast(
+            &prefill_graph, &input_matrix, &self.weights,
+        ).map_err(|e| LocalProviderError::ProveFailed(format!("prefill: {e}")))?;
+
+        // Get first prediction from the last position's output row
+        let last_row_start = (output.rows - 1) * output.cols;
+        let last_row = M31Matrix {
+            rows: 1,
+            cols: output.cols,
+            data: output.data[last_row_start..last_row_start + output.cols].to_vec(),
+        };
+
+        let (mut next_id, _) = crate::compiler::hf_loader::project_to_logits(
+            &self.model_dir, &last_row,
+        ).map_err(|e| LocalProviderError::ProveFailed(format!("logits: {e}")))?;
 
         let mut generated_ids: Vec<u32> = Vec::new();
         let mut generated_text = String::new();
-        let mut current_token = *prompt_ids.last().unwrap();
 
+        // Phase 2: Decode — generate tokens one at a time
         for step in 0..max_tokens {
-            // Embed the current token
-            let (input_matrix, _) = crate::compiler::hf_loader::load_embedding_row(
-                &self.model_dir, self.hidden_size, current_token,
-            ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
-
-            // Fast forward pass (no proving)
-            let output = crate::aggregation::execute_forward_pass_fast(
-                &self.graph, &input_matrix, &self.weights,
-            ).map_err(|e| LocalProviderError::ProveFailed(format!("{e}")))?;
-
-            // Project to logits → argmax → next token
-            let (next_id, _score) = crate::compiler::hf_loader::project_to_logits(
-                &self.model_dir, &output,
-            ).map_err(|e| LocalProviderError::ProveFailed(format!("{e}")))?;
-
-            // Check EOS
             if eos_ids.contains(&next_id) {
                 break;
             }
@@ -245,11 +262,22 @@ impl LocalProvider {
 
             generated_ids.push(next_id);
             generated_text.push_str(&token_text);
-
-            // Stream callback
             on_token(&token_text, next_id, step);
 
-            current_token = next_id;
+            // Embed the predicted token and forward pass for next prediction
+            let (token_input, _) = crate::compiler::hf_loader::load_embedding_row(
+                &self.model_dir, self.hidden_size, next_id,
+            ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
+
+            let decode_output = crate::aggregation::execute_forward_pass_fast(
+                &self.graph, &token_input, &self.weights,
+            ).map_err(|e| LocalProviderError::ProveFailed(format!("decode step {step}: {e}")))?;
+
+            let (predicted, _) = crate::compiler::hf_loader::project_to_logits(
+                &self.model_dir, &decode_output,
+            ).map_err(|e| LocalProviderError::ProveFailed(format!("logits step {step}: {e}")))?;
+
+            next_id = predicted;
         }
 
         Ok((generated_text, generated_ids))
