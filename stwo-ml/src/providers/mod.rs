@@ -10,9 +10,12 @@
 //! All providers produce an `InferenceAttestation` regardless of backend.
 
 pub mod types;
+pub mod tls_attestation;
 #[cfg(feature = "model-loading")]
 pub mod local;
 #[cfg(feature = "server")]
 pub mod openai_compat;
+#[cfg(feature = "server")]
+pub mod anthropic;
 
 pub use types::*;

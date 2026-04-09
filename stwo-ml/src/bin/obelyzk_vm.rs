@@ -32,6 +32,8 @@ use futures_util::stream;
 
 use stwo_ml::providers::local::LocalProvider;
 use stwo_ml::providers::openai_compat::OpenAiCompatProvider;
+use stwo_ml::providers::anthropic::{AnthropicProvider, OpenAiProvider};
+use stwo_ml::providers::tls_attestation::TlsAttestation;
 use stwo_ml::providers::types::*;
 use stwo_ml::vm::queue::{ProvingQueue, ProvingStatus};
 
@@ -52,8 +54,14 @@ struct ChatSession {
 struct VmState {
     local_provider: Option<Arc<LocalProvider>>,
     upstream_provider: Option<Arc<OpenAiCompatProvider>>,
+    /// Anthropic Claude provider (TLS-attested).
+    anthropic_provider: Option<Arc<AnthropicProvider>>,
+    /// OpenAI provider (TLS-attested).
+    openai_provider: Option<Arc<OpenAiProvider>>,
     proving_queue: Arc<ProvingQueue>,
     attestations: RwLock<HashMap<String, InferenceAttestation>>,
+    /// TLS attestation records.
+    tls_attestations: RwLock<HashMap<String, TlsAttestation>>,
     /// Multi-turn conversation sessions with KV-cache.
     sessions: RwLock<HashMap<String, ChatSession>>,
     started_at: Instant,
@@ -221,34 +229,86 @@ async fn chat_completions(
     let session_id = req.session_id.clone().unwrap_or_else(|| format!("ses-{}", uuid::Uuid::new_v4()));
     let now_secs = epoch_secs();
 
-    // Route: local provider (ZK proof) or upstream (commitment only)
-    let (text, trust_str, io_hex, num_tokens) = if let Some(ref local) = state.local_provider {
-        let local = Arc::clone(local);
-        let result = tokio::task::spawn_blocking(move || {
-            local.infer_text(&prompt, None)
-                .map(|(text, res, _)| (text, res))
-                .map_err(|e| format!("{e}"))
-        })
-        .await
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("join: {e}")))?
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
-        let (text, res) = result;
-        let trust = trust_model_str(&res.trust_model);
-        let io = res.io_commitment.map(|c| format!("0x{:x}", c));
-        (text, trust, io, res.num_tokens)
-    } else if let Some(ref upstream) = state.upstream_provider {
-        // Forward to upstream (vLLM, Ollama, TGI, etc.)
-        let messages: Vec<ChatMessage> = req.messages.iter()
-            .map(|m| ChatMessage { role: m.role.clone(), content: m.content.clone() })
-            .collect();
-        let result = upstream.chat(&messages, req.max_tokens, req.temperature).await
-            .map_err(|e| api_error(StatusCode::BAD_GATEWAY, &format!("upstream: {e}")))?;
-        let trust = trust_model_str(&result.trust_model);
-        let io = result.io_commitment.map(|c| format!("0x{:x}", c));
-        (result.text, trust, io, result.num_tokens)
-    } else {
-        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "no provider configured"));
-    };
+    // Route based on model name:
+    // - Local models (loaded via OBELYSK_MODEL_DIR): ZK proof
+    // - "claude-*" models: Anthropic API with TLS attestation
+    // - "gpt-*" / "o1-*" / "o3-*" models: OpenAI API with TLS attestation
+    // - Everything else: upstream (vLLM/Ollama/TGI) with IO commitment
+    let messages: Vec<ChatMessage> = req.messages.iter()
+        .map(|m| ChatMessage { role: m.role.clone(), content: m.content.clone() })
+        .collect();
+
+    let model_lower = req.model.to_lowercase();
+    let (text, trust_str, io_hex, num_tokens) =
+        if let Some(ref local) = state.local_provider {
+            // Check if the requested model matches the local model
+            if model_lower == local.model_name.to_lowercase()
+                || model_lower == "local"
+                || state.anthropic_provider.is_none() && state.openai_provider.is_none() && state.upstream_provider.is_none()
+            {
+                let local = Arc::clone(local);
+                let result = tokio::task::spawn_blocking(move || {
+                    local.infer_text(&prompt, None)
+                        .map(|(text, res, _)| (text, res))
+                        .map_err(|e| format!("{e}"))
+                })
+                .await
+                .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("join: {e}")))?
+                .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+                let (text, res) = result;
+                (text, trust_model_str(&res.trust_model), res.io_commitment.map(|c| format!("0x{:x}", c)), res.num_tokens)
+            } else if model_lower.starts_with("claude") {
+                // Route to Anthropic
+                if let Some(ref anthropic) = state.anthropic_provider {
+                    let (res, att) = anthropic.chat(&messages, req.max_tokens).await
+                        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, &format!("anthropic: {e}")))?;
+                    state.tls_attestations.write().await.insert(att.attestation_id.clone(), att);
+                    (res.text, trust_model_str(&res.trust_model), res.io_commitment.map(|c| format!("0x{:x}", c)), res.num_tokens)
+                } else {
+                    return Err(api_error(StatusCode::BAD_REQUEST, "Anthropic provider not configured (set ANTHROPIC_API_KEY)"));
+                }
+            } else if model_lower.starts_with("gpt") || model_lower.starts_with("o1") || model_lower.starts_with("o3") {
+                // Route to OpenAI
+                if let Some(ref openai) = state.openai_provider {
+                    let (res, att) = openai.chat(&messages, req.max_tokens, req.temperature).await
+                        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, &format!("openai: {e}")))?;
+                    state.tls_attestations.write().await.insert(att.attestation_id.clone(), att);
+                    (res.text, trust_model_str(&res.trust_model), res.io_commitment.map(|c| format!("0x{:x}", c)), res.num_tokens)
+                } else {
+                    return Err(api_error(StatusCode::BAD_REQUEST, "OpenAI provider not configured (set OPENAI_API_KEY)"));
+                }
+            } else if let Some(ref upstream) = state.upstream_provider {
+                let result = upstream.chat(&messages, req.max_tokens, req.temperature).await
+                    .map_err(|e| api_error(StatusCode::BAD_GATEWAY, &format!("upstream: {e}")))?;
+                (result.text, trust_model_str(&result.trust_model), result.io_commitment.map(|c| format!("0x{:x}", c)), result.num_tokens)
+            } else {
+                return Err(api_error(StatusCode::BAD_REQUEST, &format!("Model '{}' not available", req.model)));
+            }
+        } else if model_lower.starts_with("claude") {
+            if let Some(ref anthropic) = state.anthropic_provider {
+                let (res, att) = anthropic.chat(&messages, req.max_tokens).await
+                    .map_err(|e| api_error(StatusCode::BAD_GATEWAY, &format!("anthropic: {e}")))?;
+                state.tls_attestations.write().await.insert(att.attestation_id.clone(), att);
+                (res.text, trust_model_str(&res.trust_model), res.io_commitment.map(|c| format!("0x{:x}", c)), res.num_tokens)
+            } else {
+                return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "no Anthropic provider"));
+            }
+        } else if model_lower.starts_with("gpt") || model_lower.starts_with("o1") || model_lower.starts_with("o3") {
+            if let Some(ref openai) = state.openai_provider {
+                let (res, att) = openai.chat(&messages, req.max_tokens, req.temperature).await
+                    .map_err(|e| api_error(StatusCode::BAD_GATEWAY, &format!("openai: {e}")))?;
+                state.tls_attestations.write().await.insert(att.attestation_id.clone(), att);
+                (res.text, trust_model_str(&res.trust_model), res.io_commitment.map(|c| format!("0x{:x}", c)), res.num_tokens)
+            } else {
+                return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "no OpenAI provider"));
+            }
+        } else if let Some(ref upstream) = state.upstream_provider {
+            let result = upstream.chat(&messages, req.max_tokens, req.temperature).await
+                .map_err(|e| api_error(StatusCode::BAD_GATEWAY, &format!("upstream: {e}")))?;
+            (result.text, trust_model_str(&result.trust_model), result.io_commitment.map(|c| format!("0x{:x}", c)), result.num_tokens)
+        } else {
+            return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "no provider configured"));
+        };
 
     // Create/update session
     {
@@ -469,10 +529,58 @@ async fn list_models(
         }));
     }
 
+    if let Some(ref anthropic) = state.anthropic_provider {
+        models.push(serde_json::json!({
+            "id": anthropic.model,
+            "object": "model",
+            "owned_by": "anthropic",
+            "trust_model": "tls_attestation",
+        }));
+    }
+
+    if let Some(ref openai) = state.openai_provider {
+        models.push(serde_json::json!({
+            "id": openai.model,
+            "object": "model",
+            "owned_by": "openai",
+            "trust_model": "tls_attestation",
+        }));
+    }
+
     Json(serde_json::json!({
         "object": "list",
         "data": models,
     }))
+}
+
+/// Get a TLS attestation by ID.
+async fn get_attestation(
+    State(state): State<Arc<VmState>>,
+    Path(attestation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let atts = state.tls_attestations.read().await;
+    let att = atts.get(&attestation_id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "attestation not found"))?;
+
+    Ok(Json(serde_json::json!({
+        "attestation_id": att.attestation_id,
+        "server_domain": att.server_domain,
+        "cert_fingerprint": att.cert_fingerprint,
+        "request_method_path": att.request_method_path,
+        "request_body_hash": format!("0x{:x}", att.request_body_hash),
+        "response_body_hash": format!("0x{:x}", att.response_body_hash),
+        "io_commitment": format!("0x{:x}", att.io_commitment),
+        "status_code": att.status_code,
+        "timestamp": att.timestamp,
+        "level": format!("{:?}", att.level),
+        "provider": att.provider,
+        "model": att.model,
+        "response_text_preview": if att.response_text.len() > 200 {
+            format!("{}...", &att.response_text[..200])
+        } else {
+            att.response_text.clone()
+        },
+    })))
 }
 
 /// List active sessions.
@@ -576,14 +684,33 @@ async fn main() {
             Arc::new(p)
         });
 
+    // Configure Anthropic provider (Claude) if API key is set
+    let anthropic_provider = std::env::var("ANTHROPIC_API_KEY").ok().map(|key| {
+        let model = std::env::var("ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| "claude-sonnet-4-20250514".into());
+        eprintln!("  Anthropic: {} (TLS attestation)", model);
+        Arc::new(AnthropicProvider::new(&key, &model))
+    });
+
+    // Configure OpenAI provider (GPT) if API key is set
+    let openai_provider = std::env::var("OPENAI_API_KEY").ok().map(|key| {
+        let model = std::env::var("OPENAI_MODEL")
+            .unwrap_or_else(|_| "gpt-4o".into());
+        eprintln!("  OpenAI: {} (TLS attestation)", model);
+        Arc::new(OpenAiProvider::new(&key, &model))
+    });
+
     eprintln!("  Prove workers: {prove_workers}");
     let proving_queue = Arc::new(ProvingQueue::new(prove_workers));
 
     let state = Arc::new(VmState {
         local_provider,
         upstream_provider,
+        anthropic_provider,
+        openai_provider,
         proving_queue,
         attestations: RwLock::new(HashMap::new()),
+        tls_attestations: RwLock::new(HashMap::new()),
         sessions: RwLock::new(HashMap::new()),
         started_at: Instant::now(),
     });
@@ -614,6 +741,7 @@ async fn main() {
         .route("/v1/proofs/:proof_id", get(get_proof_status))
         .route("/v1/sessions", get(list_sessions))
         .route("/v1/sessions/:session_id", axum::routing::delete(delete_session))
+        .route("/v1/attestations/:attestation_id", get(get_attestation))
         .route("/health", get(health))
         .with_state(state);
 
