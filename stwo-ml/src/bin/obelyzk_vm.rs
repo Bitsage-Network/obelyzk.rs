@@ -321,6 +321,22 @@ async fn chat_completions_stream(
     let (predicted_text, token_ids, input_matrix, inference_ms) = fast_result;
     let num_tokens = token_ids.len();
 
+    // Create/update session
+    {
+        let mut sessions = state.sessions.write().await;
+        let session = sessions.entry(session_id.clone()).or_insert_with(|| ChatSession {
+            session_id: session_id.clone(),
+            model_id: model.clone(),
+            kv_cache: stwo_ml::components::attention::ModelKVCache::new(),
+            token_history: Vec::new(),
+            last_accessed: Instant::now(),
+            turns: 0,
+        });
+        session.turns += 1;
+        session.token_history.extend_from_slice(&token_ids);
+        session.last_accessed = Instant::now();
+    }
+
     // Phase 2: Queue full proof in background
     let local_prove = Arc::clone(&local);
     let pid = proof_id_for_bg.clone();
