@@ -4163,6 +4163,7 @@ pub fn prove_matmul_batch_onchain_gpu(
         assignment.push(r_k);
 
         // GPU: fold ALL MLEs with shared challenge
+        // Use mle_fold_device when GPU Poseidon is active (challenge stays on GPU)
         let challenge_u32 = secure_field_to_u32s(r_k);
 
         for i in 0..num_entries {
