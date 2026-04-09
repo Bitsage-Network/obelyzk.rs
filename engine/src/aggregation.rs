@@ -4219,8 +4219,28 @@ pub fn execute_forward_pass_fast(
                 node_outputs.insert(node_id, output.clone());
                 current = output;
             }
-            // All other ops: pass through current (RMSNorm, LayerNorm, RoPE, etc.
-            // use inline computation that doesn't require weight lookups)
+            GraphOp::RMSNorm { dim } => {
+                let rn = apply_rmsnorm_detailed(&current, *dim);
+                let mut output = rn.output_matrix;
+                // Apply learned gamma scale if present
+                if let Some(gamma_matrix) = weights.get_named_weight(node_id, "gamma") {
+                    let gamma = &gamma_matrix.data;
+                    for row in 0..output.rows {
+                        for col in 0..output.cols.min(gamma.len()) {
+                            let idx = row * output.cols + col;
+                            output.data[idx] = output.data[idx] * gamma[col];
+                        }
+                    }
+                }
+                node_outputs.insert(node_id, output.clone());
+                current = output;
+            }
+            GraphOp::LayerNorm { dim } => {
+                let ln = apply_layernorm_detailed(&current, *dim);
+                node_outputs.insert(node_id, ln.output_matrix.clone());
+                current = ln.output_matrix;
+            }
+            // All other ops: pass through (RoPE, Embedding, Attention internals, etc.)
             _ => {
                 node_outputs.insert(node_id, current.clone());
             }

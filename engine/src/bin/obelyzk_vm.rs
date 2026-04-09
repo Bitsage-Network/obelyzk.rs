@@ -692,7 +692,39 @@ fn trust_model_str(tm: &TrustModel) -> &'static str {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // CLI chat mode: `obelyzk-vm chat [--model claude-sonnet]`
+    // Help
+    if args.len() < 2 || args.get(1).map(|s| s.as_str()) == Some("--help") || args.get(1).map(|s| s.as_str()) == Some("-h") {
+        println!("obelyzk.rs — Verifiable AI Engine");
+        println!();
+        println!("USAGE:");
+        println!("    obelyzk <COMMAND> [OPTIONS]");
+        println!();
+        println!("COMMANDS:");
+        println!("    serve              Start OpenAI-compatible API server");
+        println!("    chat               Interactive verified chat");
+        println!("    bench              Throughput benchmark");
+        println!("    dashboard          Live Cipher Noir TUI monitor");
+        println!();
+        println!("OPTIONS:");
+        println!("    --help, -h         Show this help message");
+        println!();
+        println!("ENVIRONMENT:");
+        println!("    OBELYSK_MODEL_DIR  Model directory or .gguf file");
+        println!("    PORT               API server port (default: 8080)");
+        println!("    ANTHROPIC_API_KEY  Enable Claude provider (TLS attestation)");
+        println!("    OPENAI_API_KEY     Enable GPT provider (TLS attestation)");
+        println!("    PROVE_WORKERS      Number of GPU proving workers (default: 1)");
+        println!();
+        println!("EXAMPLES:");
+        println!("    OBELYSK_MODEL_DIR=./models/smollm2-135m obelyzk serve");
+        println!("    ANTHROPIC_API_KEY=sk-ant-... obelyzk chat --model claude-sonnet");
+        println!("    obelyzk bench --tokens 64");
+        println!();
+        println!("Docs: https://github.com/Bitsage-Network/obelyzk.rs");
+        return;
+    }
+
+    // CLI chat mode
     if args.get(1).map(|s| s.as_str()) == Some("chat") {
         return run_chat_mode(&args[2..]).await;
     }

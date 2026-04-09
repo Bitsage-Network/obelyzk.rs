@@ -2117,10 +2117,12 @@ pub fn load_embedding_row(
                 let (matrix, _params) =
                     quantize_weight_matrix(&row_f32, 1, embed_dim, QuantStrategy::Symmetric8);
 
-                eprintln!(
-                    "  Embedding row {}: extracted from '{}' ({}x{} table, {} dtype)",
-                    token_id, name, vocab_size, embed_dim, bw * 8,
-                );
+                if std::env::var("OBELYZK_VERBOSE").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "  Embedding row {}: extracted from '{}' ({}x{} table, {} dtype)",
+                        token_id, name, vocab_size, embed_dim, bw * 8,
+                    );
+                }
                 return Ok((matrix, vocab_size));
             }
         }
@@ -2286,10 +2288,12 @@ pub fn project_to_logits(
                     }
                 }
 
-                eprintln!(
-                    "  project_to_logits: {} → argmax={} (score={:.2}, vocab={})",
-                    name, best_id, best_score, vocab_size,
-                );
+                if std::env::var("OBELYZK_VERBOSE").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "  project_to_logits: {} → argmax={} (score={:.2}, vocab={})",
+                        name, best_id, best_score, vocab_size,
+                    );
+                }
                 let _ = bw; // suppress unused warning
                 return Ok((best_id, best_score));
             }
