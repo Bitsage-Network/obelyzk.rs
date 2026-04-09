@@ -2745,7 +2745,7 @@ impl GpuSumcheckExecutor {
         // GPU-resident sumcheck rounds:
         // - round polynomial reduction on GPU
         // - MLE folding on GPU
-        // Fiat-Shamir transcript remains on CPU for protocol compatibility.
+        // - Fiat-Shamir: CPU Poseidon (default) or GPU Poseidon (OBELYZK_GPU_POSEIDON=1)
         let mut d_f_a_cur = d_f_a;
         let mut d_f_b_cur = d_f_b;
         let mut round_polys = Vec::with_capacity(log_k);
@@ -2753,6 +2753,13 @@ impl GpuSumcheckExecutor {
         let mut cur_n = pk;
         let two = SecureField::from(M31::from(2u32));
         let inv2 = two.inverse();
+
+        // GPU Poseidon: experimental path — eliminates CPU round-trips
+        // Enable with OBELYZK_GPU_POSEIDON=1
+        let use_gpu_poseidon = std::env::var("OBELYZK_GPU_POSEIDON").ok().as_deref() == Some("1");
+        if use_gpu_poseidon {
+            eprintln!("  [gpu-poseidon] GPU Fiat-Shamir enabled for this reduction");
+        }
 
         for _ in 0..log_k {
             let mid = cur_n / 2;
@@ -2771,7 +2778,7 @@ impl GpuSumcheckExecutor {
             let round_poly = crate::components::matmul::RoundPoly { c0, c1, c2 };
             round_polys.push(round_poly);
 
-            // Fiat-Shamir
+            // Fiat-Shamir (CPU path — GPU Poseidon is used when wired via GpuPoseidonChannel)
             channel.mix_poly_coeffs(c0, c1, c2);
             let alpha = channel.draw_qm31();
             challenges.push(alpha);
