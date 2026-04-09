@@ -2215,6 +2215,93 @@ pub fn load_embedding_batch(
     )))
 }
 
+/// Candidate tensor names for the output projection (lm_head).
+const LM_HEAD_CANDIDATES: &[&str] = &[
+    "lm_head.weight",
+    "output.weight",
+];
+
+/// Project a hidden-state M31Matrix through lm_head (or tied embedding weights)
+/// to produce vocabulary logits, then return (argmax_token_id, max_logit_score).
+///
+/// The matmul is performed in f32 space and is NOT proven — it's a convenience
+/// for producing human-readable text output. The proof covers the transformer
+/// forward pass (embedding → final hidden state).
+pub fn project_to_logits(
+    model_dir: &Path,
+    hidden_state: &M31Matrix, // (1, d_model)
+) -> Result<(u32, f32), OnnxError> {
+    let d_model = hidden_state.cols;
+
+    let shard_paths = discover_shards(model_dir, "model")
+        .map_err(|e| OnnxError::WeightError(format!("Cannot discover shards: {e}")))?;
+
+    // Try lm_head.weight first, then fall back to tied embedding weights
+    let all_candidates: Vec<&str> = LM_HEAD_CANDIDATES.iter()
+        .chain(EMBED_CANDIDATES.iter())
+        .copied()
+        .collect();
+
+    for path in &shard_paths {
+        let file = std::fs::File::open(path)
+            .map_err(|e| OnnxError::IoError(format!("Cannot open {}: {e}", path.display())))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| OnnxError::IoError(format!("Cannot mmap {}: {e}", path.display())))?;
+        let tensors = safetensors::SafeTensors::deserialize(&mmap)
+            .map_err(|e| OnnxError::WeightError(format!("Cannot parse {}: {e}", path.display())))?;
+
+        for &name in &all_candidates {
+            if let Ok(tensor) = tensors.tensor(name) {
+                let shape = tensor.shape();
+                if shape.len() != 2 { continue; }
+                let vocab_size = shape[0];
+                let embed_dim = shape[1];
+                if embed_dim != d_model { continue; }
+
+                // Dequantize hidden state from M31 → f32
+                let scale = 127.0_f32;
+                let hidden_f32: Vec<f32> = hidden_state.data.iter()
+                    .take(d_model)
+                    .map(|m| m.0 as f32 / scale)
+                    .collect();
+
+                // Load the full projection weight as f32
+                let raw = tensor.data();
+                let bw = dtype_byte_width(tensor.dtype());
+                let weight_f32 = tensor_to_f32(raw, tensor.dtype());
+
+                // Matmul: hidden (1, d_model) @ weight^T (d_model, vocab_size)
+                // weight is stored as (vocab_size, d_model), row-major
+                let mut best_id: u32 = 0;
+                let mut best_score = f32::NEG_INFINITY;
+                for v in 0..vocab_size {
+                    let row_offset = v * embed_dim;
+                    let mut dot = 0.0_f32;
+                    for d in 0..d_model {
+                        dot += hidden_f32[d] * weight_f32[row_offset + d];
+                    }
+                    if dot > best_score {
+                        best_score = dot;
+                        best_id = v as u32;
+                    }
+                }
+
+                eprintln!(
+                    "  project_to_logits: {} → argmax={} (score={:.2}, vocab={})",
+                    name, best_id, best_score, vocab_size,
+                );
+                let _ = bw; // suppress unused warning
+                return Ok((best_id, best_score));
+            }
+        }
+    }
+
+    Err(OnnxError::WeightError(format!(
+        "lm_head/embedding tensor not found. Searched for: {}",
+        all_candidates.join(", "),
+    )))
+}
+
 /// Quantize a single f32 value to M31.
 fn quantize_single_m31(val: f32) -> M31 {
     const P: u32 = (1u32 << 31) - 1; // M31 prime

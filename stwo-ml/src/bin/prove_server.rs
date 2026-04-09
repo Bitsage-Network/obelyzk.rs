@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -99,6 +100,10 @@ struct LoadedModel {
     /// Arc-wrapped to avoid O(model_size) clones per prove request.
     graph: Arc<stwo_ml::compiler::graph::ComputationGraph>,
     weights: Arc<stwo_ml::compiler::graph::GraphWeights>,
+    /// Tokenizer loaded from model directory (if tokenizer.json exists).
+    tokenizer: Option<Arc<tokenizers::Tokenizer>>,
+    /// Model directory path (for embedding row extraction via mmap).
+    model_dir: Option<PathBuf>,
     #[cfg(feature = "server-audit")]
     capture_hook: Option<Arc<stwo_ml::audit::capture::CaptureHook>>,
 }
@@ -274,7 +279,12 @@ struct InferRequest {
     model_id: String,
     /// Input data as flat f32 array. Shape must match model's expected input.
     /// For transformer models: (seq_len, hidden_dim) flattened.
-    input: Vec<f32>,
+    /// Mutually exclusive with `prompt`.
+    input: Option<Vec<f32>>,
+    /// Text prompt — server tokenizes and embeds automatically.
+    /// Requires the model to have a tokenizer.json in its directory.
+    /// Mutually exclusive with `input`.
+    prompt: Option<String>,
     /// Whether to use GPU proving (default: true if available).
     #[serde(default = "default_true")]
     gpu: bool,
@@ -332,6 +342,48 @@ struct VerifyResponse {
     io_commitment: Option<String>,
     /// Verification method used.
     method: String,
+}
+
+// =============================================================================
+// Chat API — POST /api/v1/chat
+// =============================================================================
+
+/// Request for the text-in/text-out provable inference endpoint.
+#[derive(Deserialize)]
+struct ChatRequest {
+    /// Model name or ID.
+    model_id: String,
+    /// Text prompt to tokenize, embed, and prove.
+    prompt: String,
+    /// Whether to use GPU proving (default: true).
+    #[serde(default = "default_true")]
+    gpu: bool,
+    /// If true, return full proof calldata. Default: false.
+    #[serde(default)]
+    include_calldata: bool,
+}
+
+/// Response from the chat endpoint — includes tokenization info and predicted next token.
+#[derive(Serialize)]
+struct ChatResponse {
+    proof_id: String,
+    /// Token IDs produced by tokenization.
+    token_ids: Vec<u32>,
+    /// Number of tokens in the prompt.
+    num_tokens: usize,
+    /// Raw model output as f32 array.
+    output: Option<Vec<f32>>,
+    output_shape: (usize, usize),
+    /// Predicted next token ID (argmax of lm_head projection).
+    predicted_token_id: Option<u32>,
+    /// Decoded text of the predicted token.
+    predicted_text: Option<String>,
+    io_commitment: String,
+    weight_commitment: String,
+    proof_hash: String,
+    prove_time_ms: u64,
+    calldata_size: usize,
+    calldata: Option<Vec<String>>,
 }
 
 // =============================================================================
@@ -791,6 +843,25 @@ fn create_capture_hook(
     }
 }
 
+/// Load tokenizer.json from a model directory if present.
+fn load_tokenizer_from_dir(dir: &std::path::Path) -> Option<Arc<tokenizers::Tokenizer>> {
+    let tok_path = dir.join("tokenizer.json");
+    if tok_path.is_file() {
+        match tokenizers::Tokenizer::from_file(&tok_path) {
+            Ok(t) => {
+                eprintln!("  Tokenizer loaded: {}", tok_path.display());
+                Some(Arc::new(t))
+            }
+            Err(e) => {
+                eprintln!("  Warning: tokenizer load failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let cap = detect_tee_capability();
     let models = state.models.read().await;
@@ -862,6 +933,9 @@ async fn load_model(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "onnx-model".into());
 
+    // Load tokenizer if available (ONNX models: check parent dir)
+    let tokenizer = load_tokenizer_from_dir(&canonical_path);
+
     let loaded = LoadedModel {
         model_id: model_id.clone(),
         name: model_name.clone(),
@@ -870,6 +944,8 @@ async fn load_model(
         input_shape: onnx.input_shape,
         graph: Arc::new(onnx.graph),
         weights: Arc::new(onnx.weights),
+        tokenizer,
+        model_dir: Some(canonical_path.clone()),
         #[cfg(feature = "server-audit")]
         capture_hook: create_capture_hook(&model_id, &weight_commitment, desc),
     };
@@ -926,6 +1002,9 @@ async fn load_hf_model_handler(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "hf-model".into());
 
+    // Load tokenizer if available
+    let tokenizer = load_tokenizer_from_dir(&path);
+
     let loaded = LoadedModel {
         model_id: model_id.clone(),
         name: model_name,
@@ -934,6 +1013,8 @@ async fn load_hf_model_handler(
         input_shape: hf.input_shape,
         graph: Arc::new(hf.graph),
         weights: Arc::new(hf.weights),
+        tokenizer,
+        model_dir: Some(path.clone()),
         #[cfg(feature = "server-audit")]
         capture_hook: create_capture_hook(&model_id, &weight_commitment, desc),
     };
@@ -1615,26 +1696,64 @@ async fn infer(
     })?;
 
     let (in_rows, in_cols) = model.input_shape;
-    let expected = in_rows * in_cols;
-    if req.input.len() != expected {
+
+    // Resolve input: either from raw f32 array or from text prompt (tokenize + embed)
+    let input_matrix = if let Some(ref prompt) = req.prompt {
+        if req.input.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: "Cannot provide both 'input' and 'prompt'".into() }),
+            ));
+        }
+        let tokenizer = model.tokenizer.as_ref().ok_or_else(|| (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: "Model has no tokenizer — use 'input' instead of 'prompt'".into() }),
+        ))?;
+        let model_dir = model.model_dir.as_ref().ok_or_else(|| (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: "Model has no model_dir — cannot embed tokens".into() }),
+        ))?;
+        let encoding = tokenizer.encode(prompt.as_str(), false).map_err(|e| (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: format!("Tokenization failed: {e}") }),
+        ))?;
+        let token_ids = encoding.get_ids();
+        if token_ids.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Prompt produced zero tokens".into() })));
+        }
+        let last_token_id = *token_ids.last().unwrap();
+        let (row, _vocab_size) = stwo_ml::compiler::hf_loader::load_embedding_row(
+            model_dir, in_cols, last_token_id,
+        ).map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("Embedding lookup failed: {e}") }),
+        ))?;
+        row
+    } else if let Some(ref input) = req.input {
+        let expected = in_rows * in_cols;
+        if input.len() != expected {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Input has {} values, model expects {} ({in_rows}×{in_cols})",
+                        input.len(), expected
+                    ),
+                }),
+            ));
+        }
+        let (quantized, _params) = quantize_tensor(input, QuantStrategy::Symmetric8);
+        let mut mat = M31Matrix::new(in_rows, in_cols);
+        for (i, &v) in quantized.iter().enumerate().take(in_rows * in_cols) {
+            mat.data[i] = v;
+        }
+        mat
+    } else {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!(
-                    "Input has {} values, model expects {} ({in_rows}×{in_cols})",
-                    req.input.len(),
-                    expected
-                ),
-            }),
+            Json(ErrorResponse { error: "Must provide either 'input' (f32 array) or 'prompt' (text)".into() }),
         ));
-    }
-
-    // Quantize input
-    let (quantized, _params) = quantize_tensor(&req.input, QuantStrategy::Symmetric8);
-    let mut input_matrix = M31Matrix::new(in_rows, in_cols);
-    for (i, &v) in quantized.iter().enumerate().take(in_rows * in_cols) {
-        input_matrix.data[i] = v;
-    }
+    };
 
     let graph = Arc::clone(&model.graph);
     let weights = Arc::clone(&model.weights);
@@ -1751,6 +1870,165 @@ async fn infer(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: err }),
         )),
+    }
+}
+
+// =============================================================================
+// Chat handler — POST /api/v1/chat
+// =============================================================================
+
+/// Provable inference from a text prompt: tokenize → embed → GKR prove → predict next token.
+async fn chat(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChatRequest>,
+) -> Result<Json<ChatResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if req.prompt.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "prompt cannot be empty".into() })));
+    }
+
+    let models = state.models.read().await;
+    let model = resolve_model_id(&models, &req.model_id).ok_or_else(|| {
+        let available: Vec<String> = models.values().map(|m| m.name.clone()).collect();
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Model '{}' not found. Available: [{}]", req.model_id, available.join(", ")),
+            }),
+        )
+    })?;
+
+    let tokenizer = model.tokenizer.as_ref().ok_or_else(|| (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: format!("Model '{}' has no tokenizer.json — cannot accept text prompts", req.model_id) }),
+    ))?;
+    let model_dir = model.model_dir.as_ref().ok_or_else(|| (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: "Model has no model_dir — cannot embed tokens".into() }),
+    ))?;
+
+    // 1. Tokenize
+    let encoding = tokenizer.encode(req.prompt.as_str(), false).map_err(|e| (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: format!("Tokenization failed: {e}") }),
+    ))?;
+    let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+    if token_ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Prompt produced zero tokens".into() })));
+    }
+    let last_token_id = *token_ids.last().unwrap();
+    let num_tokens = token_ids.len();
+
+    // 2. Embed — zero-copy mmap extraction of the last token's embedding row
+    let (_in_rows, in_cols) = model.input_shape;
+    let (input_matrix, _vocab_size) = stwo_ml::compiler::hf_loader::load_embedding_row(
+        model_dir, in_cols, last_token_id,
+    ).map_err(|e| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse { error: format!("Embedding lookup failed: {e}") }),
+    ))?;
+
+    let graph = Arc::clone(&model.graph);
+    let weights = Arc::clone(&model.weights);
+    let weight_commitment = model.weight_commitment.clone();
+    let include_calldata = req.include_calldata;
+    let tokenizer_clone = Arc::clone(tokenizer);
+    let model_dir_clone = model_dir.clone();
+    let model_id_for_storage = req.model_id.clone();
+
+    // Drop read lock before blocking work
+    drop(models);
+
+    // 3. Prove (blocking — CPU/GPU heavy)
+    let result = tokio::task::spawn_blocking(move || {
+        let t_start = Instant::now();
+        let proof_result = stwo_ml::aggregation::prove_model_aggregated_onchain_gkr_auto(
+            &graph, &input_matrix, &weights,
+        );
+
+        match proof_result {
+            Ok(proof) => {
+                let prove_time_ms = t_start.elapsed().as_millis() as u64;
+                let output_matrix = &proof.execution.output;
+                let output_f32: Vec<f32> = output_matrix.data.iter().map(|v| v.0 as f32).collect();
+
+                // 4. Project through lm_head for next-token prediction
+                let (predicted_token_id, predicted_text) =
+                    match stwo_ml::compiler::hf_loader::project_to_logits(&model_dir_clone, output_matrix) {
+                        Ok((tid, _score)) => {
+                            let text = tokenizer_clone.decode(&[tid], true).ok();
+                            (Some(tid), text)
+                        }
+                        Err(_) => (None, None),
+                    };
+
+                let io_hex = format!("0x{:x}", proof.io_commitment);
+                let proof_hash = format!("0x{:x}",
+                    starknet_crypto::poseidon_hash_many(&[
+                        proof.io_commitment,
+                        proof.layer_chain_commitment,
+                    ])
+                );
+
+                let gkr_proof = proof.gkr_proof.as_ref();
+                let calldata_felts = if let Some(gkr) = gkr_proof {
+                    let mut felts = Vec::new();
+                    stwo_ml::cairo_serde::serialize_gkr_proof_data_only(gkr, &mut felts);
+                    felts
+                } else {
+                    Vec::new()
+                };
+                let calldata_size = calldata_felts.len();
+                let calldata = if include_calldata {
+                    Some(calldata_felts.iter().map(|f| format!("0x{:x}", f)).collect())
+                } else {
+                    None
+                };
+
+                Ok(ChatResponse {
+                    proof_id: format!("proof-{}", uuid::Uuid::new_v4()),
+                    token_ids,
+                    num_tokens,
+                    output: Some(output_f32),
+                    output_shape: (output_matrix.rows, output_matrix.cols),
+                    predicted_token_id,
+                    predicted_text,
+                    io_commitment: io_hex,
+                    weight_commitment,
+                    proof_hash: proof_hash.clone(),
+                    prove_time_ms,
+                    calldata_size,
+                    calldata,
+                })
+            }
+            Err(e) => Err(format!("Proving failed: {e}")),
+        }
+    })
+    .await
+    .map_err(|e| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse { error: format!("Task join error: {e}") }),
+    ))?;
+
+    match result {
+        Ok(response) => {
+            // Store proof for later verification
+            let stored = StoredProof {
+                proof_hash: response.proof_hash.clone(),
+                model_id: model_id_for_storage,
+                io_commitment: response.io_commitment.clone(),
+                weight_commitment: response.weight_commitment.clone(),
+                num_proven_layers: 0,
+                prove_time_ms: response.prove_time_ms,
+                calldata_size: response.calldata_size,
+                created_at_epoch_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+            state.proofs.write().await.insert(response.proof_hash.clone(), stored);
+            Ok(Json(response))
+        }
+        Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: err }))),
     }
 }
 
@@ -3468,8 +3746,11 @@ async fn main() {
                     // This reduces startup from ~8 min to ~2 sec.
                     let num_layers = hf.graph.num_layers();
                     let num_weights = hf.weights.weights.len();
-                    eprintln!("  Auto-loaded: {} ({} layers, {} weights) — fast startup, commitments deferred",
-                        model_name, num_layers, num_weights);
+                    // Load tokenizer if available
+                    let tokenizer = load_tokenizer_from_dir(&path);
+                    let has_tokenizer = tokenizer.is_some();
+                    eprintln!("  Auto-loaded: {} ({} layers, {} weights, tokenizer: {}) — fast startup, commitments deferred",
+                        model_name, num_layers, num_weights, has_tokenizer);
                     initial_models.insert(model_name.clone(), LoadedModel {
                         model_id: format!("0x{:x}", starknet_crypto::poseidon_hash_many(&[
                             starknet_ff::FieldElement::ONE,
@@ -3482,6 +3763,8 @@ async fn main() {
                         input_shape: hf.input_shape,
                         graph: Arc::new(hf.graph),
                         weights: Arc::new(hf.weights),
+                        tokenizer,
+                        model_dir: Some(path.clone()),
                         #[cfg(feature = "server-audit")]
                         capture_hook: None,
                     });
@@ -3521,6 +3804,7 @@ async fn main() {
         .route("/api/v1/prove/:job_id", get(get_prove_status))
         .route("/api/v1/prove/:job_id/result", get(get_prove_result))
         .route("/api/v1/infer", post(infer))
+        .route("/api/v1/chat", post(chat))
         .route("/api/v1/verify/:proof_hash", get(verify_proof))
         .route("/api/v1/classify", post(classify))
         .route("/api/v1/proofs", get(list_proofs))
