@@ -828,70 +828,86 @@ async fn main() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Dashboard Mode — Live Cipher Noir TUI
+// Dashboard Mode — Interactive Cipher Noir TUI (ratatui + crossterm)
 // ═══════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "tui")]
 async fn run_dashboard() {
-    use std::io::Write;
+    use crossterm::{
+        event::{self, Event, KeyCode, KeyModifiers},
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        execute,
+    };
+    use ratatui::prelude::*;
 
     let model_dir = std::env::var("OBELYSK_MODEL_DIR").unwrap_or_default();
     let model_name = std::path::Path::new(&model_dir)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "no model".into());
-    let gpu_name = obelyzk::backend::gpu_device_name().unwrap_or_else(|| "CPU".into());
-    let gpu_active = obelyzk::backend::gpu_is_available();
-    let started = Instant::now();
 
-    // Clear screen
-    print!("\x1b[2J\x1b[H");
-    std::io::stdout().flush().ok();
+    let started = Instant::now();
+    let mut dash_state = obelyzk::tui::vm_dashboard::VmDashboardState::default();
+    dash_state.model_name = model_name;
+    dash_state.network = "Starknet Sepolia".into();
+
+    // Detect GPU
+    if let Some(name) = obelyzk::backend::gpu_device_name() {
+        dash_state.workers.push(obelyzk::tui::vm_dashboard::GpuWorkerState {
+            device_id: 0,
+            device_name: name,
+            utilization: 0.0,
+            current_job: None,
+            memory_used_gb: 0.0,
+            memory_total_gb: 24.0,
+        });
+    }
+
+    // Terminal setup
+    enable_raw_mode().expect("raw mode");
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen).expect("alt screen");
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).expect("terminal");
 
     loop {
-        let uptime = started.elapsed().as_secs();
-        let pulse = if (uptime % 2) == 0 { "\x1b[92m" } else { "\x1b[92;2m" };
+        // Update state
+        dash_state.uptime_secs = started.elapsed().as_secs();
+        dash_state.frame_count = dash_state.frame_count.wrapping_add(1);
+        dash_state.status = obelyzk::tui::vm_dashboard::VmStatus::Ready;
 
-        print!("\x1b[H"); // cursor home
-        println!();
-        println!("  {pulse}╔═╗╔╗  ╔═╗╦  ╦ ╦╔═╗╦╔═\x1b[0m    \x1b[90mMODEL\x1b[0m   \x1b[97;1m{}\x1b[0m", model_name);
-        println!("  {pulse}║ ║╠╩╗ ╠═ ║  ╚╦╝╔═╝╠╩╗\x1b[0m    \x1b[90mGPU\x1b[0m     \x1b[36m{}\x1b[0m", gpu_name);
-        println!("  {pulse}╚═╝╚═╝ ╚═╝╩═╝ ╩ ╚═╝╩ ╩\x1b[0m    \x1b[90mSTATUS\x1b[0m  \x1b[92;1m◆ READY\x1b[0m  \x1b[90mZK Inference VM\x1b[0m");
-        println!("  \x1b[92;2m{}\x1b[0m", "─".repeat(64));
+        // Render
+        terminal.draw(|frame| {
+            obelyzk::tui::vm_dashboard::render(frame, &dash_state);
+        }).expect("draw");
 
-        // GPU Workers
-        println!("  \x1b[36;1mGPU WORKERS\x1b[0m                \x1b[92;1mPROVING QUEUE\x1b[0m       \x1b[35;1mINFO\x1b[0m");
-        if gpu_active {
-            let bar = format!("{}{}",
-                "░".repeat(20),
-                " ".repeat(0),
-            );
-            println!("  \x1b[90m·\x1b[0m GPU 0 \x1b[90m{}\x1b[0m      idle        queued     \x1b[90m0\x1b[0m          \x1b[90mProve: 4.3s\x1b[0m", bar);
-        } else {
-            println!("  \x1b[90m  no GPU detected\x1b[0m");
+        // Handle input (50ms poll)
+        if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            match event::read() {
+                Ok(Event::Key(key)) => {
+                    match key.code {
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        _ => {}
+                    }
+                }
+                Ok(Event::Resize(_, _)) => {} // ratatui handles resize on next draw
+                _ => {}
+            }
         }
-        println!("                                         proving    \x1b[90m0\x1b[0m          \x1b[90mSSE: 0.6s\x1b[0m");
-        println!("                                         completed  \x1b[90m0\x1b[0m          \x1b[90mWarm: 4.3s\x1b[0m");
-        println!();
-
-        // Throughput
-        println!("  \x1b[92;1mTHROUGHPUT\x1b[0m");
-        println!("  \x1b[90mproven\x1b[0m      \x1b[92;1m0.2 tok/s\x1b[0m  \x1b[90m(SmolLM2, A10G)\x1b[0m");
-        println!("  \x1b[90mSSE stream\x1b[0m  \x1b[36m0.6s\x1b[0m \x1b[90mresponse time\x1b[0m");
-        println!("  \x1b[90mH100 batch\x1b[0m  \x1b[33m80-322 tok/s\x1b[0m \x1b[90m(estimated, 10K tokens)\x1b[0m");
-        println!();
-
-        println!("  \x1b[92;2m{}\x1b[0m", "─".repeat(64));
-        println!("  \x1b[92;1mCONVERSATION STREAM\x1b[0m");
-        println!("  \x1b[90mawaiting conversation… (use obelyzk chat or POST /v1/chat/completions)\x1b[0m");
-
-        println!("  \x1b[92;2m{}\x1b[0m", "─".repeat(64));
-        println!("  \x1b[92;7m ObelyZK VM \x1b[0m  \x1b[33m{}s\x1b[0m uptime  \x1b[90mStarknet Sepolia\x1b[0m  \x1b[90m950 tests · Ctrl+C to exit\x1b[0m",
-            uptime);
-        println!();
-
-        std::io::stdout().flush().ok();
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     }
+
+    // Cleanup
+    disable_raw_mode().ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    terminal.show_cursor().ok();
+}
+
+#[cfg(not(feature = "tui"))]
+async fn run_dashboard() {
+    eprintln!("Dashboard requires the 'tui' feature. Build with:");
+    eprintln!("  cargo build --features \"server,tui\"");
+    std::process::exit(1);
 }
 
 // ═══════════════════════════════════════════════════════════════════
