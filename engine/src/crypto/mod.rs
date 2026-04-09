@@ -12,4 +12,5 @@ pub mod merkle_m31;
 pub mod mle_opening;
 pub mod poseidon2_m31;
 pub mod poseidon_channel;
+pub mod poseidon_constants;
 pub mod poseidon_merkle;
