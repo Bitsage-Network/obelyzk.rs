@@ -638,6 +638,13 @@ fn trust_model_str(tm: &TrustModel) -> &'static str {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    // CLI chat mode: `obelyzk-vm chat [--model claude-sonnet]`
+    if args.get(1).map(|s| s.as_str()) == Some("chat") {
+        return run_chat_mode(&args[2..]).await;
+    }
+
     eprintln!("╔═══════════════════════════════════════════╗");
     eprintln!("║       ObelyZK · ZK Inference VM           ║");
     eprintln!("║       Verifiable AI for every model       ║");
@@ -755,4 +762,137 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app.into_make_service()).await.unwrap();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Interactive CLI Chat Mode
+// ═══════════════════════════════════════════════════════════════════
+
+async fn run_chat_mode(args: &[String]) {
+    use std::io::{BufRead, Write};
+
+    // Parse --model flag
+    let mut model = std::env::var("OBELYZK_MODEL")
+        .unwrap_or_else(|_| "claude-sonnet-4-20250514".into());
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--model" && i + 1 < args.len() {
+            model = args[i + 1].clone();
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    let model_lower = model.to_lowercase();
+
+    // Determine provider
+    let is_anthropic = model_lower.starts_with("claude");
+    let is_openai = model_lower.starts_with("gpt") || model_lower.starts_with("o1") || model_lower.starts_with("o3");
+
+    // Verify API keys
+    if is_anthropic && std::env::var("ANTHROPIC_API_KEY").is_err() {
+        eprintln!("Error: ANTHROPIC_API_KEY not set");
+        std::process::exit(1);
+    }
+    if is_openai && std::env::var("OPENAI_API_KEY").is_err() {
+        eprintln!("Error: OPENAI_API_KEY not set");
+        std::process::exit(1);
+    }
+
+    let trust_label = if is_anthropic || is_openai { "TLS attestation" } else { "ZK proof" };
+
+    // Header
+    println!();
+    println!("  \x1b[92m╔═══════════════════════════════════════════╗\x1b[0m");
+    println!("  \x1b[92m║\x1b[0m  ObelyZK · Verifiable Chat                \x1b[92m║\x1b[0m");
+    println!("  \x1b[92m║\x1b[0m  Every response is cryptographically bound \x1b[92m║\x1b[0m");
+    println!("  \x1b[92m╚═══════════════════════════════════════════╝\x1b[0m");
+    println!();
+    println!("  \x1b[90mMODEL\x1b[0m  \x1b[97;1m{model}\x1b[0m");
+    println!("  \x1b[90mTRUST\x1b[0m  \x1b[92m{trust_label}\x1b[0m");
+    println!("  \x1b[90mTYPE\x1b[0m   \x1b[90m'exit' to quit\x1b[0m");
+    println!();
+
+    let mut conversation: Vec<ChatMessage> = Vec::new();
+    let mut turn = 0usize;
+
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+
+    loop {
+        // Prompt
+        print!("  \x1b[92;1mYou\x1b[0m  ");
+        stdout.flush().ok();
+
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).is_err() || line.is_empty() {
+            break;
+        }
+        let input = line.trim().to_string();
+        if input.is_empty() { continue; }
+        if input == "exit" || input == "quit" || input == "/exit" {
+            println!("\n  \x1b[90m{turn} turns · all attested · bye\x1b[0m\n");
+            break;
+        }
+
+        conversation.push(ChatMessage { role: "user".into(), content: input.clone() });
+
+        // Call the appropriate provider
+        let t_start = std::time::Instant::now();
+
+        let result = if is_anthropic {
+            let key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+            let provider = AnthropicProvider::new(&key, &model);
+            match provider.chat(&conversation, Some(2048)).await {
+                Ok((res, att)) => {
+                    conversation.push(ChatMessage { role: "assistant".into(), content: res.text.clone() });
+                    Some((res.text, format!("0x{:x}", att.io_commitment), att.attestation_id, res.inference_time_ms))
+                }
+                Err(e) => {
+                    println!("  \x1b[33mError: {e}\x1b[0m\n");
+                    conversation.pop(); // remove failed user msg
+                    continue;
+                }
+            }
+        } else if is_openai {
+            let key = std::env::var("OPENAI_API_KEY").unwrap();
+            let provider = OpenAiProvider::new(&key, &model);
+            match provider.chat(&conversation, Some(2048), Some(0.7)).await {
+                Ok((res, att)) => {
+                    conversation.push(ChatMessage { role: "assistant".into(), content: res.text.clone() });
+                    Some((res.text, format!("0x{:x}", att.io_commitment), att.attestation_id, res.inference_time_ms))
+                }
+                Err(e) => {
+                    println!("  \x1b[33mError: {e}\x1b[0m\n");
+                    conversation.pop();
+                    continue;
+                }
+            }
+        } else {
+            println!("  \x1b[33mLocal model chat not yet supported in CLI mode (use --model claude-*)\x1b[0m\n");
+            conversation.pop();
+            continue;
+        };
+
+        if let Some((text, commitment, att_id, latency_ms)) = result {
+            turn += 1;
+
+            // Print response
+            println!();
+            println!("  \x1b[36;1m AI\x1b[0m  {text}");
+            println!();
+
+            // Attestation footer
+            let commit_short = if commitment.len() > 18 {
+                format!("{}…{}", &commitment[..10], &commitment[commitment.len()-6..])
+            } else {
+                commitment.clone()
+            };
+            let att_short = if att_id.len() > 16 { &att_id[..16] } else { &att_id };
+
+            println!("  \x1b[92m✓\x1b[0m \x1b[90m{trust_label}\x1b[0m  \x1b[35m{att_short}\x1b[0m  \x1b[90m{commit_short}\x1b[0m  \x1b[33m{latency_ms}ms\x1b[0m");
+            println!();
+        }
+    }
 }
