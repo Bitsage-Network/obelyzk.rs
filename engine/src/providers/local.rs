@@ -33,7 +33,11 @@ pub struct LocalProvider {
 }
 
 impl LocalProvider {
-    /// Load a model from a HuggingFace directory.
+    /// Load a model from a HuggingFace directory or GGUF file.
+    ///
+    /// Auto-detects format:
+    /// - `.gguf` file → GGUF loader (llama.cpp format)
+    /// - Directory with `config.json` → HuggingFace SafeTensors loader
     pub fn load(model_dir: &Path, name: Option<&str>) -> Result<Self, LocalProviderError> {
         let dir_name = model_dir
             .file_name()
@@ -41,14 +45,39 @@ impl LocalProvider {
             .unwrap_or_else(|| "model".into());
 
         let model_name = name.unwrap_or(&dir_name).to_string();
+        let is_gguf = model_dir.extension().map(|e| e == "gguf").unwrap_or(false);
 
-        eprintln!("[local] Loading model from {}...", model_dir.display());
-        let hf = crate::compiler::hf_loader::load_hf_model(model_dir, None)
-            .map_err(|e| LocalProviderError::LoadFailed(format!("{e}")))?;
+        eprintln!("[local] Loading model from {}{}...",
+            model_dir.display(),
+            if is_gguf { " (GGUF)" } else { " (SafeTensors)" },
+        );
 
-        let tok_path = model_dir.join("tokenizer.json");
+        let hf = if is_gguf {
+            // GGUF path — single .gguf file
+            crate::compiler::gguf_loader::load_gguf_model(model_dir, None)
+                .map_err(|e| LocalProviderError::LoadFailed(format!("GGUF: {e}")))?
+        } else {
+            // HuggingFace SafeTensors path — directory with config.json + *.safetensors
+            crate::compiler::hf_loader::load_hf_model(model_dir, None)
+                .map_err(|e| LocalProviderError::LoadFailed(format!("{e}")))?
+        };
+
+        // Load tokenizer — for GGUF, check parent directory or same directory
+        let tok_path = if is_gguf {
+            // GGUF files often don't have tokenizer.json alongside them
+            // Check parent dir, or use a bundled tokenizer
+            let parent = model_dir.parent().unwrap_or(Path::new("."));
+            let tok_in_parent = parent.join("tokenizer.json");
+            let tok_alongside = model_dir.with_extension("tokenizer.json");
+            if tok_in_parent.is_file() { tok_in_parent }
+            else if tok_alongside.is_file() { tok_alongside }
+            else { model_dir.with_file_name("tokenizer.json") }
+        } else {
+            model_dir.join("tokenizer.json")
+        };
+
         let tokenizer = tokenizers::Tokenizer::from_file(&tok_path)
-            .map_err(|e| LocalProviderError::LoadFailed(format!("tokenizer: {e}")))?;
+            .map_err(|e| LocalProviderError::LoadFailed(format!("tokenizer ({}): {e}", tok_path.display())))?;
 
         let hidden_size = hf.input_shape.1;
         let num_layers = hf.graph.num_layers();
@@ -60,7 +89,12 @@ impl LocalProvider {
 
         // Initialize weight cache — pre-warms Poseidon Merkle roots on disk
         let model_id = format!("local-{}", model_name);
-        let weight_cache = crate::weight_cache::shared_cache_for_model(model_dir, &model_id);
+        let cache_dir = if is_gguf {
+            model_dir.parent().unwrap_or(Path::new("."))
+        } else {
+            model_dir
+        };
+        let weight_cache = crate::weight_cache::shared_cache_for_model(cache_dir, &model_id);
 
         // Batch size from env (default: 1 for streaming, higher for throughput)
         let batch_size: usize = std::env::var("OBELYZK_BATCH_SIZE")
@@ -79,7 +113,7 @@ impl LocalProvider {
 
         Ok(Self {
             model_name,
-            model_dir: model_dir.to_path_buf(),
+            model_dir: if is_gguf { model_dir.parent().unwrap_or(Path::new(".")).to_path_buf() } else { model_dir.to_path_buf() },
             graph: Arc::new(hf.graph),
             weights: Arc::new(hf.weights),
             tokenizer: Arc::new(tokenizer),
