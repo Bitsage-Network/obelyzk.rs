@@ -83,7 +83,7 @@ pub fn felt_to_securefield(fe: FieldElement) -> SecureField {
 pub struct PoseidonChannel {
     digest: FieldElement,
     n_draws: u32,
-    hash_count: u64,
+    pub hash_count: u64,
 }
 
 impl PoseidonChannel {
@@ -100,6 +100,38 @@ impl PoseidonChannel {
     #[inline]
     pub fn hash_count(&self) -> u64 {
         self.hash_count
+    }
+
+    /// Serialize channel state for GPU upload.
+    ///
+    /// Layout: [digest_w0..w7 (8 u32), n_draws (1 u32), hash_count_lo (1 u32), hash_count_hi (1 u32)] = 11 u32
+    /// Digest is in little-endian u32 words (same as felt252 GPU representation).
+    pub fn to_gpu_state(&self) -> Vec<u32> {
+        let mut state = Vec::with_capacity(11);
+        let words = crate::crypto::poseidon_constants::felt_to_u32(&self.digest);
+        state.extend_from_slice(&words);
+        state.push(self.n_draws);
+        state.push(self.hash_count as u32);
+        state.push((self.hash_count >> 32) as u32);
+        state
+    }
+
+    /// Reconstruct from GPU state download.
+    pub fn from_gpu_state(state: &[u32], hash_count: u64) -> Self {
+        let mut bytes = [0u8; 32];
+        // Convert 8 u32 little-endian words back to big-endian bytes
+        for w in 0..8 {
+            let word = state[w];
+            let offset = (7 - w) * 4;
+            bytes[offset] = (word >> 24) as u8;
+            bytes[offset + 1] = (word >> 16) as u8;
+            bytes[offset + 2] = (word >> 8) as u8;
+            bytes[offset + 3] = word as u8;
+        }
+        let digest = FieldElement::from_bytes_be(&bytes).unwrap_or(FieldElement::ZERO);
+        let n_draws = state.get(8).copied().unwrap_or(0);
+
+        Self { digest, n_draws, hash_count }
     }
 
     /// Mix a u64 value into the channel.

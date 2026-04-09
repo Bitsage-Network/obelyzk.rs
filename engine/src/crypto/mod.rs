@@ -13,4 +13,6 @@ pub mod mle_opening;
 pub mod poseidon2_m31;
 pub mod poseidon_channel;
 pub mod poseidon_constants;
+#[cfg(feature = "cuda-runtime")]
+pub mod gpu_poseidon;
 pub mod poseidon_merkle;
