@@ -177,6 +177,21 @@ __device__ __forceinline__ QM31 qm31_mul(QM31 x, QM31 y) {
 // Shared memory layout: 3 * BLOCK_SIZE QM31 values (s0, s1, s2)
 // Each QM31 is 4 u32 => 3 * 256 * 4 * 4 = 12288 bytes = 12 KB
 #define BLOCK_SIZE 256
+#define WARP_SIZE 32
+#define FULL_MASK 0xFFFFFFFFu
+
+// Warp-level QM31 reduction using shuffle instructions (no __syncthreads needed)
+__device__ __forceinline__ QM31 warp_reduce_qm31(QM31 val) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        QM31 other;
+        other.a0 = __shfl_down_sync(FULL_MASK, val.a0, offset);
+        other.a1 = __shfl_down_sync(FULL_MASK, val.a1, offset);
+        other.a2 = __shfl_down_sync(FULL_MASK, val.a2, offset);
+        other.a3 = __shfl_down_sync(FULL_MASK, val.a3, offset);
+        val = qm31_add(val, other);
+    }
+    return val;
+}
 
 extern "C" __global__ void sumcheck_round_kernel(
     const uint32_t* __restrict__ f_a,
@@ -186,12 +201,13 @@ extern "C" __global__ void sumcheck_round_kernel(
     uint32_t* __restrict__ block_s2,
     uint32_t mid
 ) {
-    __shared__ uint32_t s_s0[BLOCK_SIZE * 4];
-    __shared__ uint32_t s_s1[BLOCK_SIZE * 4];
-    __shared__ uint32_t s_s2[BLOCK_SIZE * 4];
+    // Shared memory for inter-warp reduction: 8 warps × 3 channels × 4 u32
+    __shared__ uint32_t s_warp[8 * 3 * 4];
 
     uint32_t tid = threadIdx.x;
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t warp_id = tid / WARP_SIZE;
+    uint32_t lane_id = tid % WARP_SIZE;
 
     // Initialize thread-local accumulators to zero
     QM31 local_s0 = qm31_zero();
@@ -218,52 +234,62 @@ extern "C" __global__ void sumcheck_round_kernel(
         local_s2 = qm31_mul(a2, b2);
     }
 
-    // Store to shared memory
-    uint32_t base = tid * 4;
-    s_s0[base+0] = local_s0.a0; s_s0[base+1] = local_s0.a1;
-    s_s0[base+2] = local_s0.a2; s_s0[base+3] = local_s0.a3;
-    s_s1[base+0] = local_s1.a0; s_s1[base+1] = local_s1.a1;
-    s_s1[base+2] = local_s1.a2; s_s1[base+3] = local_s1.a3;
-    s_s2[base+0] = local_s2.a0; s_s2[base+1] = local_s2.a1;
-    s_s2[base+2] = local_s2.a2; s_s2[base+3] = local_s2.a3;
+    // Warp-level reduction (no shared memory needed, no __syncthreads)
+    local_s0 = warp_reduce_qm31(local_s0);
+    local_s1 = warp_reduce_qm31(local_s1);
+    local_s2 = warp_reduce_qm31(local_s2);
 
+    // Lane 0 of each warp writes to shared memory
+    if (lane_id == 0) {
+        uint32_t w = warp_id;
+        s_warp[(w * 3 + 0) * 4 + 0] = local_s0.a0; s_warp[(w * 3 + 0) * 4 + 1] = local_s0.a1;
+        s_warp[(w * 3 + 0) * 4 + 2] = local_s0.a2; s_warp[(w * 3 + 0) * 4 + 3] = local_s0.a3;
+        s_warp[(w * 3 + 1) * 4 + 0] = local_s1.a0; s_warp[(w * 3 + 1) * 4 + 1] = local_s1.a1;
+        s_warp[(w * 3 + 1) * 4 + 2] = local_s1.a2; s_warp[(w * 3 + 1) * 4 + 3] = local_s1.a3;
+        s_warp[(w * 3 + 2) * 4 + 0] = local_s2.a0; s_warp[(w * 3 + 2) * 4 + 1] = local_s2.a1;
+        s_warp[(w * 3 + 2) * 4 + 2] = local_s2.a2; s_warp[(w * 3 + 2) * 4 + 3] = local_s2.a3;
+    }
     __syncthreads();
 
-    // Block-level tree reduction
-    for (uint32_t stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            uint32_t mine = tid * 4;
-            uint32_t other = (tid + stride) * 4;
-            QM31 a = {s_s0[mine], s_s0[mine+1], s_s0[mine+2], s_s0[mine+3]};
-            QM31 b_val = {s_s0[other], s_s0[other+1], s_s0[other+2], s_s0[other+3]};
-            QM31 sum = qm31_add(a, b_val);
-            s_s0[mine] = sum.a0; s_s0[mine+1] = sum.a1;
-            s_s0[mine+2] = sum.a2; s_s0[mine+3] = sum.a3;
+    // Final reduction across warps (only warp 0, using shuffle again)
+    if (warp_id == 0 && lane_id < (BLOCK_SIZE / WARP_SIZE)) {
+        uint32_t w = lane_id;
+        local_s0 = (QM31){s_warp[(w*3+0)*4], s_warp[(w*3+0)*4+1], s_warp[(w*3+0)*4+2], s_warp[(w*3+0)*4+3]};
+        local_s1 = (QM31){s_warp[(w*3+1)*4], s_warp[(w*3+1)*4+1], s_warp[(w*3+1)*4+2], s_warp[(w*3+1)*4+3]};
+        local_s2 = (QM31){s_warp[(w*3+2)*4], s_warp[(w*3+2)*4+1], s_warp[(w*3+2)*4+2], s_warp[(w*3+2)*4+3]};
 
-            a = QM31{s_s1[mine], s_s1[mine+1], s_s1[mine+2], s_s1[mine+3]};
-            b_val = QM31{s_s1[other], s_s1[other+1], s_s1[other+2], s_s1[other+3]};
-            sum = qm31_add(a, b_val);
-            s_s1[mine] = sum.a0; s_s1[mine+1] = sum.a1;
-            s_s1[mine+2] = sum.a2; s_s1[mine+3] = sum.a3;
+        // Reduce 8 warp results with shuffle (log2(8) = 3 steps)
+        for (int offset = (BLOCK_SIZE / WARP_SIZE) / 2; offset > 0; offset >>= 1) {
+            QM31 o0, o1, o2;
+            o0.a0 = __shfl_down_sync(FULL_MASK, local_s0.a0, offset);
+            o0.a1 = __shfl_down_sync(FULL_MASK, local_s0.a1, offset);
+            o0.a2 = __shfl_down_sync(FULL_MASK, local_s0.a2, offset);
+            o0.a3 = __shfl_down_sync(FULL_MASK, local_s0.a3, offset);
+            local_s0 = qm31_add(local_s0, o0);
 
-            a = QM31{s_s2[mine], s_s2[mine+1], s_s2[mine+2], s_s2[mine+3]};
-            b_val = QM31{s_s2[other], s_s2[other+1], s_s2[other+2], s_s2[other+3]};
-            sum = qm31_add(a, b_val);
-            s_s2[mine] = sum.a0; s_s2[mine+1] = sum.a1;
-            s_s2[mine+2] = sum.a2; s_s2[mine+3] = sum.a3;
+            o1.a0 = __shfl_down_sync(FULL_MASK, local_s1.a0, offset);
+            o1.a1 = __shfl_down_sync(FULL_MASK, local_s1.a1, offset);
+            o1.a2 = __shfl_down_sync(FULL_MASK, local_s1.a2, offset);
+            o1.a3 = __shfl_down_sync(FULL_MASK, local_s1.a3, offset);
+            local_s1 = qm31_add(local_s1, o1);
+
+            o2.a0 = __shfl_down_sync(FULL_MASK, local_s2.a0, offset);
+            o2.a1 = __shfl_down_sync(FULL_MASK, local_s2.a1, offset);
+            o2.a2 = __shfl_down_sync(FULL_MASK, local_s2.a2, offset);
+            o2.a3 = __shfl_down_sync(FULL_MASK, local_s2.a3, offset);
+            local_s2 = qm31_add(local_s2, o2);
         }
-        __syncthreads();
     }
 
     // Thread 0 writes block result
     if (tid == 0) {
         uint32_t blk = blockIdx.x * 4;
-        block_s0[blk+0] = s_s0[0]; block_s0[blk+1] = s_s0[1];
-        block_s0[blk+2] = s_s0[2]; block_s0[blk+3] = s_s0[3];
-        block_s1[blk+0] = s_s1[0]; block_s1[blk+1] = s_s1[1];
-        block_s1[blk+2] = s_s1[2]; block_s1[blk+3] = s_s1[3];
-        block_s2[blk+0] = s_s2[0]; block_s2[blk+1] = s_s2[1];
-        block_s2[blk+2] = s_s2[2]; block_s2[blk+3] = s_s2[3];
+        block_s0[blk+0] = local_s0.a0; block_s0[blk+1] = local_s0.a1;
+        block_s0[blk+2] = local_s0.a2; block_s0[blk+3] = local_s0.a3;
+        block_s1[blk+0] = local_s1.a0; block_s1[blk+1] = local_s1.a1;
+        block_s1[blk+2] = local_s1.a2; block_s1[blk+3] = local_s1.a3;
+        block_s2[blk+0] = local_s2.a0; block_s2[blk+1] = local_s2.a1;
+        block_s2[blk+2] = local_s2.a2; block_s2[blk+3] = local_s2.a3;
     }
 }
 
@@ -1599,10 +1625,11 @@ impl GpuSumcheckExecutor {
         let mut d_block_s2 = unsafe { self.device.alloc::<u32>(n_blocks * 4) }
             .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
 
+        // Warp-shuffle kernel uses less shared memory: 8 warps × 3 channels × 4 u32 × 4 bytes = 384 bytes
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 3 * 256 * 4 * 4, // 12 KB
+            shared_mem_bytes: 8 * 3 * 4 * 4,
         };
 
         unsafe {
@@ -1623,11 +1650,7 @@ impl GpuSumcheckExecutor {
         }
 
         if n_blocks == 1 {
-            // Single block — download directly
-            self.device
-                .synchronize()
-                .map_err(|e| CudaFftError::KernelExecution(format!("sync: {:?}", e)))?;
-
+            // Single block — download all 3 results in one batch (12 u32)
             let mut s0 = [0u32; 4];
             let mut s1 = [0u32; 4];
             let mut s2 = [0u32; 4];
@@ -1649,7 +1672,6 @@ impl GpuSumcheckExecutor {
         let mut d_partials = unsafe { self.device.alloc::<u32>(total_partials) }
             .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
 
-        // Copy block partials into packed layout: [s0_blocks | s1_blocks | s2_blocks]
         let s0_len = n_blocks * 4;
         let s1_offset = s0_len;
         let s2_offset = 2 * s0_len;
@@ -1674,9 +1696,9 @@ impl GpuSumcheckExecutor {
             .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
 
         let reduce_cfg = LaunchConfig {
-            grid_dim: (3, 1, 1), // One block per channel
+            grid_dim: (3, 1, 1),
             block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 256 * 4 * 4, // 4 KB per block
+            shared_mem_bytes: 256 * 4 * 4,
         };
 
         unsafe {
@@ -1685,10 +1707,6 @@ impl GpuSumcheckExecutor {
                 .launch(reduce_cfg, (&d_partials, &mut d_output, n_blocks as u32))
                 .map_err(|e| CudaFftError::KernelExecution(format!("sumcheck_reduce: {:?}", e)))?;
         }
-
-        self.device
-            .synchronize()
-            .map_err(|e| CudaFftError::KernelExecution(format!("sync: {:?}", e)))?;
 
         let mut output = [0u32; 12];
         self.device
