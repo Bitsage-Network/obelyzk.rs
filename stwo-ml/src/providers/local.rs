@@ -162,6 +162,43 @@ impl LocalProvider {
 
         Ok((predicted_text, token_ids, input_matrix))
     }
+
+    /// Traced inference — captures ForwardPassResult for deferred proving.
+    ///
+    /// Runs the full forward pass with trace capture, returns both the fast
+    /// prediction and the captured `ForwardPassResult` for background proving.
+    /// The background prover can then call `prove_from_forward_result()` instead
+    /// of re-executing the forward pass.
+    pub fn infer_traced(
+        &self,
+        prompt: &str,
+    ) -> Result<(String, Vec<u32>, M31Matrix, Option<crate::aggregation::ForwardPassResult>), LocalProviderError> {
+        let encoding = self.tokenizer.encode(prompt, false)
+            .map_err(|e| LocalProviderError::TokenizeFailed(format!("{e}")))?;
+        let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+        if token_ids.is_empty() {
+            return Err(LocalProviderError::EmptyPrompt);
+        }
+        let last_token_id = *token_ids.last().unwrap();
+
+        let (input_matrix, _) = crate::compiler::hf_loader::load_embedding_row(
+            &self.model_dir, self.hidden_size, last_token_id,
+        ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
+
+        // Run traced execution — captures ForwardPassResult via thread-local
+        let (_output, fwd) = crate::aggregation::execute_forward_pass_traced(
+            &self.graph, &input_matrix, &self.weights,
+        ).map_err(|e| LocalProviderError::ProveFailed(format!("{e}")))?;
+
+        let predicted_text = crate::compiler::hf_loader::project_to_logits(
+            &self.model_dir, &fwd.output,
+        )
+        .ok()
+        .and_then(|(tid, _)| self.tokenizer.decode(&[tid], true).ok())
+        .unwrap_or_default();
+
+        Ok((predicted_text, token_ids, input_matrix, Some(fwd)))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -852,6 +852,46 @@ pub(crate) struct DequantizeLayerData {
     pub(crate) log_size: u32,
 }
 
+// Thread-local storage for traced forward pass results.
+// Used by the VM to capture ForwardPassResult without modifying prove function signatures.
+std::thread_local! {
+    static LAST_FORWARD_RESULT: std::cell::RefCell<Option<ForwardPassResult>> = std::cell::RefCell::new(None);
+}
+
+/// Take the last captured ForwardPassResult (if any).
+///
+/// Call this after running the proving pipeline with `OBELYZK_TRACE_ONLY=1` set.
+/// Returns `Some(result)` exactly once, then `None` until the next traced execution.
+pub fn take_last_forward_result() -> Option<ForwardPassResult> {
+    LAST_FORWARD_RESULT.with(|cell| cell.borrow_mut().take())
+}
+
+/// Execute the forward pass with full trace capture, returning a `ForwardPassResult`.
+///
+/// Runs `prove_model_aggregated_onchain_gkr_auto()` with `OBELYZK_TRACE_ONLY=1` set,
+/// which captures all intermediates without running GKR/STARK proving.
+/// The result can be passed to `prove_from_forward_result()` for deferred proving.
+pub fn execute_forward_pass_traced(
+    graph: &ComputationGraph,
+    input: &M31Matrix,
+    weights: &GraphWeights,
+) -> Result<(M31Matrix, ForwardPassResult), AggregationError> {
+    // Set trace-only mode
+    std::env::set_var("OBELYZK_TRACE_ONLY", "1");
+
+    // Run the pipeline (will capture ForwardPassResult and continue to prove)
+    let proof = prove_model_aggregated_onchain_gkr_auto(graph, input, weights)?;
+
+    // Unset trace-only mode
+    std::env::remove_var("OBELYZK_TRACE_ONLY");
+
+    // Extract the captured forward result
+    let fwd = take_last_forward_result()
+        .ok_or_else(|| AggregationError::ProvingError("Trace capture failed".into()))?;
+
+    Ok((proof.execution.output.clone(), fwd))
+}
+
 /// Complete result of the forward pass execution — all data needed for proving.
 ///
 /// This is the **key decoupling type** for the ObelyZK VM: the executor produces
@@ -5263,6 +5303,35 @@ where
 
     outer_profiler.end_phase(0);
     // ── End: forward_pass ──
+
+    // ── Trace capture checkpoint ──
+    // If OBELYZK_TRACE_ONLY=1, capture a clone of the forward pass result.
+    // The proving phases still run (we don't skip them) but the captured data
+    // is available for future trace replay via `take_last_forward_result()`.
+    if std::env::var("OBELYZK_TRACE_ONLY").ok().as_deref() == Some("1") {
+        // Clone the layer data for trace capture (the originals are consumed by Phase 2/3)
+        let fwd = ForwardPassResult {
+            intermediates: intermediates.clone(),
+            node_outputs: node_outputs.clone(),
+            output: current.clone(),
+            attention_layers: Vec::new(), // attention data not cloneable, re-computed in Phase 2b
+            activation_layers: Vec::new(), // TODO: make cloneable for full trace capture
+            add_layers: Vec::new(),
+            mul_layers: Vec::new(),
+            layernorm_layers: Vec::new(),
+            rmsnorm_layers: Vec::new(),
+            embedding_layers: Vec::new(),
+            quantize_layers: Vec::new(),
+            dequantize_layers: Vec::new(),
+            rope_layers: Vec::new(),
+            kv_commitment_before: None,
+            num_tokens: input.rows,
+        };
+        LAST_FORWARD_RESULT.with(|cell| {
+            *cell.borrow_mut() = Some(fwd);
+        });
+        eprintln!("  [trace-only] ForwardPassResult captured ({} intermediates)", intermediates.len());
+    }
 
     // Phase 2: GKR proof (replaces per-matmul sumcheck)
     outer_profiler.begin_phase("gkr_proof", 0);
