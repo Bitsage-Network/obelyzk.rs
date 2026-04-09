@@ -1,4 +1,4 @@
-# Getting Started with Obelysk Pipeline
+# Getting Started with obelyzk.rs
 
 Prove that an ML model ran correctly, and verify the proof on-chain. Works on any NVIDIA GPU.
 
@@ -23,24 +23,24 @@ SSH into your GPU machine and run:
 
 ```bash
 # Single-prompt inference + ZK proof + on-chain verification
-curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/obelyzk.rs/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit
 ```
 
 **Multi-turn conversation** — have the model discuss a topic across multiple turns, with each turn ZK-proved:
 
 ```bash
 # 3-turn conversation about quantum computing, each turn proved + verified on-chain
-curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/obelyzk.rs/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
 
 # 5-turn deep dive
-curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "cryptography and post-quantum security" --conversation-turns 5
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/obelyzk.rs/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "cryptography and post-quantum security" --conversation-turns 5
 ```
 
 Or clone and run manually:
 
 ```bash
-git clone https://github.com/Bitsage-Network/stwo-ml.git
-cd stwo-ml/scripts/pipeline
+git clone https://github.com/Bitsage-Network/obelyzk.rs.git
+cd obelyzk.rs/scripts/pipeline
 
 # Dry run (no on-chain submission) — good for first try
 ./run_e2e.sh --preset phi3-mini --gpu --dry-run
@@ -84,7 +84,7 @@ If setup stops with `Driver/library version mismatch`, that means the driver was
 ```bash
 sudo reboot
 # after reconnect
-cd ~/stwo-ml/scripts/pipeline
+cd ~/obelyzk.rs/scripts/pipeline
 ./00_setup_gpu.sh --skip-deps
 ```
 
@@ -233,7 +233,7 @@ Use `CAPTURE_TIMEOUT_SEC` (default `3600`) to bound capture runtime.
 
 **Fastest way (bootstrap one-liner):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/obelyzk.rs/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
 ```
 
 Two-phase approach:
@@ -442,16 +442,16 @@ The script will:
 
 ```bash
 # Single prompt + on-chain (zero-config)
-curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/obelyzk.rs/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit
 
 # Multi-turn conversation + on-chain
-curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/obelyzk.rs/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "quantum computing"
 
 # 5-turn conversation
-curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "machine learning" --conversation-turns 5
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/obelyzk.rs/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset qwen3-14b --gpu --submit --conversation-topic "machine learning" --conversation-turns 5
 
 # Dry run (no on-chain)
-curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/stwo-ml/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset phi3-mini --gpu --dry-run
+curl -fsSL https://raw.githubusercontent.com/Bitsage-Network/obelyzk.rs/main/scripts/pipeline/bootstrap.sh | bash -s -- --preset phi3-mini --gpu --dry-run
 ```
 
 ### run_e2e.sh Examples (already cloned)
