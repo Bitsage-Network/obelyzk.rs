@@ -60,11 +60,40 @@ __device__ void felt252_sub(uint32_t* out, const uint32_t* a, const uint32_t* b)
 
 
 // ── felt252 multiplication: out = (a * b) mod p ──
-// Uses schoolbook multiplication (8×8 → 16 words) + Barrett reduction
+// Schoolbook multiplication (8×8 → 16 words) + structured reduction
+// using p = 2^251 + 17*2^192 + 1.
+//
+// Reduction identity: 2^256 ≡ -2^5*(17*2^192 + 1) + 2^5*p ≡ -(544*2^192 + 32) (mod p)
+// So for bits above 251: reduce by subtracting multiples of p.
+//
+// Strategy: compute 512-bit product, then reduce the upper 256 bits word-by-word
+// using the relation: word[k] * 2^(32k) mod p for k >= 8.
+// We precompute 2^(32k) mod p for k = 8..15 as constants.
+
+// Precomputed: 2^(32*k) mod p for k = 0..7 stored in the lower 256 bits directly.
+// For k >= 8, we need 2^256 mod p, 2^288 mod p, etc.
+// 2^251 ≡ -17*2^192 - 1 (mod p)
+// 2^256 = 32 * 2^251 ≡ -544*2^192 - 32 ≡ p - 544*2^192 - 32 (mod p)
+// These are small enough to hardcode as 8-word constants.
+
+// 2^256 mod p (little-endian u32):
+// = p - 544*2^192 - 32 = (2^251 + 17*2^192 + 1) - 544*2^192 - 32
+// = 2^251 - 527*2^192 - 31
+__device__ __constant__ uint32_t POW2_256_MOD_P[8] = {
+    0xFFFFFFE1, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFDEF, 0x07FFFFFF
+};
+// Note: this is p - 544*(2^192) - 32. Working in hex:
+// p   = 0x0800000000000011 0000000000000000 0000000000000000 0000000000000001
+// 544 * 2^192 = 0x220 << 192 = 0x00000000000002200000...0
+// 32 = 0x20
+// p - 544*2^192 - 32 = 0x07FFFFFFFFFFDDF FFFFFFFFFFFFFFFFF FFFFFFFFFFFFFFFFF FFFFFFFFFFFFFFE1
+// Corrected: compute properly below
+
 __device__ void felt252_mul(uint32_t* out, const uint32_t* a, const uint32_t* b) {
-    // Step 1: Full 512-bit product via schoolbook multiplication
+    // Step 1: Full 512-bit product
     uint64_t product[16] = {0};
-    
+
     for (int i = 0; i < 8; i++) {
         uint64_t carry = 0;
         for (int j = 0; j < 8; j++) {
@@ -72,72 +101,92 @@ __device__ void felt252_mul(uint32_t* out, const uint32_t* a, const uint32_t* b)
             product[i+j] = t & 0xFFFFFFFF;
             carry = t >> 32;
         }
-        product[i+8] = carry;
+        product[i+8] += carry;
     }
 
-    // Step 2: Reduce mod p using the structure of the Starknet prime
-    // p = 2^251 + 17 * 2^192 + 1
-    // For a 512-bit product, we need Barrett or specialized reduction.
-    // 
-    // Simplified reduction: since p ≈ 2^251, values above 2^252 can be
-    // reduced by subtracting multiples of p. We use iterative reduction.
+    // Step 2: Reduce to 256 bits using partial reduction
+    // For the upper half (words 8-15), we need to compute:
+    //   sum += product[k] * (2^(32k) mod p) for k = 8..15
     //
-    // Copy to output (lower 256 bits) and reduce the upper bits
-    uint32_t r[8];
+    // Instead of precomputed tables, use iterative approach:
+    // Process from the highest word down. For each upper word:
+    //   1. The upper bits (above 251) contribute via the reduction identity
+    //   2. 2^251 ≡ -(17*2^192 + 1) mod p
+    //
+    // Simpler correct approach: treat the 512-bit product as a BigInt,
+    // then do repeated subtraction of p. Since product < p^2 < 2^504,
+    // and p ≈ 2^251, we need at most 2^253/p ≈ 4 subtractions.
+    // But with 16 words, let's use a smarter method.
+
+    // Collect into a single 512-bit value, then reduce via splitting at bit 251.
+    // low = product[0..251], high = product[251..504]
+    // result = low + high * (-(17*2^192 + 1)) mod p
+    // = low - high * 17 * 2^192 - high
+
+    // Extract lower 251 bits (words 0-7, but word 7 only lower 27 bits)
+    uint32_t r[9] = {0}; // 9 words to handle intermediate overflow
     for (int i = 0; i < 8; i++) r[i] = (uint32_t)product[i];
-    
-    // Reduce upper 256 bits: product[8..15] * 2^256 mod p
-    // 2^256 mod p = 2^256 - p + (2^256 mod p)
-    // Since p = 2^251 + 17*2^192 + 1:
-    // 2^256 = 2^5 * 2^251 = 2^5 * (p - 17*2^192 - 1) = 32*p - 32*17*2^192 - 32
-    // So 2^256 mod p = -(32*17*2^192 + 32) mod p = p - 544*2^192 - 32
-    //
-    // For each upper word, we multiply by the appropriate power of 2^256 mod p
-    // and add to the result.
-    //
-    // Practical approach: iterative conditional subtraction
-    // This is correct but slow (~8 iterations max). For 99 rounds of Hades,
-    // the total overhead is acceptable.
-    
-    // Add contribution from upper words
-    for (int k = 8; k < 16; k++) {
-        if (product[k] == 0) continue;
-        
-        // product[k] * 2^(32*k) mod p
-        // For k=8: 2^256 mod p, for k=9: 2^288 mod p, etc.
-        // We handle this by repeated doubling + reduction
-        uint32_t contrib[8] = {0};
-        contrib[0] = (uint32_t)product[k];
-        
-        // Shift left by (k-8)*32 bits and reduce
-        // This is expensive but correct. For production, use precomputed
-        // reduction tables.
-        for (int shift = 0; shift < (k - 8) * 32 + 256 - 251; shift++) {
-            // Double contrib mod p (shift left by 1)
+
+    // Extract bits 251+ as "high": shift product right by 251
+    // Bit 251 is in word 7 (251 / 32 = 7, 251 % 32 = 27), so bit 27 of word 7
+    uint64_t high[9] = {0};
+    // Shift right by 251 = 7*32 + 27
+    for (int i = 0; i < 9; i++) {
+        uint64_t lo = (i + 7 < 16) ? product[i + 7] : 0;
+        uint64_t hi = (i + 8 < 16) ? product[i + 8] : 0;
+        high[i] = (lo >> 27) | ((hi & 0x7FFFFFF) << 5);
+    }
+
+    // Clear upper bits of r[7]: keep only lower 27 bits
+    r[7] &= 0x07FFFFFF;
+
+    // Compute: result = low - high * (17 * 2^192 + 1) mod p
+    // = low - high * 17 * 2^192 - high
+
+    // Subtract high from r
+    uint64_t borrow = 0;
+    for (int i = 0; i < 9; i++) {
+        uint64_t diff = (uint64_t)r[i] - (high[i] & 0xFFFFFFFF) - borrow;
+        r[i] = (uint32_t)(diff & 0xFFFFFFFF);
+        borrow = (diff >> 63) & 1;
+    }
+
+    // Subtract high * 17 * 2^192 from r
+    // 17 * 2^192: starts at word 6 (192/32 = 6)
+    // high[i] * 17 contributes to r[i + 6]
+    for (int i = 0; i < 3; i++) { // high should be small (< 2^253)
+        if (high[i] == 0) continue;
+        uint64_t sub = high[i] * 17;
+        uint64_t brw = 0;
+        for (int j = i + 6; j < 9; j++) {
+            uint64_t d = (uint64_t)r[j] - (sub & 0xFFFFFFFF) - brw;
+            r[j] = (uint32_t)(d & 0xFFFFFFFF);
+            brw = (d >> 63) & 1;
+            sub >>= 32;
+            if (sub == 0 && brw == 0) break;
+        }
+    }
+
+    // If result is negative, add p until positive
+    // Check sign: if r[8] has high bit set or r is negative
+    for (int tries = 0; tries < 4; tries++) {
+        // Check if r < 0 by looking at the highest word
+        if ((r[8] & 0x80000000) || r[8] > 0) {
+            // Could be negative (two's complement) or > p — add p
             uint64_t carry = 0;
             for (int i = 0; i < 8; i++) {
-                uint64_t t = ((uint64_t)contrib[i] << 1) | carry;
-                contrib[i] = (uint32_t)(t & 0xFFFFFFFF);
-                carry = t >> 32;
+                carry += (uint64_t)r[i] + (uint64_t)FELT_P[i];
+                r[i] = (uint32_t)(carry & 0xFFFFFFFF);
+                carry >>= 32;
             }
-            // Conditional subtract p if >= p
-            uint64_t borrow = 0;
-            uint32_t tmp[8];
-            for (int i = 0; i < 8; i++) {
-                uint64_t diff = (uint64_t)contrib[i] - (uint64_t)FELT_P[i] - borrow;
-                tmp[i] = (uint32_t)(diff & 0xFFFFFFFF);
-                borrow = (diff >> 63) & 1;
-            }
-            if (borrow == 0) {
-                for (int i = 0; i < 8; i++) contrib[i] = tmp[i];
-            }
+            r[8] += (uint32_t)carry;
+        } else {
+            break;
         }
-        
-        felt252_add(r, r, contrib);
     }
-    
-    // Final reduction: ensure r < p
-    uint64_t borrow = 0;
+
+    // Final conditional subtract: ensure r < p
+    borrow = 0;
     uint32_t tmp[8];
     for (int i = 0; i < 8; i++) {
         uint64_t diff = (uint64_t)r[i] - (uint64_t)FELT_P[i] - borrow;
@@ -147,7 +196,7 @@ __device__ void felt252_mul(uint32_t* out, const uint32_t* a, const uint32_t* b)
     if (borrow == 0) {
         for (int i = 0; i < 8; i++) r[i] = tmp[i];
     }
-    
+
     for (int i = 0; i < 8; i++) out[i] = r[i];
 }
 
@@ -170,30 +219,34 @@ __device__ void felt252_pow7(uint32_t* out, const uint32_t* x) {
 // Actually, Starknet uses: state[i] = sum(M[i][j] * state[j])
 // The exact MDS coefficients are baked into the round function.
 // For width 3: we compute the linear mix explicitly.
+// MDS mix matching Starknet Poseidon exactly:
+//   t = s0 + s1 + s2
+//   s0' = t + 2*s0       = 3*s0 + s1 + s2
+//   s1' = t - 2*s1       = s0 - s1 + s2
+//   s2' = t - 3*s2       = s0 + s1 - 2*s2
+// Source: starknet-crypto-codegen/src/poseidon/mod.rs MixLayer
 __device__ void mds_mix(uint32_t state[3][8]) {
-    uint32_t s0[8], s1[8], s2[8];
-    
-    // tmp = state[0] + state[1] + state[2]
-    uint32_t sum_all[8];
-    felt252_add(sum_all, state[0], state[1]);
-    felt252_add(sum_all, sum_all, state[2]);
-    
-    // s0 = state[0] * 3 + state[1] + state[2] = 2*state[0] + sum_all
-    uint32_t dbl0[8];
-    felt252_add(dbl0, state[0], state[0]);
-    felt252_add(s0, dbl0, sum_all);
-    
-    // s1 = state[0] + state[1] * (-1) + state[2] = sum_all - 2*state[1]
-    uint32_t dbl1[8];
-    felt252_add(dbl1, state[1], state[1]);
-    felt252_sub(s1, sum_all, dbl1);
-    
-    // s2 = state[0] + state[1] + state[2] * (-2) = sum_all - 3*state[2]
-    uint32_t dbl2[8], trp2[8];
-    felt252_add(dbl2, state[2], state[2]);
-    felt252_add(trp2, dbl2, state[2]);
-    felt252_sub(s2, sum_all, trp2);
-    
+    uint32_t t[8], s0[8], s1[8], s2[8];
+
+    // t = state[0] + state[1] + state[2]
+    felt252_add(t, state[0], state[1]);
+    felt252_add(t, t, state[2]);
+
+    // s0 = t + 2*state[0]
+    uint32_t dbl[8];
+    felt252_add(dbl, state[0], state[0]);
+    felt252_add(s0, t, dbl);
+
+    // s1 = t - 2*state[1]
+    felt252_add(dbl, state[1], state[1]);
+    felt252_sub(s1, t, dbl);
+
+    // s2 = t - 3*state[2]
+    uint32_t trp[8];
+    felt252_add(dbl, state[2], state[2]);
+    felt252_add(trp, dbl, state[2]);
+    felt252_sub(s2, t, trp);
+
     for (int i = 0; i < 8; i++) {
         state[0][i] = s0[i];
         state[1][i] = s1[i];
@@ -424,25 +477,27 @@ extern "C" __global__ void poseidon_mix_draw_kernel(
     }
 
     // Extract QM31 from state[0]: 4 M31 values via floor_div(2^31)
-    // felt252 → extract lowest 31 bits 4 times
+    // felt252 → extract lowest 31 bits, shift right by 31, repeat 4 times
+    // This matches CPU's draw_qm31() which does:
+    //   felt → m31[0] = felt & (2^31-1); felt >>= 31; ... × 4
     uint32_t drawn[8];
     for (int w = 0; w < 8; w++) drawn[w] = perm_state[0][w];
 
-    // M31 mask = 2^31 - 1 = 0x7FFFFFFF
     for (int i = 0; i < 4; i++) {
+        // Extract lowest 31 bits as M31
         challenge_out[i] = drawn[0] & 0x7FFFFFFFu;
-        // Shift right by 31 bits: drawn = drawn >> 31
-        uint32_t carry = 0;
-        for (int w = 7; w >= 0; w--) {
-            uint32_t new_carry = drawn[w] << 1; // bit 31 of drawn[w] becomes carry
-            drawn[w] = (drawn[w] >> 31) | (carry << 0);
-            // Actually: shift 256-bit right by 31:
-            // For word w: new_val = (drawn[w] >> 31) | (drawn[w+1] << 1)
-            // This is tricky. Simplified extraction:
-            carry = 0; // TODO: proper 256-bit right shift by 31
+
+        // 256-bit right shift by 31: drawn >>= 31
+        // Each 32-bit word gets: new[w] = (drawn[w] >> 31) | (drawn[w+1] << 1)
+        // But shift is 31, not 32, so:
+        //   new[w] = (drawn[w] >> 31) | (drawn[w+1] << 1)
+        // The low bit of drawn[w+1] becomes the high bit of new[w].
+        uint32_t new_drawn[8];
+        for (int w = 0; w < 7; w++) {
+            new_drawn[w] = (drawn[w] >> 31) | (drawn[w + 1] << 1);
         }
-        // Simplified: just extract from the low word repeatedly
-        // This is approximate — proper implementation needs full bigint shift
+        new_drawn[7] = drawn[7] >> 31;
+        for (int w = 0; w < 8; w++) drawn[w] = new_drawn[w];
     }
 
     // Update channel state
