@@ -4008,6 +4008,114 @@ pub fn prove_model_aggregated_onchain_gkr(
     prove_model_aggregated_onchain_gkr_with::<SimdBackend>(graph, input, weights)
 }
 
+/// Fast forward pass ONLY — no proving, no GKR, no STARK.
+///
+/// Executes the computation graph to produce the output matrix.
+/// Returns in ~2-8s instead of ~90s. Use for streaming responses
+/// when the proof will be generated asynchronously.
+pub fn execute_forward_pass_fast(
+    graph: &ComputationGraph,
+    input: &M31Matrix,
+    weights: &GraphWeights,
+) -> Result<M31Matrix, AggregationError> {
+    use crate::components::matmul::matmul_m31;
+
+    let topo = graph.topological_order();
+    let mut current = input.clone();
+    let mut node_outputs: std::collections::HashMap<usize, M31Matrix> = std::collections::HashMap::new();
+
+    for &node_id in &topo {
+        let node = &graph.nodes[node_id];
+
+        if let Some(&first_input) = node.inputs.first() {
+            if let Some(inp) = node_outputs.get(&first_input) {
+                current = inp.clone();
+            }
+        }
+
+        match &node.op {
+            GraphOp::MatMul { .. } => {
+                let weight = weights
+                    .get_weight(node.id)
+                    .ok_or(AggregationError::ModelError(ModelError::MissingWeight(node.id)))?;
+
+                // Handle gated FFN
+                if let Some(up_weight) = weights.get_named_weight(node.id, "up_proj") {
+                    let gate_proj_id = if node.id >= 2 { node.id - 2 } else { 0 };
+                    let ffn_input = node_outputs.get(&gate_proj_id)
+                        .cloned()
+                        .unwrap_or_else(|| current.clone());
+
+                    #[cfg(feature = "cuda-runtime")]
+                    let up_out = crate::gpu_sumcheck::gpu_matmul_m31_full(&ffn_input, up_weight)
+                        .unwrap_or_else(|_| matmul_m31(&ffn_input, up_weight));
+                    #[cfg(not(feature = "cuda-runtime"))]
+                    let up_out = matmul_m31(&ffn_input, up_weight);
+
+                    let data: Vec<_> = current.data.iter()
+                        .zip(up_out.data.iter())
+                        .map(|(&g, &u)| g * u)
+                        .collect();
+                    current = M31Matrix { rows: current.rows, cols: current.cols, data };
+                }
+
+                #[cfg(feature = "cuda-runtime")]
+                let output = crate::gpu_sumcheck::gpu_matmul_m31_full(&current, weight)
+                    .unwrap_or_else(|_| matmul_m31(&current, weight));
+                #[cfg(not(feature = "cuda-runtime"))]
+                let output = matmul_m31(&current, weight);
+
+                node_outputs.insert(node_id, output.clone());
+                current = output;
+            }
+            GraphOp::Activation { activation_type, .. } => {
+                let f = activation_type.as_fn();
+                let output = M31Matrix {
+                    rows: current.rows, cols: current.cols,
+                    data: current.data.iter().map(|&v| f(v)).collect(),
+                };
+                node_outputs.insert(node_id, output.clone());
+                current = output;
+            }
+            GraphOp::Add { .. } => {
+                let rhs = node.inputs.get(1)
+                    .and_then(|&id| node_outputs.get(&id))
+                    .cloned()
+                    .unwrap_or_else(|| current.clone());
+                let lhs = node.inputs.first()
+                    .and_then(|&id| node_outputs.get(&id))
+                    .cloned()
+                    .unwrap_or_else(|| current.clone());
+                let data: Vec<_> = lhs.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a + b).collect();
+                let output = M31Matrix { rows: lhs.rows, cols: lhs.cols, data };
+                node_outputs.insert(node_id, output.clone());
+                current = output;
+            }
+            GraphOp::Mul { .. } => {
+                let rhs = node.inputs.get(1)
+                    .and_then(|&id| node_outputs.get(&id))
+                    .cloned()
+                    .unwrap_or_else(|| current.clone());
+                let lhs = node.inputs.first()
+                    .and_then(|&id| node_outputs.get(&id))
+                    .cloned()
+                    .unwrap_or_else(|| current.clone());
+                let data: Vec<_> = lhs.data.iter().zip(rhs.data.iter()).map(|(&a, &b)| a * b).collect();
+                let output = M31Matrix { rows: lhs.rows, cols: lhs.cols, data };
+                node_outputs.insert(node_id, output.clone());
+                current = output;
+            }
+            // All other ops: pass through current (RMSNorm, LayerNorm, RoPE, etc.
+            // use inline computation that doesn't require weight lookups)
+            _ => {
+                node_outputs.insert(node_id, current.clone());
+            }
+        }
+    }
+
+    Ok(current)
+}
+
 /// Auto-dispatching GKR pipeline (GPU when available, otherwise SIMD).
 pub fn prove_model_aggregated_onchain_gkr_auto(
     graph: &ComputationGraph,

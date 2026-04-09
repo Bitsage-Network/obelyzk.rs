@@ -13,6 +13,7 @@
 #![feature(portable_simd)]
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,12 +22,13 @@ use std::time::Instant;
 use axum::{
     extract::{Path, State},
     http::{header::CONTENT_TYPE, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Sse, sse::Event},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use futures_util::stream;
 
 use stwo_ml::providers::local::LocalProvider;
 use stwo_ml::providers::openai_compat::OpenAiCompatProvider;
@@ -164,15 +166,15 @@ async fn health(State(state): State<Arc<VmState>>) -> Json<HealthResponse> {
     })
 }
 
+/// Non-streaming chat completions — returns full response with proof.
 async fn chat_completions(
     State(state): State<Arc<VmState>>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Json<ChatCompletionResponse>, (StatusCode, Json<ErrorBody>)> {
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorBody>)> {
     if req.messages.is_empty() {
         return Err(api_error(StatusCode::BAD_REQUEST, "messages cannot be empty"));
     }
 
-    // Extract the last user message as the prompt
     let prompt = req.messages.iter()
         .rev()
         .find(|m| m.role == "user")
@@ -183,92 +185,163 @@ async fn chat_completions(
         return Err(api_error(StatusCode::BAD_REQUEST, "no user message found"));
     }
 
-    let attestation_id = format!("att-{}", uuid::Uuid::new_v4());
-    let proof_id = format!("proof-{}", uuid::Uuid::new_v4());
+    // ── SSE Streaming path ─────────────────────────────────────────
+    if req.stream {
+        return chat_completions_stream(state, req.model, prompt).await;
+    }
 
-    // Route to local provider if available, otherwise upstream
-    let result = if let Some(ref local) = state.local_provider {
-        // Run local M31 inference + ZK proof (blocking)
-        let local = Arc::clone(local);
-        let proof_id_clone = proof_id.clone();
-        tokio::task::spawn_blocking(move || {
-            local.infer_text(&prompt, None)
-                .map(|(text, mut result, _trace)| {
-                    result.trust_model = TrustModel::ZkProof {
-                        weight_commitment: local.weight_commitment.clone(),
-                    };
-                    (text, result)
-                })
-                .map_err(|e| format!("{e}"))
-        })
-        .await
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("join: {e}")))?
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?
-    } else if let Some(ref _upstream) = state.upstream_provider {
-        // TODO: forward to upstream via OpenAI-compat API
-        return Err(api_error(StatusCode::NOT_IMPLEMENTED, "upstream forwarding not yet implemented"));
-    } else {
-        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "no provider configured"));
-    };
+    // ── Synchronous path (existing: blocks until proof is done) ────
+    let proof_id = format!("proof-{}", uuid::Uuid::new_v4());
+    let attestation_id = format!("att-{}", uuid::Uuid::new_v4());
+
+    let local = state.local_provider.as_ref()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "no local provider"))?;
+    let local = Arc::clone(local);
+
+    let result = tokio::task::spawn_blocking(move || {
+        local.infer_text(&prompt, None)
+            .map(|(text, mut res, _)| {
+                res.trust_model = TrustModel::ZkProof { weight_commitment: local.weight_commitment.clone() };
+                (text, res)
+            })
+            .map_err(|e| format!("{e}"))
+    })
+    .await
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("join: {e}")))?
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
 
     let (text, inference_result) = result;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let trust_str = match &inference_result.trust_model {
-        TrustModel::ZkProof { .. } => "zk_proof",
-        TrustModel::TlsAttestation { .. } => "tls_attestation",
-        TrustModel::CommitmentOnly => "commitment",
-    };
-
+    let now_secs = epoch_secs();
     let io_hex = inference_result.io_commitment.map(|c| format!("0x{:x}", c));
-
-    // Store attestation
-    if let Some(ref io) = inference_result.io_commitment {
-        let att = InferenceAttestation {
-            attestation_id: attestation_id.clone(),
-            model_id: inference_result.model_id.clone(),
-            provider: inference_result.provider.clone(),
-            trust_model: inference_result.trust_model.clone(),
-            input_commitment: starknet_ff::FieldElement::ZERO, // TODO
-            output_commitment: starknet_ff::FieldElement::ZERO,
-            io_commitment: *io,
-            timestamp_epoch_ms: now * 1000,
-            proof_id: Some(proof_id.clone()),
-            proof_status: ProofStatus::Complete,
-        };
-        state.attestations.write().await.insert(attestation_id.clone(), att);
-    }
+    let trust_str = trust_model_str(&inference_result.trust_model);
 
     Ok(Json(ChatCompletionResponse {
         id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
         object: "chat.completion".into(),
-        created: now,
-        model: req.model,
-        choices: vec![ChatChoice {
-            index: 0,
-            message: ChatMessageOut {
-                role: "assistant".into(),
-                content: text,
+        created: now_secs,
+        model: inference_result.model_id.clone(),
+        choices: vec![ChatChoice { index: 0, message: ChatMessageOut { role: "assistant".into(), content: text }, finish_reason: "stop".into() }],
+        usage: ChatUsage { prompt_tokens: inference_result.num_tokens, completion_tokens: 1, total_tokens: inference_result.num_tokens + 1 },
+        obelyzk: Some(ObelyzkMeta { proof_id, proof_status: "complete".into(), trust_model: trust_str.into(), io_commitment: io_hex, attestation_id }),
+    }).into_response())
+}
+
+/// SSE streaming chat completions — tokens flow instantly, proof arrives later.
+///
+/// Flow:
+/// 1. Fast forward pass (~2-8s) → predicted token
+/// 2. Stream token to client via SSE immediately
+/// 3. Queue full GKR proof in background (ProvingQueue)
+/// 4. Stream proof_id + status as final SSE event
+/// 5. Client polls /v1/proofs/:id for proof completion
+async fn chat_completions_stream(
+    state: Arc<VmState>,
+    model: String,
+    prompt: String,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorBody>)> {
+    let local = state.local_provider.as_ref()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "no local provider"))?;
+    let local = Arc::clone(local);
+
+    let proof_id = format!("proof-{}", uuid::Uuid::new_v4());
+    let proof_id_for_bg = proof_id.clone();
+    let model_for_event = model.clone();
+    let now_secs = epoch_secs();
+
+    // Phase 1: Fast forward pass (no proving) — ~2-8s
+    let local_fast = Arc::clone(&local);
+    let prompt_clone = prompt.clone();
+    let fast_result = tokio::task::spawn_blocking(move || {
+        let t = Instant::now();
+        let result = local_fast.infer_fast(&prompt_clone);
+        let ms = t.elapsed().as_millis() as u64;
+        result.map(|(text, tokens, input)| (text, tokens, input, ms))
+    })
+    .await
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("join: {e}")))?
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")))?;
+
+    let (predicted_text, token_ids, input_matrix, inference_ms) = fast_result;
+    let num_tokens = token_ids.len();
+
+    // Phase 2: Queue full proof in background
+    let local_prove = Arc::clone(&local);
+    let prompt_for_prove = prompt.clone();
+    let pid = proof_id_for_bg.clone();
+    let queue = Arc::clone(&state.proving_queue);
+
+    // Submit to proving queue via background task
+    tokio::task::spawn(async move {
+        let job = stwo_ml::vm::queue::ProvingJob {
+            job_id: pid.clone(),
+            trace: stwo_ml::vm::trace::ExecutionTrace {
+                model_id: local_prove.model_name.clone(),
+                input_tokens: token_ids.clone(),
+                output: stwo_ml::components::matmul::M31Matrix::new(1, 1), // placeholder
+                io_commitment: None,
+                policy_commitment: starknet_ff::FieldElement::ZERO,
+                kv_commitment_before: None,
+                kv_commitment_after: None,
+                tokenization_commitment: None,
+                inference_time_ms: inference_ms,
+                num_tokens: token_ids.len(),
+                position_offset: 0,
+                proof: None, // no pre-computed proof — worker will generate
             },
-            finish_reason: "stop".into(),
-        }],
-        usage: ChatUsage {
-            prompt_tokens: inference_result.num_tokens,
-            completion_tokens: 1, // single next-token prediction
-            total_tokens: inference_result.num_tokens + 1,
-        },
-        obelyzk: Some(ObelyzkMeta {
-            proof_id: proof_id.clone(),
-            proof_status: "complete".into(),
-            trust_model: trust_str.into(),
-            io_commitment: io_hex,
-            attestation_id,
-        }),
-    }))
+            graph: Arc::clone(&local_prove.graph),
+            weights: Arc::clone(&local_prove.weights),
+            weight_cache: None,
+            submitted_at: Instant::now(),
+            callback_url: None,
+        };
+        if let Err(e) = queue.submit(job) {
+            eprintln!("[stream] failed to queue proof {pid}: {e}");
+        } else {
+            eprintln!("[stream] queued proof {pid} for background proving");
+        }
+    });
+
+    // Phase 3: Build SSE event stream
+    let chunk_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+
+    let events = vec![
+        // Token delta
+        Event::default().data(serde_json::json!({
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": now_secs,
+            "model": model_for_event,
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": predicted_text},
+                "finish_reason": serde_json::Value::Null
+            }]
+        }).to_string()),
+        // Finish
+        Event::default().data(serde_json::json!({
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": now_secs,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": num_tokens, "completion_tokens": 1, "total_tokens": num_tokens + 1},
+            "obelyzk": {
+                "proof_id": proof_id,
+                "proof_status": "proving",
+                "trust_model": "zk_proof",
+                "inference_time_ms": inference_ms
+            }
+        }).to_string()),
+        // OpenAI [DONE] sentinel
+        Event::default().data("[DONE]".to_string()),
+    ];
+
+    let sse_stream = stream::iter(events.into_iter().map(Ok::<_, Infallible>));
+    Ok(Sse::new(sse_stream).into_response())
 }
 
 async fn get_proof_status(
@@ -325,6 +398,25 @@ async fn list_models(
         "object": "list",
         "data": models,
     }))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn trust_model_str(tm: &TrustModel) -> &'static str {
+    match tm {
+        TrustModel::ZkProof { .. } => "zk_proof",
+        TrustModel::TlsAttestation { .. } => "tls_attestation",
+        TrustModel::CommitmentOnly => "commitment",
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════

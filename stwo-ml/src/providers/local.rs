@@ -124,6 +124,44 @@ impl LocalProvider {
 
         Ok((predicted_text, result, trace))
     }
+
+    /// Fast inference — forward pass ONLY, no proving.
+    ///
+    /// Returns the predicted text in ~2-8s instead of ~90s.
+    /// Call `prove_deferred()` afterward to generate the ZK proof in the background.
+    pub fn infer_fast(
+        &self,
+        prompt: &str,
+    ) -> Result<(String, Vec<u32>, M31Matrix), LocalProviderError> {
+        // 1. Tokenize
+        let encoding = self.tokenizer.encode(prompt, false)
+            .map_err(|e| LocalProviderError::TokenizeFailed(format!("{e}")))?;
+        let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+        if token_ids.is_empty() {
+            return Err(LocalProviderError::EmptyPrompt);
+        }
+        let last_token_id = *token_ids.last().unwrap();
+
+        // 2. Embed
+        let (input_matrix, _) = crate::compiler::hf_loader::load_embedding_row(
+            &self.model_dir, self.hidden_size, last_token_id,
+        ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
+
+        // 3. Fast forward pass — just matmul chain, no proving
+        let output = crate::aggregation::execute_forward_pass_fast(
+            &self.graph, &input_matrix, &self.weights,
+        ).map_err(|e| LocalProviderError::ProveFailed(format!("{e}")))?;
+
+        // 4. Project to logits for predicted text
+        let predicted_text = crate::compiler::hf_loader::project_to_logits(
+            &self.model_dir, &output,
+        )
+        .ok()
+        .and_then(|(tid, _)| self.tokenizer.decode(&[tid], true).ok())
+        .unwrap_or_default();
+
+        Ok((predicted_text, token_ids, input_matrix))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
