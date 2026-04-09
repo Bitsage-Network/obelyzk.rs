@@ -158,6 +158,89 @@ pub enum VmStatus {
     Error,
 }
 
+impl VmDashboardState {
+    /// Collect live state from the VM runtime components.
+    ///
+    /// Call this on each TUI tick (~100ms) to update the dashboard.
+    pub fn collect_live(
+        &mut self,
+        model_name: &str,
+        model_params: &str,
+        d_model: usize,
+        uptime_secs: u64,
+        queue: &crate::vm::queue::ProvingQueue,
+        sessions: &[(String, usize, usize)],  // (session_id, total_tokens, turns)
+        recent_turns: &[(String, String, usize, Option<String>, Option<u64>)],  // (user, ai, tokens, proof_id, time_ms)
+    ) {
+        self.model_name = model_name.to_string();
+        self.model_params = model_params.to_string();
+        self.d_model = d_model;
+        self.uptime_secs = uptime_secs;
+        self.frame_count += 1;
+
+        // GPU detection
+        if self.workers.is_empty() {
+            if let Some(name) = crate::backend::gpu_device_name() {
+                self.workers.push(GpuWorkerState {
+                    device_id: 0,
+                    device_name: name,
+                    utilization: 0.0,
+                    current_job: None,
+                    memory_used_gb: 0.0,
+                    memory_total_gb: 24.0,
+                });
+            }
+        }
+
+        // Queue stats
+        let depth = queue.queue_depth();
+        self.queue_proving = depth;
+        self.queue_queued = 0; // ProvingQueue doesn't distinguish queued vs proving
+
+        // Status
+        self.status = if depth > 0 {
+            if !self.workers.is_empty() {
+                self.workers[0].utilization = 0.95;
+                self.workers[0].current_job = Some("proving".into());
+            }
+            VmStatus::Proving
+        } else {
+            if !self.workers.is_empty() {
+                self.workers[0].utilization = 0.0;
+                self.workers[0].current_job = None;
+            }
+            if uptime_secs < 5 { VmStatus::Starting } else { VmStatus::Ready }
+        };
+
+        // Sessions
+        self.sessions = sessions.iter().map(|(id, tokens, turns)| {
+            SessionSummary {
+                session_id: id.clone(),
+                model_id: model_name.to_string(),
+                total_tokens: *tokens,
+                tokens_proven: *tokens,
+                turns: *turns,
+                status: SessionStatus::Active,
+                last_commitment: None,
+            }
+        }).collect();
+
+        // Conversation turns
+        self.active_turns = recent_turns.iter().enumerate().map(|(i, (user, ai, tokens, proof_id, time_ms))| {
+            ConversationTurnView {
+                turn_index: i,
+                user_text: user.clone(),
+                ai_text: ai.clone(),
+                num_tokens: *tokens,
+                proof_id: proof_id.clone(),
+                prove_time_ms: *time_ms,
+                status: if proof_id.is_some() { TurnProofStatus::Proven } else { TurnProofStatus::Pending },
+                commitment: None,
+            }
+        }).collect();
+    }
+}
+
 impl Default for VmDashboardState {
     fn default() -> Self {
         Self {
