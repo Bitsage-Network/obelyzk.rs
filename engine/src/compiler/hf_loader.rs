@@ -737,7 +737,7 @@ pub fn open_streaming_pipeline(
 ///   up   = input × W_up
 ///   hidden = gate * up
 ///   output = hidden × W_down
-fn build_hf_transformer_graph(config: &TransformerConfig, num_layers: usize) -> (ComputationGraph, Vec<(usize, crate::compiler::graph::MoESlotInfo)>) {
+pub(crate) fn build_hf_transformer_graph(config: &TransformerConfig, num_layers: usize) -> (ComputationGraph, Vec<(usize, crate::compiler::graph::MoESlotInfo)>) {
     use crate::compiler::onnx::NormType;
     let d = config.d_model;
     let d_ff = config.d_ff;
@@ -798,7 +798,7 @@ fn build_hf_transformer_graph(config: &TransformerConfig, num_layers: usize) -> 
 ///   8: MatMul    (down_proj)       → model.layers.{L}.mlp.down_proj.weight
 ///
 /// Plus a final Norm at the end.
-fn build_weight_name_map(
+pub(crate) fn build_weight_name_map(
     _graph: &ComputationGraph,
     num_layers: usize,
     available_tensors: &[(String, usize)],

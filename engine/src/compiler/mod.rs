@@ -36,3 +36,5 @@ pub mod quantize_weights;
 pub mod safetensors;
 #[cfg(feature = "safetensors")]
 pub mod streaming;
+#[cfg(feature = "model-loading")]
+pub mod gguf_loader;
