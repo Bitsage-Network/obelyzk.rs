@@ -2761,8 +2761,58 @@ impl GpuSumcheckExecutor {
             eprintln!("  [gpu-poseidon] GPU Fiat-Shamir enabled for this reduction");
         }
 
+        // GPU Poseidon channel (initialized lazily on first use)
+        let mut gpu_channel: Option<crate::crypto::gpu_poseidon::GpuPoseidonChannel> = None;
+        if use_gpu_poseidon {
+            match crate::crypto::gpu_poseidon::GpuPoseidonChannel::from_cpu(channel, &self.device) {
+                Ok(gc) => { gpu_channel = Some(gc); }
+                Err(e) => { eprintln!("  [gpu-poseidon] Init failed: {e}, falling back to CPU"); }
+            }
+        }
+
         for _ in 0..log_k {
             let mid = cur_n / 2;
+
+            // ── GPU Poseidon path: entire round on-device ──
+            if let Some(ref mut gc) = gpu_channel {
+                // Compute round poly (stay on GPU)
+                let (d_s0, d_s1, d_s2) = self.compute_round_poly_device(&d_f_a_cur, &d_f_b_cur, mid)?;
+
+                // Also download for CPU-side record keeping (round_polys, challenges)
+                let mut s0_raw = [0u32; 4];
+                let mut s1_raw = [0u32; 4];
+                let mut s2_raw = [0u32; 4];
+                self.device.dtoh_sync_copy_into(&d_s0, &mut s0_raw).ok();
+                self.device.dtoh_sync_copy_into(&d_s1, &mut s1_raw).ok();
+                self.device.dtoh_sync_copy_into(&d_s2, &mut s2_raw).ok();
+                let s0 = u32s_to_secure_field(&s0_raw);
+                let s1 = u32s_to_secure_field(&s1_raw);
+                let s2 = u32s_to_secure_field(&s2_raw);
+                let c0 = s0;
+                let c2 = (s2 - s1 - s1 + s0) * inv2;
+                let c1 = s1 - s0 - c2;
+                round_polys.push(crate::components::matmul::RoundPoly { c0, c1, c2 });
+
+                // GPU Fiat-Shamir: mix + draw entirely on device
+                let d_alpha = gc.mix_and_draw_gpu(&d_s0, &d_s1, &d_s2)
+                    .map_err(|e| CudaFftError::KernelExecution(format!("gpu poseidon: {e}")))?;
+
+                // Also update CPU channel to stay in sync (for proof assembly)
+                channel.mix_poly_coeffs(c0, c1, c2);
+                let alpha = channel.draw_qm31();
+                challenges.push(alpha);
+
+                // GPU fold with device-resident challenge
+                let new_a = self.mle_fold_device(&d_f_a_cur, cur_n, &d_alpha)?;
+                let new_b = self.mle_fold_device(&d_f_b_cur, cur_n, &d_alpha)?;
+
+                d_f_a_cur = new_a;
+                d_f_b_cur = new_b;
+                cur_n = mid;
+                continue;
+            }
+
+            // ── CPU Poseidon path (default) ──
 
             // Evaluate round poly at t=0,1,2 on GPU.
             let (s0_raw, s1_raw, s2_raw) = self.compute_round_poly(&d_f_a_cur, &d_f_b_cur, mid)?;
@@ -2770,7 +2820,7 @@ impl GpuSumcheckExecutor {
             let s1 = u32s_to_secure_field(&s1_raw);
             let s2 = u32s_to_secure_field(&s2_raw);
 
-            // Lagrange interpolation: (0, s0), (1, s1), (2, s2) → c0, c1, c2
+            // Lagrange interpolation
             let c0 = s0;
             let c2 = (s2 - s1 - s1 + s0) * inv2;
             let c1 = s1 - s0 - c2;
@@ -2778,7 +2828,7 @@ impl GpuSumcheckExecutor {
             let round_poly = crate::components::matmul::RoundPoly { c0, c1, c2 };
             round_polys.push(round_poly);
 
-            // Fiat-Shamir (CPU path — GPU Poseidon is used when wired via GpuPoseidonChannel)
+            // CPU Fiat-Shamir
             channel.mix_poly_coeffs(c0, c1, c2);
             let alpha = channel.draw_qm31();
             challenges.push(alpha);
@@ -2843,16 +2893,82 @@ impl GpuSumcheckExecutor {
     ///
     /// Equivalent to `compute_round_poly` but returns a device-side buffer
     /// containing the 3 QM31 reduction sums (12 u32 values: s0, s1, s2).
+    /// Compute round poly on GPU, returning results as device-resident CudaSlice.
+    /// Each output is a QM31 = 4 u32 staying on GPU (no download).
     pub fn compute_round_poly_device(
         &self,
-        _d_f_a: &CudaSlice<u32>,
-        _d_f_b: &CudaSlice<u32>,
-        _mid: usize,
-    ) -> Result<CudaSlice<u32>, CudaFftError> {
-        // Stub: device-resident round poly not yet implemented.
-        Err(CudaFftError::KernelCompilation(
-            "GPU compute_round_poly_device not yet implemented".into(),
-        ))
+        d_f_a: &CudaSlice<u32>,
+        d_f_b: &CudaSlice<u32>,
+        mid: usize,
+    ) -> Result<(CudaSlice<u32>, CudaSlice<u32>, CudaSlice<u32>), CudaFftError> {
+        let block_size = 256u32;
+        let grid_size = ((mid as u32) + block_size - 1) / block_size;
+        let n_blocks = grid_size as usize;
+
+        let mut d_block_s0 = unsafe { self.device.alloc::<u32>(n_blocks * 4) }
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
+        let mut d_block_s1 = unsafe { self.device.alloc::<u32>(n_blocks * 4) }
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
+        let mut d_block_s2 = unsafe { self.device.alloc::<u32>(n_blocks * 4) }
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
+
+        let cfg = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 8 * 3 * 4 * 4,
+        };
+
+        unsafe {
+            self.sumcheck_round_fn.clone().launch(
+                cfg,
+                (d_f_a, d_f_b, &mut d_block_s0, &mut d_block_s1, &mut d_block_s2, mid as u32),
+            ).map_err(|e| CudaFftError::KernelExecution(format!("sumcheck_round device: {:?}", e)))?;
+        }
+
+        if n_blocks == 1 {
+            // Single block — results are already the final QM31 values
+            return Ok((d_block_s0, d_block_s1, d_block_s2));
+        }
+
+        // Multi-block: reduce via second kernel
+        let total_partials = 3 * n_blocks * 4;
+        let mut d_partials = unsafe { self.device.alloc::<u32>(total_partials) }
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
+
+        let s0_len = n_blocks * 4;
+        self.device.dtod_copy(&d_block_s0, &mut d_partials.slice_mut(0..s0_len))
+            .map_err(|e| CudaFftError::MemoryTransfer(format!("dtod s0: {:?}", e)))?;
+        self.device.dtod_copy(&d_block_s1, &mut d_partials.slice_mut(s0_len..2 * s0_len))
+            .map_err(|e| CudaFftError::MemoryTransfer(format!("dtod s1: {:?}", e)))?;
+        self.device.dtod_copy(&d_block_s2, &mut d_partials.slice_mut(2 * s0_len..3 * s0_len))
+            .map_err(|e| CudaFftError::MemoryTransfer(format!("dtod s2: {:?}", e)))?;
+
+        let mut d_output = unsafe { self.device.alloc::<u32>(12) }
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
+
+        unsafe {
+            self.sumcheck_reduce_fn.clone().launch(
+                LaunchConfig { grid_dim: (3, 1, 1), block_dim: (block_size, 1, 1), shared_mem_bytes: 256 * 4 * 4 },
+                (&d_partials, &mut d_output, n_blocks as u32),
+            ).map_err(|e| CudaFftError::KernelExecution(format!("reduce device: {:?}", e)))?;
+        }
+
+        // Split d_output[0..12] into 3 CudaSlice of 4 u32 each
+        let mut d_s0: CudaSlice<u32> = self.device.alloc_zeros(4)
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
+        let mut d_s1: CudaSlice<u32> = self.device.alloc_zeros(4)
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
+        let mut d_s2: CudaSlice<u32> = self.device.alloc_zeros(4)
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("{:?}", e)))?;
+
+        self.device.dtod_copy(&d_output.slice(0..4), &mut d_s0)
+            .map_err(|e| CudaFftError::MemoryTransfer(format!("split s0: {:?}", e)))?;
+        self.device.dtod_copy(&d_output.slice(4..8), &mut d_s1)
+            .map_err(|e| CudaFftError::MemoryTransfer(format!("split s1: {:?}", e)))?;
+        self.device.dtod_copy(&d_output.slice(8..12), &mut d_s2)
+            .map_err(|e| CudaFftError::MemoryTransfer(format!("split s2: {:?}", e)))?;
+
+        Ok((d_s0, d_s1, d_s2))
     }
 
     /// Perform a full Fiat-Shamir round on device: hash round poly into channel,
@@ -2880,16 +2996,34 @@ impl GpuSumcheckExecutor {
     ///
     /// Equivalent to `mle_fold` but the challenge is already a device-side buffer.
     /// Returns the folded MLE as a new device allocation of half the size.
+    /// MLE fold on GPU with challenge as device-resident CudaSlice.
+    /// Same as mle_fold() but the challenge stays on GPU (no CPU upload).
     pub fn mle_fold_device(
         &self,
-        _d_input: &CudaSlice<u32>,
-        _cur_n: usize,
-        _d_challenge: &CudaSlice<u32>,
+        d_input: &CudaSlice<u32>,
+        cur_n: usize,
+        d_challenge: &CudaSlice<u32>,
     ) -> Result<CudaSlice<u32>, CudaFftError> {
-        // Stub: device-resident MLE fold not yet implemented.
-        Err(CudaFftError::KernelCompilation(
-            "GPU mle_fold_device not yet implemented".into(),
-        ))
+        let half_n = cur_n / 2;
+        // d_challenge is already on GPU (4 u32 = 1 QM31)
+        let d_output: CudaSlice<u32> = self.device.alloc_zeros(half_n * 4)
+            .map_err(|e| CudaFftError::MemoryAllocation(format!("fold_device: {:?}", e)))?;
+
+        let block_size = 256u32;
+        let grid_size = (half_n as u32 + block_size - 1) / block_size;
+
+        unsafe {
+            self.mle_fold_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_input, d_challenge, &d_output, half_n as u32),
+            ).map_err(|e| CudaFftError::KernelExecution(format!("fold_device: {:?}", e)))?;
+        }
+
+        Ok(d_output)
     }
 
     /// Bulk download sumcheck results from device: round polynomials and challenges.

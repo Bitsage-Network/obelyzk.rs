@@ -50,7 +50,7 @@ impl GpuPoseidonChannel {
         let ptx = cudarc::nvrtc::compile_ptx(kernel_src)
             .map_err(|e| GpuPoseidonError::KernelCompile(format!("{e:?}")))?;
 
-        device.load_ptx(ptx, "poseidon", &["poseidon_permute_kernel"])
+        device.load_ptx(ptx, "poseidon", &["poseidon_permute_kernel", "poseidon_mix_draw_kernel"])
             .map_err(|e| GpuPoseidonError::KernelCompile(format!("{e:?}")))?;
 
         let poseidon_fn = device.get_func("poseidon", "poseidon_permute_kernel")
@@ -98,6 +98,50 @@ impl GpuPoseidonChannel {
         }
         self.hash_count += 1;
         Ok(())
+    }
+
+    /// Fused mix + draw on GPU: mix 3 QM31 poly coefficients, draw QM31 challenge.
+    ///
+    /// Equivalent to CPU's `channel.mix_poly_coeffs(c0,c1,c2); channel.draw_qm31()`.
+    /// Returns the challenge as a CudaSlice<u32> (4 words, stays on GPU).
+    /// Zero CPU round-trip.
+    pub fn mix_and_draw_gpu(
+        &mut self,
+        d_s0: &CudaSlice<u32>,  // QM31 = 4 u32 on GPU
+        d_s1: &CudaSlice<u32>,
+        d_s2: &CudaSlice<u32>,
+    ) -> Result<CudaSlice<u32>, GpuPoseidonError> {
+        // Allocate output for the QM31 challenge (4 u32)
+        let d_challenge: CudaSlice<u32> = self.device.alloc_zeros(4)
+            .map_err(|e| GpuPoseidonError::Memory(format!("alloc challenge: {e:?}")))?;
+
+        unsafe {
+            // Get the mix_draw kernel (compiled alongside poseidon_permute_kernel)
+            let mix_draw_fn = self.device.get_func("poseidon", "poseidon_mix_draw_kernel")
+                .ok_or_else(|| GpuPoseidonError::KernelCompile("poseidon_mix_draw_kernel not found".into()))?;
+
+            mix_draw_fn.launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    &mut self.d_state,
+                    d_s0,
+                    d_s1,
+                    d_s2,
+                    &d_challenge,
+                    &self.d_round_constants,
+                    4u32,   // n_full_first
+                    83u32,  // n_partial
+                    4u32,   // n_full_last
+                ),
+            ).map_err(|e| GpuPoseidonError::Kernel(format!("mix_draw: {e:?}")))?;
+        }
+
+        self.hash_count += 2; // mix + draw = 2 Poseidon permutations
+        Ok(d_challenge)
     }
 
     /// Download GPU state back to CPU channel.
