@@ -21,15 +21,17 @@ No SDK required. The hosted API is live at `https://api.bitsage.network`.
 # Health check (no auth)
 curl https://api.bitsage.network/health
 
-# Prove a model (requires API key — set OBELYSK_API_KEY)
+# Prove from a text prompt — server tokenizes and embeds automatically
+curl -X POST https://api.bitsage.network/api/v1/chat \
+  -H "Authorization: Bearer $OBELYSK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"smollm2-135m","prompt":"Hello world"}'
+
+# Or prove from raw f32 input (advanced)
 curl -X POST https://api.bitsage.network/api/v1/infer \
   -H "Authorization: Bearer $OBELYSK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model_id":"smollm2-135m","input":[1.0,2.0,3.0],"gpu":true}'
-
-# Check on-chain verification count for a model
-starkli call 0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 \
-  get_recursive_verification_count 0x7214ee0e9c30e3e6748651d42f941c4b875a5b0a549223f92471a58585c980
 ```
 
 Auth: pass `Authorization: Bearer <API_KEY>` on every request (env: `OBELYSK_API_KEY`).
@@ -258,7 +260,12 @@ obelysk serve --port 8080 --gpu
 ```
 
 Exposes:
-- `POST /prove` -- submit a proving request
+- `POST /api/v1/chat` -- prove from a text prompt (tokenize + embed + GKR proof)
+- `POST /api/v1/infer` -- prove from raw input or text prompt
+- `POST /api/v1/prove` -- async proving (returns job ID)
+- `POST /api/v1/attest` -- prove + submit to Starknet
+- `GET /api/v1/models` -- list loaded models
+- `GET /api/v1/verify/:hash` -- verify a proof by hash
 - `GET /ws` -- WebSocket endpoint for real-time proof streaming
 - `GET /` -- web dashboard with live proof visualization
 
@@ -285,6 +292,139 @@ The most important configuration options. Full reference: [docs/ENV_VARS.md](doc
 | `STWO_GPU_MERKLE_THRESHOLD` | `4096` | Leaf count threshold for GPU Merkle acceleration |
 | `STWO_WEIGHT_BINDING` | `aggregated` | Weight binding mode: `aggregated`, `individual`, `sequential` |
 | `STWO_PROFILE` | `0` | Enable phase profiling (`1` to activate) |
+
+---
+
+## API Reference
+
+All authenticated endpoints require `Authorization: Bearer <API_KEY>`. Rate limit: 60 req/min.
+
+### `POST /api/v1/chat` — Prove from Text
+
+Tokenizes the prompt, embeds via the model's embedding table, runs the full GKR-proven forward pass, and predicts the next token via lm_head projection.
+
+```bash
+curl -X POST https://api.bitsage.network/api/v1/chat \
+  -H "Authorization: Bearer $OBELYSK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "smollm2-135m",
+    "prompt": "Hello world",
+    "gpu": true,
+    "include_calldata": false
+  }'
+```
+
+**Request:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `model_id` | string | yes | Model name or hex ID |
+| `prompt` | string | yes | Text to tokenize and prove |
+| `gpu` | bool | no | GPU acceleration (default: true) |
+| `include_calldata` | bool | no | Return full proof calldata (default: false) |
+
+**Response:**
+
+```json
+{
+  "proof_id": "proof-174605e2-...",
+  "token_ids": [19556, 905],
+  "num_tokens": 2,
+  "output": [1214124500.0, ...],
+  "output_shape": [1, 576],
+  "predicted_token_id": 19969,
+  "predicted_text": "the",
+  "io_commitment": "0x312c67eb...",
+  "weight_commitment": "0x...",
+  "proof_hash": "0x3d567aa9...",
+  "prove_time_ms": 95523,
+  "calldata_size": 46148,
+  "calldata": null
+}
+```
+
+### `POST /api/v1/infer` — Prove from Text or Raw Input
+
+Synchronous provable inference. Provide either `prompt` (text, server tokenizes) or `input` (raw f32 array).
+
+```bash
+# From text prompt
+curl -X POST https://api.bitsage.network/api/v1/infer \
+  -H "Authorization: Bearer $OBELYSK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"smollm2-135m","prompt":"What is zero knowledge?"}'
+
+# From raw input (576-dim embedding for SmolLM2)
+curl -X POST https://api.bitsage.network/api/v1/infer \
+  -H "Authorization: Bearer $OBELYSK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"smollm2-135m","input":[1.0, 2.0, ...]}'
+```
+
+**Request:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `model_id` | string | yes | Model name or hex ID |
+| `prompt` | string | one of | Text prompt (mutually exclusive with `input`) |
+| `input` | float[] | one of | Raw f32 array matching model input shape |
+| `gpu` | bool | no | GPU acceleration (default: true) |
+| `include_output` | bool | no | Include raw output values (default: true) |
+| `include_calldata` | bool | no | Return full proof calldata (default: false) |
+
+**Response:**
+
+```json
+{
+  "proof_id": "proof-292699ba-...",
+  "output": [1214124500.0, ...],
+  "output_shape": [1, 576],
+  "io_commitment": "0x3186b7aa...",
+  "weight_commitment": "0x...",
+  "proof_hash": "0x20d2d7fd...",
+  "verify_url": "/api/v1/verify/:proof_hash",
+  "num_proven_layers": 211,
+  "prove_time_ms": 96526,
+  "estimated_gas": 9729600,
+  "calldata_size": 46148
+}
+```
+
+### `POST /api/v1/attest` — Prove + Submit On-Chain
+
+Same as `/infer` but submits the recursive STARK proof to Starknet after proving. Returns TX hash.
+
+### `GET /api/v1/models` — List Models
+
+```bash
+curl https://api.bitsage.network/api/v1/models \
+  -H "Authorization: Bearer $OBELYSK_API_KEY"
+```
+
+### `GET /api/v1/verify/:proof_hash` — Verify Proof
+
+```bash
+curl https://api.bitsage.network/api/v1/verify/0x3d567aa9... \
+  -H "Authorization: Bearer $OBELYSK_API_KEY"
+```
+
+### `GET /health` — Health Check (No Auth)
+
+```bash
+curl https://api.bitsage.network/health
+```
+
+### Per-Token Proving Time
+
+Benchmarked end-to-end on the live hosted API (April 2026):
+
+| Endpoint | Prompt | Model | GPU | Prove Time |
+|----------|--------|-------|-----|------------|
+| `/api/v1/chat` | "Hello world" | SmolLM2-135M (30L) | A10G | **95.5s** |
+| `/api/v1/infer` | "What is zero knowledge?" | SmolLM2-135M (30L) | A10G | **96.5s** |
+
+The proving time covers: tokenization + embedding extraction + full 30-layer forward pass + GKR sumcheck proof generation + unified STARK. The recursive STARK compression (~3.5s additional) is not included in these measurements.
 
 ---
 
