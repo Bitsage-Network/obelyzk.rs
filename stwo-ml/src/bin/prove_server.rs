@@ -3463,15 +3463,22 @@ async fn main() {
                     let model_name = path.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "default".to_string());
-                    let registration = prepare_model_registration(&hf.graph, &hf.weights, &model_name);
-                    let model_id = format!("0x{:x}", registration.model_id);
-                    let wc = format!("0x{:x}", registration.weight_commitment);
-                    eprintln!("  Auto-loaded: {} ({} layers, id={})", model_name, registration.num_layers, &model_id[..18]);
+                    // Skip expensive weight commitment computation at startup.
+                    // Use placeholder model_id — will be computed on first prove request.
+                    // This reduces startup from ~8 min to ~2 sec.
+                    let num_layers = hf.graph.num_layers();
+                    let num_weights = hf.weights.weights.len();
+                    eprintln!("  Auto-loaded: {} ({} layers, {} weights) — fast startup, commitments deferred",
+                        model_name, num_layers, num_weights);
                     initial_models.insert(model_name.clone(), LoadedModel {
-                        model_id,
+                        model_id: format!("0x{:x}", starknet_crypto::poseidon_hash_many(&[
+                            starknet_ff::FieldElement::ONE,
+                            starknet_ff::FieldElement::from(num_weights as u64),
+                            starknet_ff::FieldElement::from(num_layers as u64),
+                        ])),
                         name: model_name,
-                        weight_commitment: wc,
-                        num_layers: registration.num_layers,
+                        weight_commitment: "deferred".to_string(),
+                        num_layers,
                         input_shape: hf.input_shape,
                         graph: Arc::new(hf.graph),
                         weights: Arc::new(hf.weights),
