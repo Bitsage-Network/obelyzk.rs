@@ -1815,7 +1815,47 @@ dependencies = [
 ]
 
 [[package]]
-name = "stwo"
+name = "stwo-air-utils"
+version = "2.0.0"
+dependencies = [
+ "bytemuck",
+ "itertools 0.12.1",
+ "rayon",
+ "stwo-air-utils-derive",
+ "stwo-gpu",
+]
+
+[[package]]
+name = "stwo-air-utils-derive"
+version = "2.0.0"
+dependencies = [
+ "itertools 0.13.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
+
+[[package]]
+name = "stwo-examples"
+version = "2.0.0"
+dependencies = [
+ "criterion",
+ "educe",
+ "itertools 0.12.1",
+ "ndarray",
+ "num-traits",
+ "rand",
+ "rayon",
+ "serde",
+ "stwo-gpu",
+ "stwo-gpu-constraint-framework",
+ "test-log",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "stwo-gpu"
 version = "2.0.0"
 dependencies = [
  "aes-gcm",
@@ -1850,28 +1890,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "stwo-air-utils"
-version = "2.0.0"
-dependencies = [
- "bytemuck",
- "itertools 0.12.1",
- "rayon",
- "stwo",
- "stwo-air-utils-derive",
-]
-
-[[package]]
-name = "stwo-air-utils-derive"
-version = "2.0.0"
-dependencies = [
- "itertools 0.13.0",
- "proc-macro2",
- "quote",
- "syn 2.0.104",
-]
-
-[[package]]
-name = "stwo-constraint-framework"
+name = "stwo-gpu-constraint-framework"
 version = "2.0.0"
 dependencies = [
  "hashbrown 0.15.4",
@@ -1879,28 +1898,9 @@ dependencies = [
  "num-traits",
  "rand",
  "rayon",
- "stwo",
+ "stwo-gpu",
  "stwo-std-shims",
  "tracing",
-]
-
-[[package]]
-name = "stwo-examples"
-version = "2.0.0"
-dependencies = [
- "criterion",
- "educe",
- "itertools 0.12.1",
- "ndarray",
- "num-traits",
- "rand",
- "rayon",
- "serde",
- "stwo",
- "stwo-constraint-framework",
- "test-log",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1918,8 +1918,8 @@ dependencies = [
  "serde_json",
  "starknet-crypto",
  "starknet-ff",
- "stwo",
- "stwo-constraint-framework",
+ "stwo-gpu",
+ "stwo-gpu-constraint-framework",
  "thiserror",
  "tracing",
  "tract-onnx",

@@ -1,9 +1,10 @@
 [package]
-name = "stwo"
+name = "stwo-gpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core library implementing the Circle STARK prover and verifier"
+description = "GPU-accelerated Circle STARK prover and verifier — ObelyZK fork of STWO with CUDA/Metal backend"
+repository = "https://github.com/Bitsage-Network/obelyzk.rs"
 
 [features]
 default = ["std"]

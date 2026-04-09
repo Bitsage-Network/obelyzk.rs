@@ -18,8 +18,8 @@ safetensors = ["dep:safetensors", "dep:memmap2"]
 model-loading = ["onnx", "safetensors"]
 
 [dependencies]
-stwo = { path = "../stwo", features = ["prover"] }
-stwo-constraint-framework = { path = "../constraint-framework", features = ["prover"] }
+stwo = { package = "stwo-gpu", path = "../stwo", features = ["prover"] }
+stwo-constraint-framework = { package = "stwo-gpu-constraint-framework", path = "../constraint-framework", features = ["prover"] }
 tracing = "0.1"
 thiserror = "2"
 itertools = "0.12"

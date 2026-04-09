@@ -38,8 +38,8 @@ tui = ["dep:ratatui", "dep:crossterm", "serde", "dep:serde_json", "dep:ureq"]
 metal = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
-stwo = { path = "../stwo-gpu/crates/stwo", features = ["prover"] }
-stwo-constraint-framework = { path = "../stwo-gpu/crates/constraint-framework", features = ["prover"] }
+stwo = { package = "stwo-gpu", path = "../stwo-gpu/crates/stwo", features = ["prover"] }
+stwo-constraint-framework = { package = "stwo-gpu-constraint-framework", path = "../stwo-gpu/crates/constraint-framework", features = ["prover"] }
 tracing = "0.1"
 thiserror = "2"
 itertools = "0.12"
