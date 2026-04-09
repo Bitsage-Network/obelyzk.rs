@@ -1558,11 +1558,13 @@ pub fn prove_gkr_with_cache(
 
     // Cache GPU device names once before the layer loop — discover_devices() is a
     // syscall that queries NVML/CUDA; calling it per-layer adds measurable overhead.
-    #[cfg(all(feature = "proof-stream", feature = "cuda-runtime"))]
+    #[cfg(all(feature = "proof-stream", feature = "cuda-runtime", feature = "multi-gpu"))]
     let gkr_gpu_info: Vec<(u32, String, u64)> = crate::multi_gpu::discover_devices()
         .iter()
         .map(|d| (d.ordinal, d.name.clone(), d.total_memory))
         .collect();
+    #[cfg(all(feature = "proof-stream", feature = "cuda-runtime", not(feature = "multi-gpu")))]
+    let gkr_gpu_info: Vec<(u32, String, u64)> = vec![(0, "GPU-0".to_string(), 0)];
 
     // Deferred claims from DAG Add/Mul layers (skip branches needing separate proofs).
     // Each entry: (rhs_claim, rhs_layer_idx_in_circuit)
@@ -2886,11 +2888,13 @@ pub fn prove_gkr_gpu_with_cache(
     });
 
     // Cache GPU device names once — discover_devices() queries NVML per call.
-    #[cfg(feature = "proof-stream")]
+    #[cfg(all(feature = "proof-stream", feature = "multi-gpu"))]
     let gkr_gpu_info: Vec<(u32, String, u64)> = crate::multi_gpu::discover_devices()
         .iter()
         .map(|d| (d.ordinal, d.name.clone(), d.total_memory))
         .collect();
+    #[cfg(all(feature = "proof-stream", not(feature = "multi-gpu")))]
+    let gkr_gpu_info: Vec<(u32, String, u64)> = vec![(0, "GPU-0".to_string(), 0)];
 
     let total_work_layers = circuit
         .layers
@@ -3874,11 +3878,13 @@ pub fn prove_gkr_decode_gpu_with_cache(
     });
 
     // Cache GPU device names once for proof-stream events.
-    #[cfg(feature = "proof-stream")]
+    #[cfg(all(feature = "proof-stream", feature = "multi-gpu"))]
     let gkr_gpu_info: Vec<(u32, String, u64)> = crate::multi_gpu::discover_devices()
         .iter()
         .map(|d| (d.ordinal, d.name.clone(), d.total_memory))
         .collect();
+    #[cfg(all(feature = "proof-stream", not(feature = "multi-gpu")))]
+    let gkr_gpu_info: Vec<(u32, String, u64)> = vec![(0, "GPU-0".to_string(), 0)];
 
     let total_work_layers = circuit
         .layers
