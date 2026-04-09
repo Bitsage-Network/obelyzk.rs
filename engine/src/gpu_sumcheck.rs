@@ -1150,6 +1150,21 @@ extern "C" __global__ void combine_blocks_kernel(
 }
 "#;
 
+// =============================================================================
+// Poseidon Hades Permutation CUDA Kernel (felt252 arithmetic)
+// =============================================================================
+
+/// CUDA kernel for Starknet Poseidon (Hades permutation) over felt252.
+///
+/// Implements 254-bit modular arithmetic (add, sub, mul, pow7) and the
+/// full 99-round Hades permutation (8 full + 83 partial + 8 full).
+///
+/// This kernel runs single-threaded per hash (Poseidon is sequential).
+/// The win is keeping data on GPU — eliminating CPU↔GPU sync barriers
+/// during the sumcheck loop.
+#[cfg(feature = "cuda-runtime")]
+const POSEIDON_CUDA_KERNEL: &str = include_str!("cuda/poseidon_hades.cu");
+
 /// GPU-accelerated M31 vector-matrix multiply for the forward pass.
 ///
 /// Replaces CPU `matmul_m31` for the common case of m=1 (single-row input).
