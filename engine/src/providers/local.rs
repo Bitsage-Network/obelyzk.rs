@@ -221,30 +221,24 @@ impl LocalProvider {
             self.tokenizer.token_to_id("<|end|>").unwrap_or(u32::MAX),
         ];
 
-        // Phase 1: Prefill — embed ALL prompt tokens as a batch
-        // This gives the model full context for the first prediction.
-        let input_matrix = crate::compiler::hf_loader::load_embedding_batch(
-            &self.model_dir, self.hidden_size, &prompt_ids,
+        // Phase 1: Prefill — embed the LAST prompt token and run FULL proving path
+        // The full path includes attention, norms, activations — all correct.
+        let last_token_id = *prompt_ids.last().unwrap();
+        let (input_matrix, _) = crate::compiler::hf_loader::load_embedding_row(
+            &self.model_dir, self.hidden_size, last_token_id,
         ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
 
-        // Reshape graph for the prompt length
-        let prefill_graph = self.graph.with_seq_len(prompt_ids.len());
+        // Run the FULL proving path (not the fast shortcut)
+        // This includes attention, RMSNorm, activations — produces correct output
+        let proof = crate::aggregation::prove_model_pure_gkr_auto_with_cache(
+            &self.graph, &input_matrix, &self.weights,
+            self.weight_cache.as_ref(), None,
+        ).map_err(|e| LocalProviderError::ProveFailed(format!("prefill prove: {e}")))?;
 
-        // Run prefill forward pass (full context)
-        let output = crate::aggregation::execute_forward_pass_fast(
-            &prefill_graph, &input_matrix, &self.weights,
-        ).map_err(|e| LocalProviderError::ProveFailed(format!("prefill: {e}")))?;
-
-        // Get first prediction from the last position's output row
-        let last_row_start = (output.rows - 1) * output.cols;
-        let last_row = M31Matrix {
-            rows: 1,
-            cols: output.cols,
-            data: output.data[last_row_start..last_row_start + output.cols].to_vec(),
-        };
+        let output = &proof.execution.output;
 
         let (mut next_id, _) = crate::compiler::hf_loader::project_to_logits(
-            &self.model_dir, &last_row,
+            &self.model_dir, output,
         ).map_err(|e| LocalProviderError::ProveFailed(format!("logits: {e}")))?;
 
         let mut generated_ids: Vec<u32> = Vec::new();
@@ -264,17 +258,18 @@ impl LocalProvider {
             generated_text.push_str(&token_text);
             on_token(&token_text, next_id, step);
 
-            // Embed the predicted token and forward pass for next prediction
+            // Embed the predicted token and run FULL proving path for next prediction
             let (token_input, _) = crate::compiler::hf_loader::load_embedding_row(
                 &self.model_dir, self.hidden_size, next_id,
             ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
 
-            let decode_output = crate::aggregation::execute_forward_pass_fast(
+            let decode_proof = crate::aggregation::prove_model_pure_gkr_auto_with_cache(
                 &self.graph, &token_input, &self.weights,
+                self.weight_cache.as_ref(), None,
             ).map_err(|e| LocalProviderError::ProveFailed(format!("decode step {step}: {e}")))?;
 
             let (predicted, _) = crate::compiler::hf_loader::project_to_logits(
-                &self.model_dir, &decode_output,
+                &self.model_dir, &decode_proof.execution.output,
             ).map_err(|e| LocalProviderError::ProveFailed(format!("logits step {step}: {e}")))?;
 
             next_id = predicted;

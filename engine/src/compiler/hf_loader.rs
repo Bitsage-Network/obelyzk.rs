@@ -439,43 +439,49 @@ impl HfConfig {
         let json: serde_json::Value = serde_json::from_str(&contents)
             .map_err(|e| OnnxError::ParseError(format!("Invalid config.json: {e}")))?;
 
+        // Support nested config (Qwen3.5, multimodal models with text_config)
+        // Try root-level fields first, fall back to text_config sub-object
+        let tc = if json["text_config"].is_object() { &json["text_config"] } else { &json };
+
+        // Helper: read u64 from tc first, then json root as fallback
+        let get_u64 = |key: &str| -> Option<u64> {
+            tc[key].as_u64().or_else(|| json[key].as_u64())
+        };
+        let get_str = |key: &str| -> Option<&str> {
+            tc[key].as_str().or_else(|| json[key].as_str())
+        };
+
         Ok(Self {
-            model_type: json["model_type"].as_str().unwrap_or("unknown").to_string(),
-            hidden_size: json["hidden_size"]
-                .as_u64()
+            model_type: json["model_type"].as_str()
+                .or_else(|| tc["model_type"].as_str())
+                .unwrap_or("unknown").to_string(),
+            hidden_size: get_u64("hidden_size")
                 .ok_or_else(|| OnnxError::ParseError("missing hidden_size".into()))?
                 as usize,
-            num_attention_heads: json["num_attention_heads"]
-                .as_u64()
+            num_attention_heads: get_u64("num_attention_heads")
                 .ok_or_else(|| OnnxError::ParseError("missing num_attention_heads".into()))?
                 as usize,
-            num_key_value_heads: json["num_key_value_heads"]
-                .as_u64()
-                .unwrap_or(json["num_attention_heads"].as_u64().unwrap_or(1))
+            num_key_value_heads: get_u64("num_key_value_heads")
+                .unwrap_or(get_u64("num_attention_heads").unwrap_or(1))
                 as usize,
-            intermediate_size: json["intermediate_size"]
-                .as_u64()
+            intermediate_size: get_u64("intermediate_size")
                 .ok_or_else(|| OnnxError::ParseError("missing intermediate_size".into()))?
                 as usize,
-            num_hidden_layers: json["num_hidden_layers"]
-                .as_u64()
+            num_hidden_layers: get_u64("num_hidden_layers")
                 .ok_or_else(|| OnnxError::ParseError("missing num_hidden_layers".into()))?
                 as usize,
-            vocab_size: json["vocab_size"].as_u64().unwrap_or(32000) as usize,
-            hidden_act: json["hidden_act"]
-                .as_str()
-                .or_else(|| json["hidden_activation"].as_str())
+            vocab_size: get_u64("vocab_size").unwrap_or(32000) as usize,
+            hidden_act: get_str("hidden_act")
+                .or_else(|| get_str("hidden_activation"))
                 .unwrap_or("silu")
                 .to_string(),
-            max_position_embeddings: json["max_position_embeddings"].as_u64().unwrap_or(2048)
+            max_position_embeddings: get_u64("max_position_embeddings").unwrap_or(2048)
                 as usize,
-            num_experts: json["num_local_experts"]
-                .as_u64()
-                .or_else(|| json["num_experts"].as_u64())
+            num_experts: get_u64("num_local_experts")
+                .or_else(|| get_u64("num_experts"))
                 .unwrap_or(0) as usize,
-            num_experts_per_tok: json["num_experts_per_tok"]
-                .as_u64()
-                .or_else(|| json["num_experts_per_token"].as_u64())
+            num_experts_per_tok: get_u64("num_experts_per_tok")
+                .or_else(|| get_u64("num_experts_per_token"))
                 .unwrap_or(0) as usize,
         })
     }
