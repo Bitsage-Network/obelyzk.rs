@@ -183,12 +183,30 @@ struct StoredProof {
     created_at_epoch_ms: u64,
 }
 
+/// In-memory session state for a multi-turn conversation with KV-cache.
+struct ChatSession {
+    session_id: String,
+    model_id: String,
+    /// KV-cache accumulating K/V projections from all prior tokens.
+    kv_cache: stwo_ml::components::attention::ModelKVCache,
+    /// Incremental Merkle commitment over the KV-cache.
+    kv_commitment: stwo_ml::aggregation::IncrementalKVCommitment,
+    /// All token IDs seen so far.
+    token_history: Vec<u32>,
+    /// Timestamp of last activity (for TTL eviction).
+    last_accessed: Instant,
+    /// Total tokens proven so far.
+    tokens_proven: usize,
+}
+
 struct AppState {
     jobs: RwLock<HashMap<String, ProveJob>>,
     privacy_jobs: RwLock<HashMap<String, PrivacyJob>>,
     models: RwLock<HashMap<String, LoadedModel>>,
     /// Proof storage: proof_hash → StoredProof. Populated by /api/v1/infer.
     proofs: RwLock<HashMap<String, StoredProof>>,
+    /// Active chat sessions: session_id → ChatSession (KV-cache + commitment).
+    sessions: RwLock<HashMap<String, ChatSession>>,
     started_at: Instant,
     /// API key for bearer token authentication. None = open access (dev mode).
     api_key: Option<String>,
@@ -361,6 +379,9 @@ struct ChatRequest {
     /// If true, return full proof calldata. Default: false.
     #[serde(default)]
     include_calldata: bool,
+    /// Continue an existing session (decode step). Omit for new session (prefill).
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 /// Response from the chat endpoint — includes tokenization info and predicted next token.
@@ -384,6 +405,14 @@ struct ChatResponse {
     prove_time_ms: u64,
     calldata_size: usize,
     calldata: Option<Vec<String>>,
+    /// Session ID for subsequent decode calls.
+    session_id: String,
+    /// "prefill" (first request) or "decode" (subsequent).
+    mode: String,
+    /// Current KV-cache commitment (hex felt252).
+    kv_cache_commitment: Option<String>,
+    /// Number of tokens cached so far.
+    cached_tokens: usize,
 }
 
 // =============================================================================
@@ -1878,6 +1907,10 @@ async fn infer(
 // =============================================================================
 
 /// Provable inference from a text prompt: tokenize → embed → GKR prove → predict next token.
+///
+/// Two modes:
+/// - **Prefill** (no `session_id`): Full forward pass, creates a new KV-cache session.
+/// - **Decode** (`session_id` present): Incremental single-token proving using cached K/V.
 async fn chat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
@@ -1906,7 +1939,7 @@ async fn chat(
         Json(ErrorResponse { error: "Model has no model_dir — cannot embed tokens".into() }),
     ))?;
 
-    // 1. Tokenize
+    // Tokenize the prompt
     let encoding = tokenizer.encode(req.prompt.as_str(), false).map_err(|e| (
         StatusCode::BAD_REQUEST,
         Json(ErrorResponse { error: format!("Tokenization failed: {e}") }),
@@ -1915,17 +1948,8 @@ async fn chat(
     if token_ids.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Prompt produced zero tokens".into() })));
     }
-    let last_token_id = *token_ids.last().unwrap();
     let num_tokens = token_ids.len();
-
-    // 2. Embed — zero-copy mmap extraction of the last token's embedding row
     let (_in_rows, in_cols) = model.input_shape;
-    let (input_matrix, _vocab_size) = stwo_ml::compiler::hf_loader::load_embedding_row(
-        model_dir, in_cols, last_token_id,
-    ).map_err(|e| (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error: format!("Embedding lookup failed: {e}") }),
-    ))?;
 
     let graph = Arc::clone(&model.graph);
     let weights = Arc::clone(&model.weights);
@@ -1934,101 +1958,224 @@ async fn chat(
     let tokenizer_clone = Arc::clone(tokenizer);
     let model_dir_clone = model_dir.clone();
     let model_id_for_storage = req.model_id.clone();
+    let model_id_for_session = req.model_id.clone();
 
-    // Drop read lock before blocking work
-    drop(models);
+    // ── Decode path: continue existing session ──────────────────────────
+    if let Some(ref session_id) = req.session_id {
+        // Take ownership of the session (prevents concurrent mutation)
+        let mut session = state.sessions.write().await.remove(session_id).ok_or_else(|| (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: format!("Session '{}' not found or expired", session_id) }),
+        ))?;
 
-    // 3. Prove (blocking — CPU/GPU heavy)
-    let result = tokio::task::spawn_blocking(move || {
-        let t_start = Instant::now();
-        let proof_result = stwo_ml::aggregation::prove_model_aggregated_onchain_gkr_auto(
-            &graph, &input_matrix, &weights,
-        );
+        // For decode, embed just the last token (single-token input)
+        let last_token_id = *token_ids.last().unwrap();
+        let (input_matrix, _) = stwo_ml::compiler::hf_loader::load_embedding_row(
+            model_dir, in_cols, last_token_id,
+        ).map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("Embedding lookup failed: {e}") }),
+        ))?;
 
-        match proof_result {
-            Ok(proof) => {
-                let prove_time_ms = t_start.elapsed().as_millis() as u64;
-                let output_matrix = &proof.execution.output;
-                let output_f32: Vec<f32> = output_matrix.data.iter().map(|v| v.0 as f32).collect();
+        let sid = session_id.clone();
+        drop(models);
 
-                // 4. Project through lm_head for next-token prediction
-                let (predicted_token_id, predicted_text) =
-                    match stwo_ml::compiler::hf_loader::project_to_logits(&model_dir_clone, output_matrix) {
-                        Ok((tid, _score)) => {
-                            let text = tokenizer_clone.decode(&[tid], true).ok();
-                            (Some(tid), text)
-                        }
-                        Err(_) => (None, None),
+        let result = tokio::task::spawn_blocking(move || {
+            let t_start = Instant::now();
+            let proof_result = stwo_ml::aggregation::prove_model_pure_gkr_decode_step_incremental(
+                &graph,
+                &input_matrix,
+                &weights,
+                &mut session.kv_cache,
+                &mut session.kv_commitment,
+                None, // weight_cache
+                None, // policy
+            );
+
+            match proof_result {
+                Ok((proof, new_kv_felt)) => {
+                    let prove_time_ms = t_start.elapsed().as_millis() as u64;
+                    let output_matrix = &proof.execution.output;
+                    let output_f32: Vec<f32> = output_matrix.data.iter().map(|v| v.0 as f32).collect();
+
+                    let (predicted_token_id, predicted_text) =
+                        match stwo_ml::compiler::hf_loader::project_to_logits(&model_dir_clone, output_matrix) {
+                            Ok((tid, _)) => (Some(tid), tokenizer_clone.decode(&[tid], true).ok()),
+                            Err(_) => (None, None),
+                        };
+
+                    let io_hex = format!("0x{:x}", proof.io_commitment);
+                    let proof_hash = format!("0x{:x}",
+                        starknet_crypto::poseidon_hash_many(&[proof.io_commitment, proof.layer_chain_commitment]));
+                    let kv_hex = format!("0x{:x}", new_kv_felt);
+
+                    let gkr_proof = proof.gkr_proof.as_ref();
+                    let calldata_felts = if let Some(gkr) = gkr_proof {
+                        let mut felts = Vec::new();
+                        stwo_ml::cairo_serde::serialize_gkr_proof_data_only(gkr, &mut felts);
+                        felts
+                    } else { Vec::new() };
+                    let calldata_size = calldata_felts.len();
+                    let calldata = if include_calldata {
+                        Some(calldata_felts.iter().map(|f| format!("0x{:x}", f)).collect())
+                    } else { None };
+
+                    // Update session
+                    session.token_history.extend_from_slice(&token_ids);
+                    session.tokens_proven += num_tokens;
+                    session.last_accessed = Instant::now();
+                    let cached = session.tokens_proven;
+
+                    Ok((ChatResponse {
+                        proof_id: format!("proof-{}", uuid::Uuid::new_v4()),
+                        token_ids, num_tokens,
+                        output: Some(output_f32),
+                        output_shape: (output_matrix.rows, output_matrix.cols),
+                        predicted_token_id, predicted_text,
+                        io_commitment: io_hex, weight_commitment,
+                        proof_hash: proof_hash.clone(),
+                        prove_time_ms, calldata_size, calldata,
+                        session_id: sid.clone(),
+                        mode: "decode".to_string(),
+                        kv_cache_commitment: Some(kv_hex),
+                        cached_tokens: cached,
+                    }, session))
+                }
+                Err(e) => Err(format!("Decode proving failed: {e}")),
+            }
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Task join error: {e}") })))?;
+
+        match result {
+            Ok((response, session)) => {
+                // Re-insert session
+                state.sessions.write().await.insert(response.session_id.clone(), session);
+                let stored = StoredProof {
+                    proof_hash: response.proof_hash.clone(), model_id: model_id_for_storage,
+                    io_commitment: response.io_commitment.clone(), weight_commitment: response.weight_commitment.clone(),
+                    num_proven_layers: 0, prove_time_ms: response.prove_time_ms, calldata_size: response.calldata_size,
+                    created_at_epoch_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                };
+                state.proofs.write().await.insert(response.proof_hash.clone(), stored);
+                Ok(Json(response))
+            }
+            Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: err }))),
+        }
+    } else {
+        // ── Prefill path: new conversation ──────────────────────────────
+        // Embed the last token for the single-row prefill
+        let last_token_id = *token_ids.last().unwrap();
+        let (input_matrix, _) = stwo_ml::compiler::hf_loader::load_embedding_row(
+            model_dir, in_cols, last_token_id,
+        ).map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("Embedding lookup failed: {e}") }),
+        ))?;
+
+        let new_session_id = format!("ses-{}", Uuid::new_v4());
+        let sid = new_session_id.clone();
+        drop(models);
+
+        let result = tokio::task::spawn_blocking(move || {
+            let t_start = Instant::now();
+
+            // Create fresh KV-cache and run prefill with caching
+            let mut kv_cache = stwo_ml::components::attention::ModelKVCache::new();
+            let proof_result = stwo_ml::aggregation::prove_model_pure_gkr_prefill_with_cache(
+                &graph, &input_matrix, &weights, &mut kv_cache, None, None,
+            );
+
+            match proof_result {
+                Ok(proof) => {
+                    let prove_time_ms = t_start.elapsed().as_millis() as u64;
+                    let output_matrix = &proof.execution.output;
+                    let output_f32: Vec<f32> = output_matrix.data.iter().map(|v| v.0 as f32).collect();
+
+                    let (predicted_token_id, predicted_text) =
+                        match stwo_ml::compiler::hf_loader::project_to_logits(&model_dir_clone, output_matrix) {
+                            Ok((tid, _)) => (Some(tid), tokenizer_clone.decode(&[tid], true).ok()),
+                            Err(_) => (None, None),
+                        };
+
+                    let io_hex = format!("0x{:x}", proof.io_commitment);
+                    let proof_hash = format!("0x{:x}",
+                        starknet_crypto::poseidon_hash_many(&[proof.io_commitment, proof.layer_chain_commitment]));
+
+                    // Build incremental commitment from the populated KV-cache
+                    let capacity = (num_tokens + 64).next_power_of_two();
+                    let kv_commitment = stwo_ml::aggregation::IncrementalKVCommitment::from_kv_cache(&kv_cache, capacity);
+                    let kv_hex = format!("0x{:x}", kv_commitment.commitment());
+
+                    let gkr_proof = proof.gkr_proof.as_ref();
+                    let calldata_felts = if let Some(gkr) = gkr_proof {
+                        let mut felts = Vec::new();
+                        stwo_ml::cairo_serde::serialize_gkr_proof_data_only(gkr, &mut felts);
+                        felts
+                    } else { Vec::new() };
+                    let calldata_size = calldata_felts.len();
+                    let calldata = if include_calldata {
+                        Some(calldata_felts.iter().map(|f| format!("0x{:x}", f)).collect())
+                    } else { None };
+
+                    let session = ChatSession {
+                        session_id: sid.clone(),
+                        model_id: model_id_for_session,
+                        kv_cache,
+                        kv_commitment,
+                        token_history: token_ids.clone(),
+                        last_accessed: Instant::now(),
+                        tokens_proven: num_tokens,
                     };
 
-                let io_hex = format!("0x{:x}", proof.io_commitment);
-                let proof_hash = format!("0x{:x}",
-                    starknet_crypto::poseidon_hash_many(&[
-                        proof.io_commitment,
-                        proof.layer_chain_commitment,
-                    ])
-                );
-
-                let gkr_proof = proof.gkr_proof.as_ref();
-                let calldata_felts = if let Some(gkr) = gkr_proof {
-                    let mut felts = Vec::new();
-                    stwo_ml::cairo_serde::serialize_gkr_proof_data_only(gkr, &mut felts);
-                    felts
-                } else {
-                    Vec::new()
-                };
-                let calldata_size = calldata_felts.len();
-                let calldata = if include_calldata {
-                    Some(calldata_felts.iter().map(|f| format!("0x{:x}", f)).collect())
-                } else {
-                    None
-                };
-
-                Ok(ChatResponse {
-                    proof_id: format!("proof-{}", uuid::Uuid::new_v4()),
-                    token_ids,
-                    num_tokens,
-                    output: Some(output_f32),
-                    output_shape: (output_matrix.rows, output_matrix.cols),
-                    predicted_token_id,
-                    predicted_text,
-                    io_commitment: io_hex,
-                    weight_commitment,
-                    proof_hash: proof_hash.clone(),
-                    prove_time_ms,
-                    calldata_size,
-                    calldata,
-                })
+                    Ok((ChatResponse {
+                        proof_id: format!("proof-{}", uuid::Uuid::new_v4()),
+                        token_ids, num_tokens,
+                        output: Some(output_f32),
+                        output_shape: (output_matrix.rows, output_matrix.cols),
+                        predicted_token_id, predicted_text,
+                        io_commitment: io_hex, weight_commitment,
+                        proof_hash: proof_hash.clone(),
+                        prove_time_ms, calldata_size, calldata,
+                        session_id: sid,
+                        mode: "prefill".to_string(),
+                        kv_cache_commitment: Some(kv_hex),
+                        cached_tokens: num_tokens,
+                    }, session))
+                }
+                Err(e) => Err(format!("Prefill proving failed: {e}")),
             }
-            Err(e) => Err(format!("Proving failed: {e}")),
-        }
-    })
-    .await
-    .map_err(|e| (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error: format!("Task join error: {e}") }),
-    ))?;
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Task join error: {e}") })))?;
 
-    match result {
-        Ok(response) => {
-            // Store proof for later verification
-            let stored = StoredProof {
-                proof_hash: response.proof_hash.clone(),
-                model_id: model_id_for_storage,
-                io_commitment: response.io_commitment.clone(),
-                weight_commitment: response.weight_commitment.clone(),
-                num_proven_layers: 0,
-                prove_time_ms: response.prove_time_ms,
-                calldata_size: response.calldata_size,
-                created_at_epoch_ms: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            };
-            state.proofs.write().await.insert(response.proof_hash.clone(), stored);
-            Ok(Json(response))
+        match result {
+            Ok((response, session)) => {
+                state.sessions.write().await.insert(response.session_id.clone(), session);
+                let stored = StoredProof {
+                    proof_hash: response.proof_hash.clone(), model_id: model_id_for_storage,
+                    io_commitment: response.io_commitment.clone(), weight_commitment: response.weight_commitment.clone(),
+                    num_proven_layers: 0, prove_time_ms: response.prove_time_ms, calldata_size: response.calldata_size,
+                    created_at_epoch_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                };
+                state.proofs.write().await.insert(response.proof_hash.clone(), stored);
+                Ok(Json(response))
+            }
+            Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: err }))),
         }
-        Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: err }))),
+    }
+}
+
+/// Delete a chat session — DELETE /api/v1/chat/:session_id
+async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let removed = state.sessions.write().await.remove(&session_id).is_some();
+    if removed {
+        Ok(Json(serde_json::json!({"deleted": session_id})))
+    } else {
+        Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("Session '{}' not found", session_id) })))
     }
 }
 
@@ -3781,6 +3928,7 @@ async fn main() {
         privacy_jobs: RwLock::new(HashMap::new()),
         models: RwLock::new(initial_models),
         proofs: RwLock::new(HashMap::new()),
+        sessions: RwLock::new(HashMap::new()),
         started_at: Instant::now(),
         api_key: api_key.clone(),
         rate_limiter: RateLimiter::new(rate_limit_rpm, rate_limit_burst),
@@ -3795,6 +3943,24 @@ async fn main() {
         audit_jobs: RwLock::new(HashMap::new()),
     });
 
+    // Session eviction — prune expired chat sessions every 60s (TTL: 5 min)
+    {
+        let state_evict = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let mut sessions = state_evict.sessions.write().await;
+                let before = sessions.len();
+                sessions.retain(|_, s| s.last_accessed.elapsed() < std::time::Duration::from_secs(300));
+                let evicted = before - sessions.len();
+                if evicted > 0 {
+                    eprintln!("  Session eviction: removed {} expired sessions ({} active)", evicted, sessions.len());
+                }
+            }
+        });
+    }
+
     // Authenticated + rate-limited API routes
     let api_routes = Router::new()
         .route("/api/v1/models", get(list_models).post(load_model))
@@ -3805,6 +3971,7 @@ async fn main() {
         .route("/api/v1/prove/:job_id/result", get(get_prove_result))
         .route("/api/v1/infer", post(infer))
         .route("/api/v1/chat", post(chat))
+        .route("/api/v1/chat/:session_id", axum::routing::delete(delete_session))
         .route("/api/v1/verify/:proof_hash", get(verify_proof))
         .route("/api/v1/classify", post(classify))
         .route("/api/v1/proofs", get(list_proofs))
