@@ -57,12 +57,15 @@ impl GpuPoseidonChannel {
             .ok_or_else(|| GpuPoseidonError::KernelCompile("poseidon_permute_kernel not found".into()))?;
 
         // Increase GPU thread stack size for deep felt252 arithmetic in Hades
-        // Default is 1KB; Poseidon needs ~16KB for 99 rounds of felt252_mul → felt252_pow7
+        // Default is 1KB; Poseidon needs large stack for 99 rounds of felt252_mul → felt252_pow7
+        // Each felt252_mul has ~512 bytes of local arrays, pow7 calls it 4 times = 2KB per pow7
+        // Full round = 3 pow7 = 6KB, 99 rounds = ~594KB needed (conservative: 1MB)
         unsafe {
-            cudarc::driver::sys::lib().cuCtxSetLimit(
+            let result = cudarc::driver::sys::lib().cuCtxSetLimit(
                 cudarc::driver::sys::CUlimit::CU_LIMIT_STACK_SIZE,
-                32 * 1024, // 32KB per thread
+                1024 * 1024, // 1MB per thread
             );
+            eprintln!("[gpu-poseidon] Set GPU stack to 1MB: result={:?}", result);
         }
 
         // Upload round constants
