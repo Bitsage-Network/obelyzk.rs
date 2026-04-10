@@ -67,6 +67,35 @@ impl LocalProvider {
     /// - `.gguf` file → GGUF loader (llama.cpp format)
     /// - Directory with `config.json` → HuggingFace SafeTensors loader
     pub fn load(model_dir: &Path, name: Option<&str>) -> Result<Self, LocalProviderError> {
+        // Auto-download if model directory doesn't have config.json
+        if !model_dir.join("config.json").exists() && !model_dir.extension().map(|e| e == "gguf").unwrap_or(false) {
+            let dir_name = model_dir.file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let hf_repo = match dir_name.as_str() {
+                "qwen2.5-14b" | "qwen-14b" => Some("Qwen/Qwen2.5-14B"),
+                "qwen2.5-7b" | "qwen-7b" => Some("Qwen/Qwen2.5-7B"),
+                "glm-4-9b" | "glm4" | "chatglm" => Some("THUDM/glm-4-9b"),
+                "llama-3.1-8b" | "llama-8b" => Some("meta-llama/Llama-3.1-8B"),
+                "mistral-7b" | "mistral" => Some("mistralai/Mistral-7B-v0.3"),
+                "phi-3-mini" | "phi3" => Some("microsoft/Phi-3-mini-4k-instruct"),
+                "gemma-2b" | "gemma" => Some("google/gemma-2b"),
+                "smollm2-135m" | "smollm" => Some("HuggingFaceTB/SmolLM2-135M"),
+                _ => None,
+            };
+            if let Some(repo) = hf_repo {
+                eprintln!("[local] Model not found at {}. Downloading {}...", model_dir.display(), repo);
+                let status = std::process::Command::new("huggingface-cli")
+                    .args(["download", repo, "--local-dir", &model_dir.to_string_lossy()])
+                    .status();
+                match status {
+                    Ok(s) if s.success() => eprintln!("[local] Download complete."),
+                    Ok(s) => eprintln!("[local] Download failed (exit {}). Install: pip install huggingface_hub", s.code().unwrap_or(-1)),
+                    Err(e) => eprintln!("[local] huggingface-cli not found: {e}. Install: pip install huggingface_hub"),
+                }
+            }
+        }
+
         let dir_name = model_dir
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
