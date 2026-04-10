@@ -360,22 +360,79 @@ impl LocalProvider {
                     &recursive_proof,
                 );
                 eprintln!(
-                    "[recursive] {label}: STARK compressed in {:.1}s (log_size={}, {} poseidon perms, {} calldata felts, on-chain ready)",
+                    "[recursive] {label}: STARK compressed in {:.1}s (log_size={}, {} poseidon perms, {} calldata felts)",
                     t_recursive.elapsed().as_secs_f64(),
                     recursive_proof.metadata.trace_log_size,
                     recursive_proof.metadata.n_poseidon_perms,
                     calldata.len(),
                 );
 
-                // Save calldata to file for on-chain submission
-                let calldata_path = format!("/tmp/obelyzk_recursive_{label}.json");
+                // Auto-submit on-chain if STARKNET_PRIVATE_KEY is set
                 let calldata_hex: Vec<String> = calldata.iter()
                     .map(|f| format!("0x{:064x}", f))
                     .collect();
-                if let Ok(json) = serde_json::to_string_pretty(&calldata_hex) {
-                    if std::fs::write(&calldata_path, &json).is_ok() {
-                        eprintln!("[recursive] {label}: calldata saved to {calldata_path}");
+
+                let io_commitment_packed = crate::crypto::poseidon_channel::securefield_to_felt(io_commitment);
+
+                // Build proof artifact for submit_recursive.mjs
+                let artifact = serde_json::json!({
+                    "model_id": format!("0x{:064x}", proof.io_commitment),
+                    "io_commitment": format!("0x{:064x}", io_commitment_packed),
+                    "policy_commitment": format!("0x{:064x}", proof.policy_commitment),
+                    "recursive_proof": {
+                        "calldata": calldata_hex,
+                        "circuit_hash": null,
+                        "weight_super_root": null,
+                        "policy_commitment": format!("0x{:064x}", proof.policy_commitment),
                     }
+                });
+
+                let proof_path = format!("/tmp/obelyzk_recursive_{label}.json");
+                if let Ok(json) = serde_json::to_string_pretty(&artifact) {
+                    let _ = std::fs::write(&proof_path, &json);
+                }
+
+                if std::env::var("STARKNET_PRIVATE_KEY").is_ok() {
+                    eprintln!("[on-chain] {label}: submitting to Starknet Sepolia...");
+                    // Find submit_recursive.mjs
+                    let script = Self::find_submit_script();
+                    if let Some(script_path) = script {
+                        match std::process::Command::new("node")
+                            .arg(&script_path)
+                            .arg(&proof_path)
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .output()
+                        {
+                            Ok(out) => {
+                                let stdout = String::from_utf8_lossy(&out.stdout);
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                for line in stdout.lines() {
+                                    eprintln!("[on-chain] {line}");
+                                }
+                                if !stderr.is_empty() {
+                                    for line in stderr.lines().take(5) {
+                                        eprintln!("[on-chain] {line}");
+                                    }
+                                }
+                                // Extract tx hash
+                                if let Some(tx_line) = stdout.lines().find(|l| l.contains("tx=0x")) {
+                                    eprintln!("[on-chain] {label}: {tx_line}");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[on-chain] {label}: node not found or script failed: {e}");
+                                eprintln!("[on-chain] proof saved to {proof_path} — submit manually with:");
+                                eprintln!("  node scripts/submit_recursive.mjs {proof_path}");
+                            }
+                        }
+                    } else {
+                        eprintln!("[on-chain] {label}: submit_recursive.mjs not found");
+                        eprintln!("[on-chain] proof saved to {proof_path}");
+                    }
+                } else {
+                    eprintln!("[recursive] {label}: proof saved to {proof_path}");
+                    eprintln!("[recursive] set STARKNET_PRIVATE_KEY to auto-submit on-chain");
                 }
             }
             Err(e) => {
@@ -385,6 +442,30 @@ impl LocalProvider {
                 );
             }
         }
+    }
+
+    /// Locate submit_recursive.mjs in common paths.
+    #[cfg(feature = "cli")]
+    fn find_submit_script() -> Option<std::path::PathBuf> {
+        let candidates = [
+            std::path::PathBuf::from("scripts/submit_recursive.mjs"),
+            std::path::PathBuf::from("../scripts/submit_recursive.mjs"),
+            std::path::PathBuf::from("engine/scripts/submit_recursive.mjs"),
+        ];
+        // Also try relative to the binary
+        let exe_candidates: Vec<std::path::PathBuf> = std::env::current_exe().ok()
+            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+            .map(|dir| vec![
+                dir.join("../../scripts/submit_recursive.mjs"),
+                dir.join("../../../scripts/submit_recursive.mjs"),
+                dir.join("../../../../engine/scripts/submit_recursive.mjs"),
+            ])
+            .unwrap_or_default();
+
+        candidates.iter().chain(exe_candidates.iter())
+            .find(|p| p.exists())
+            .cloned()
+            .or_else(|| std::env::var("OBELYSK_RECURSIVE_SCRIPT").ok().map(std::path::PathBuf::from).filter(|p| p.exists()))
     }
 
     /// No-op when the `cli` feature (which includes recursive STARK) is not enabled.
