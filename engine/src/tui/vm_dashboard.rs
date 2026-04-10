@@ -141,6 +141,14 @@ pub struct VmDashboardState {
     pub network: String,
     pub on_chain_txs: usize,
     pub total_proven_tokens: usize,
+    // Last on-chain proof details
+    pub last_tx_hash: Option<String>,
+    pub last_model_id: Option<String>,
+    pub last_io_commitment: Option<String>,
+    pub last_calldata_felts: Option<usize>,
+    pub last_explorer_url: Option<String>,
+    pub last_prove_time_secs: Option<f64>,
+    pub last_recursive_time_secs: Option<f64>,
     // Runtime
     pub uptime_secs: u64,
     pub status: VmStatus,
@@ -261,6 +269,13 @@ impl Default for VmDashboardState {
             network: "Starknet Sepolia".into(),
             on_chain_txs: 0,
             total_proven_tokens: 0,
+            last_tx_hash: None,
+            last_model_id: None,
+            last_io_commitment: None,
+            last_calldata_felts: None,
+            last_explorer_url: None,
+            last_prove_time_secs: None,
+            last_recursive_time_secs: None,
             uptime_secs: 0,
             status: VmStatus::Starting,
             frame_count: 0,
@@ -287,7 +302,9 @@ pub fn render(frame: &mut Frame, state: &VmDashboardState) {
             Constraint::Length(1),   // Divider
             Constraint::Length(12),  // GPU + Queue + Sessions (3-col)
             Constraint::Length(1),   // Divider
-            Constraint::Min(6),     // Conversation stream
+            Constraint::Min(4),     // Conversation stream
+            Constraint::Length(1),   // Divider
+            Constraint::Length(5),   // On-chain proof status
             Constraint::Length(1),   // Divider
             Constraint::Length(2),   // Footer
         ])
@@ -299,7 +316,9 @@ pub fn render(frame: &mut Frame, state: &VmDashboardState) {
     render_divider(frame, outer[3], GHOST);
     render_conversation_stream(frame, outer[4], state);
     render_divider(frame, outer[5], GHOST);
-    render_footer(frame, outer[6], state);
+    render_onchain_panel(frame, outer[6], state);
+    render_divider(frame, outer[7], GHOST);
+    render_footer(frame, outer[8], state);
 }
 
 fn render_divider(frame: &mut Frame, area: Rect, color: Color) {
@@ -667,6 +686,65 @@ fn render_conversation_stream(frame: &mut Frame, area: Rect, state: &VmDashboard
 }
 
 // ── Footer ─────────────────────────────────────────────────────────
+
+fn render_onchain_panel(frame: &mut Frame, area: Rect, state: &VmDashboardState) {
+    let title = Line::from(vec![
+        Span::styled(" ON-CHAIN ", Style::default().fg(BG).bg(VIOLET).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {} · {} verified", state.network, state.on_chain_txs), Style::default().fg(GHOST)),
+    ]);
+
+    let mut lines = vec![title, Line::from("")];
+
+    if let Some(ref tx) = state.last_tx_hash {
+        let tx_short = if tx.len() > 20 {
+            format!("{}...{}", &tx[..10], &tx[tx.len()-8..])
+        } else {
+            tx.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  TX  ", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
+            Span::styled(&tx_short, Style::default().fg(CYAN)),
+            Span::styled(format!("  {} felts",
+                state.last_calldata_felts.unwrap_or(0)), Style::default().fg(GHOST)),
+            Span::styled(format!("  {:.1}s prove",
+                state.last_prove_time_secs.unwrap_or(0.0)), Style::default().fg(ORANGE)),
+            Span::styled(format!("  {:.1}s STARK",
+                state.last_recursive_time_secs.unwrap_or(0.0)), Style::default().fg(ORANGE)),
+        ]));
+
+        if let Some(ref model_id) = state.last_model_id {
+            let mid_short = if model_id.len() > 16 {
+                format!("{}...{}", &model_id[..10], &model_id[model_id.len()-6..])
+            } else {
+                model_id.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  ID  ", Style::default().fg(VIOLET).add_modifier(Modifier::BOLD)),
+                Span::styled(mid_short, Style::default().fg(SLATE)),
+                if let Some(ref io) = state.last_io_commitment {
+                    let io_short = if io.len() > 16 {
+                        format!("{}...{}", &io[..10], &io[io.len()-6..])
+                    } else {
+                        io.clone()
+                    };
+                    Span::styled(format!("  IO {io_short}"), Style::default().fg(GHOST))
+                } else {
+                    Span::styled("", Style::default())
+                },
+            ]));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  No proofs submitted yet. Set STARKNET_PRIVATE_KEY to enable auto-submission.",
+            Style::default().fg(GHOST),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(BG)),
+        area,
+    );
+}
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &VmDashboardState) {
     let (status_text, status_color) = match state.status {

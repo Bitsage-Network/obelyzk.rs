@@ -65,6 +65,10 @@ struct VmState {
     /// Multi-turn conversation sessions with KV-cache.
     sessions: RwLock<HashMap<String, ChatSession>>,
     started_at: Instant,
+    /// Last on-chain proof metadata (for TUI dashboard).
+    last_proof_meta: RwLock<obelyzk::providers::local::ProofMeta>,
+    /// Total on-chain verifications in this session.
+    on_chain_tx_count: std::sync::atomic::AtomicUsize,
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -276,6 +280,11 @@ async fn chat_completions(
                 .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
                 let (text, _ids, pm) = result;
                 let io_hex = pm.io_commitment.clone();
+                // Update shared state for TUI dashboard
+                if pm.tx_hash.is_some() {
+                    state.on_chain_tx_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                *state.last_proof_meta.write().await = pm.clone();
                 proof_meta = pm;
                 (text, "zk_proof", io_hex, max_tok)
             } else if model_lower.starts_with("claude") {
@@ -841,6 +850,8 @@ async fn main() {
         tls_attestations: RwLock::new(HashMap::new()),
         sessions: RwLock::new(HashMap::new()),
         started_at: Instant::now(),
+        last_proof_meta: RwLock::new(obelyzk::providers::local::ProofMeta::default()),
+        on_chain_tx_count: std::sync::atomic::AtomicUsize::new(0),
     });
 
     // Session eviction — prune expired sessions every 60s (TTL: 5 min)
