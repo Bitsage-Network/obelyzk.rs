@@ -410,19 +410,15 @@ extern "C" __global__ void m31_gemv_kernel(
     unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col >= n) return;
 
-    // Accumulate in 64-bit with frequent reduction to prevent overflow.
-    // Each a*b product is up to (2^31-1)^2 ≈ 2^62.  After mod, acc < 2^31.
-    // Safe to accumulate 2 products before reducing: 2^31 + 2*2^62 < 2^64.
+    // Reduce after every multiply-add to guarantee correctness.
+    // After mod, acc < P < 2^31. Then acc + a*b < 2^31 + 2^62 < 2^63.
+    // So % P is always exact in 64-bit.
     unsigned long long acc = 0;
     for (unsigned int i = 0; i < k; i++) {
-        unsigned long long a = (unsigned long long)input[i];
-        unsigned long long b = (unsigned long long)weight[i * n + col];
-        acc += a * b;
-        if ((i & 1u) == 1u) {
-            acc %= (unsigned long long)P;
-        }
+        acc += (unsigned long long)input[i] * (unsigned long long)weight[i * n + col];
+        acc %= (unsigned long long)P;
     }
-    output[col] = (unsigned int)(acc % (unsigned long long)P);
+    output[col] = (unsigned int)acc;
 }
 
 // --- GEMM: multi-row matmul (m>1) ---
@@ -440,18 +436,13 @@ extern "C" __global__ void m31_gemm_kernel(
     unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
     if (row >= m || col >= n) return;
 
-    // Reduce every 2 products to prevent uint64 overflow.
-    // Each product ≈ 2^62, after mod acc < 2^31, so 2^31 + 2*2^62 < 2^64.
+    // Reduce after every multiply-add (safe: acc < 2^31 + 2^62 < 2^63).
     unsigned long long acc = 0;
     for (unsigned int l = 0; l < k; l++) {
-        unsigned long long av = (unsigned long long)a[row * k + l];
-        unsigned long long bv = (unsigned long long)b[l * n + col];
-        acc += av * bv;
-        if ((l & 1u) == 1u) {
-            acc %= (unsigned long long)P;
-        }
+        acc += (unsigned long long)a[row * k + l] * (unsigned long long)b[l * n + col];
+        acc %= (unsigned long long)P;
     }
-    c[row * n + col] = (unsigned int)(acc % (unsigned long long)P);
+    c[row * n + col] = (unsigned int)acc;
 }
 
 // --- Element-wise add ---
