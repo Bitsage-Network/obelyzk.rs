@@ -410,27 +410,11 @@ pub fn generate_witness_with_policy(
     // Run the real verifier to (a) confirm validity, (b) measure hash_count,
     // and (c) capture the final channel digest.
     //
-    // IMPORTANT: The channel must be seeded identically to the prover's outer
-    // wrapper (prove_model_pure_gkr_inner), which mixes io_commitment and
-    // policy_commitment BEFORE passing the channel to the GKR prover.
-    //
-    // The prover does:
-    //   let io_commitment = compute_io_commitment(input, &fwd.output);
-    //   gkr_channel.mix_felt(io_commitment);  // FieldElement
-    //   gkr_channel.mix_felt(policy_commitment);  // FieldElement
-    //
-    // We reconstruct these from the proof's stored io_commitment.
+    // The channel must match the prover's GKR channel state exactly.
+    // The pure GKR path (prove_model_pure_gkr_inner) seeds the GKR channel
+    // ONLY with optional KV-cache commitment — no io_commitment or policy
+    // outer seeding (that's only in prove_model_aggregated_onchain_gkr_auto).
     let mut prod_channel = crate::crypto::poseidon_channel::PoseidonChannel::new();
-
-    // Seed with io_commitment (matching prover's outer wrapper)
-    // The proof's GKR proof stores the io_commitment as a FieldElement.
-    let io_felt = proof.io_commitment;
-    prod_channel.mix_felt(io_felt);
-
-    // Seed with policy commitment (matching prover's outer wrapper)
-    let resolved_policy = crate::policy::resolve(policy);
-    let policy_commitment_felt = resolved_policy.policy_commitment();
-    prod_channel.mix_felt(policy_commitment_felt);
 
     let _claim = if let Some(p) = policy {
         crate::gkr::verifier::verify_gkr_with_policy(circuit, proof, output, weights, &mut prod_channel, p)?
@@ -447,9 +431,7 @@ pub fn generate_witness_with_policy(
     let mut channel = InstrumentedChannel::new();
     let d = circuit.layers.len();
 
-    // Seed channel identically to prover's outer wrapper
-    channel.mix_felt(proof.io_commitment);
-    channel.mix_felt(policy_commitment_felt);
+    // No outer seeding needed — the pure GKR path starts fresh.
 
     // Seed channel identically to GKR prover internal
     channel.mix_u64(d as u64);
