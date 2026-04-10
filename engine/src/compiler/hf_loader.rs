@@ -486,8 +486,10 @@ impl HfConfig {
                 .to_string(),
             max_position_embeddings: get_u64("max_position_embeddings").unwrap_or(2048)
                 as usize,
+            // MoE: MiniMax uses num_local_experts (256), Mixtral uses num_local_experts (8)
             num_experts: get_u64("num_local_experts")
                 .or_else(|| get_u64("num_experts"))
+                .or_else(|| get_u64("n_routed_experts"))
                 .unwrap_or(0) as usize,
             num_experts_per_tok: get_u64("num_experts_per_tok")
                 .or_else(|| get_u64("num_experts_per_token"))
