@@ -384,10 +384,21 @@ impl LocalProvider {
                 };
 
                 // Build proof artifact for submit_recursive.mjs
+                let n_matmuls = gkr_proof.weight_commitments.len();
+                let n_layers = gkr_proof.layer_proofs.len();
+                let hidden_size = graph.input_shape.1;
+                let num_blocks = graph.num_layers();
                 let artifact = serde_json::json!({
                     "model_id": format!("0x{:064x}", model_id),
                     "io_commitment": format!("0x{:064x}", proof.io_commitment),
                     "policy_commitment": format!("0x{:064x}", proof.policy_commitment),
+                    "metadata": {
+                        "n_layers": n_layers,
+                        "n_matmuls": n_matmuls,
+                        "hidden_size": hidden_size,
+                        "num_transformer_blocks": num_blocks,
+                        "trace_log_size": recursive_proof.log_size,
+                    },
                     "recursive_proof": {
                         "calldata": calldata_hex,
                         "circuit_hash": null,

@@ -54,14 +54,34 @@ pub trait IRecursiveVerifier<TContractState> {
 
     /// Verify a recursive STARK proof for a registered model.
     ///
-    /// This is a single-TX verification that replaces the 18-TX streaming pipeline.
-    /// The STARK proof attests that the GKR verifier accepted the original proof.
+    /// Single-TX on-chain verification of a full ML inference proof.
+    /// The STARK proof attests that the GKR verifier accepted the original
+    /// proof covering all matmul, attention, norm, and activation layers.
     ///
-    /// Returns true if verification succeeds.
+    /// All parameters are visible in block explorers for full transparency.
     fn verify_recursive(
         ref self: TContractState,
+        /// Unique model identifier (Poseidon hash of weight commitments).
         model_id: felt252,
+        /// Poseidon hash of packed inference IO (input tokens + output logits).
         io_commitment: felt252,
+        /// Model architecture fingerprint (Poseidon hash of circuit descriptor).
+        circuit_hash: felt252,
+        /// Poseidon Merkle root binding all weight matrices.
+        weight_super_root: felt252,
+        /// Number of GKR layers proven (e.g., 337 for 48-layer transformer).
+        n_layers: u32,
+        /// Number of matmul reductions in the GKR proof (e.g., 192 for Qwen2.5-14B).
+        n_matmuls: u32,
+        /// Model hidden dimension (e.g., 5120 for 14B params).
+        hidden_size: u32,
+        /// Number of transformer blocks (e.g., 48 for Qwen2.5-14B).
+        num_transformer_blocks: u32,
+        /// Proving policy commitment (Poseidon hash of PolicyConfig).
+        policy_commitment: felt252,
+        /// STARK execution trace log₂ size (e.g., 15 = 32768 rows).
+        trace_log_size: u32,
+        /// The recursive STARK proof body (FRI + Merkle decommitments).
         stark_proof_data: Array<felt252>,
     ) -> bool;
 
@@ -259,11 +279,23 @@ pub mod RecursiveVerifierContract {
             ref self: ContractState,
             model_id: felt252,
             io_commitment: felt252,
+            circuit_hash: felt252,
+            weight_super_root: felt252,
+            n_layers: u32,
+            n_matmuls: u32,
+            hidden_size: u32,
+            num_transformer_blocks: u32,
+            policy_commitment: felt252,
+            trace_log_size: u32,
             stark_proof_data: Array<felt252>,
         ) -> bool {
             // 1. Look up registered model
             let model = self.recursive_models.read(model_id);
             assert(model.circuit_hash != 0, 'Model not registered');
+
+            // Verify caller-supplied metadata matches registration
+            assert(circuit_hash == model.circuit_hash, 'Circuit hash mismatch (param)');
+            assert(weight_super_root == model.weight_super_root, 'Weight root mismatch (param)');
 
             // 2. Compute proof hash for dedup
             let mut hash_input = array![model_id, io_commitment];
@@ -306,13 +338,12 @@ pub mod RecursiveVerifierContract {
             let wr2: felt252 = *proof_span.pop_front().unwrap();
             let wr3: felt252 = *proof_span.pop_front().unwrap();
 
-            // Parse n_layers and verified
-            let n_layers_felt: felt252 = *proof_span.pop_front().unwrap();
-            let n_layers: u32 = n_layers_felt.try_into().unwrap_or(0);
+            // Parse n_layers and verified from proof body
+            let _proof_n_layers: felt252 = *proof_span.pop_front().unwrap();
             let _ = proof_span.pop_front().unwrap(); // verified
 
             let final_digest: felt252 = *proof_span.pop_front().unwrap();
-            let log_size: u32 = (*proof_span.pop_front().unwrap()).try_into().unwrap();
+            let proof_log_size: u32 = (*proof_span.pop_front().unwrap()).try_into().unwrap();
 
             // Verify proof binds to the registered model's circuit and weights.
             // Pack 4 M31 limbs into felt252: a * 2^93 + b * 2^62 + c * 2^31 + d
@@ -350,7 +381,7 @@ pub mod RecursiveVerifierContract {
             };
 
             let air = RecursiveAir {
-                log_n_rows: log_size,
+                log_n_rows: proof_log_size,
                 initial_digest_limbs: initial_limbs,
                 final_digest_limbs: final_limbs,
             };
@@ -369,10 +400,10 @@ pub mod RecursiveVerifierContract {
 
             let mut preprocessed_sizes: Array<u32> = array![];
             i = 0;
-            loop { if i >= 3 { break; } preprocessed_sizes.append(log_size); i += 1; };
+            loop { if i >= 3 { break; } preprocessed_sizes.append(proof_log_size); i += 1; };
             let mut trace_sizes: Array<u32> = array![];
             i = 0;
-            loop { if i >= 28 { break; } trace_sizes.append(log_size); i += 1; };
+            loop { if i >= 28 { break; } trace_sizes.append(proof_log_size); i += 1; };
 
             let mut channel = Default::default();
             pcs_config.mix_into(ref channel);
@@ -401,18 +432,18 @@ pub mod RecursiveVerifierContract {
             self.last_verified_at.write(model_id, block_ts);
             self.last_proof_felts.write(model_id, stark_proof_data_len);
             self.last_n_layers.write(model_id, n_layers);
-            self.last_trace_log_size.write(model_id, log_size);
+            self.last_trace_log_size.write(model_id, trace_log_size);
 
             // 7. Emit rich verification event — full provenance in one TX
             self.emit(RecursiveProofVerified {
                 model_id,
                 proof_hash,
                 io_commitment,
-                circuit_hash: circuit_hash_packed,
-                weight_super_root: weight_root_packed,
-                policy_commitment: model.policy_commitment,
+                circuit_hash,
+                weight_super_root,
+                policy_commitment,
                 n_layers,
-                trace_log_size: log_size,
+                trace_log_size,
                 proof_felts: stark_proof_data_len,
                 verification_count: count + 1,
                 verified_at: block_ts,
