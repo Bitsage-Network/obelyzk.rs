@@ -289,6 +289,14 @@ fn gauge_line(ratio: f64, width: usize, fill_color: Color, empty_color: Color) -
 }
 
 /// Format uptime as H:MM:SS.
+/// Ring-buffer push: remove oldest when at capacity.
+pub fn push_limited(buf: &mut Vec<u64>, val: u64) {
+    if buf.len() >= HISTORY_LIMIT {
+        buf.remove(0);
+    }
+    buf.push(val);
+}
+
 fn uptime_str(secs: u64) -> String {
     format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
 }
