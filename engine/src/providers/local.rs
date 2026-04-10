@@ -233,11 +233,7 @@ impl LocalProvider {
             &self.model_dir, self.hidden_size, last_token_id,
         ).map_err(|e| LocalProviderError::EmbedFailed(format!("{e}")))?;
 
-        // Configure for on-chain proving path.
-        // Disable GPU forward pass — the GPU GEMV kernel has a reduction bug
-        // for large matrices (5120+) that produces slightly wrong intermediates,
-        // causing sumcheck claim mismatches. GPU sumcheck reductions are fine.
-        std::env::set_var("OBELYZK_GPU_FORWARD", "0");
+        // GPU forward pass is enabled — GEMV/GEMM overflow fix applied.
 
         let proof = crate::aggregation::prove_model_pure_gkr_auto_with_cache(
             &self.graph, &input_matrix, &self.weights,
