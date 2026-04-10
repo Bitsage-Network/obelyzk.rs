@@ -1,8 +1,10 @@
 # ObelyZK On-Chain Verification Pipeline
 
-**Last updated**: April 5, 2026
-**Version**: 0.2.0
+**Last updated**: April 10, 2026
+**Version**: 0.3.0
 **Network**: Starknet Sepolia
+
+**Latest verified TX**: [`0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) — Qwen2.5-14B, 192 matmuls, 337 layers, 946 calldata felts
 
 ---
 
@@ -17,7 +19,7 @@ There are two verification paths:
 
 | Path | TXs | Calldata | Status |
 |------|-----|----------|--------|
-| **Recursive STARK** (preferred) | 1 | 718--942 felts | **Fully trustless on Sepolia** (OODS + Merkle + FRI + PoW) |
+| **Recursive STARK** (preferred) | 1 | ~950 felts | **Fully trustless on Sepolia** (OODS + Merkle + FRI + PoW), 5 verifications live |
 | **Streaming GKR** (fallback) | 6+ | 8,744--255,100 felts | Fully deployed, 14/14 steps passing on-chain |
 
 **Why recursive is preferred.** The streaming pipeline sends the raw GKR proof

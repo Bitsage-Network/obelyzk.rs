@@ -16,7 +16,9 @@
 
 ### Verifiable AI Engine Written in Rust
 
-**Provable inference for every model. 4.3s per proof. 22x speedup.**
+**Provable inference for every model. Qwen2.5-14B proven on-chain in a single TX.**
+
+[Live Proof → `0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3)
 
 <br/>
 

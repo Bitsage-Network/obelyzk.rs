@@ -9,7 +9,19 @@
 [![PyPI](https://img.shields.io/pypi/v/obelyzk)](https://pypi.org/project/obelyzk/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)](LICENSE)
 
-ObelyZK proves that a transformer model (LLaMA, Qwen, Phi, SmolLM, Mistral) produced a specific output for a given input. The proof compresses into ~942 felts via recursive STARK and verifies in one Starknet transaction. No trusted setup. No multi-step coordination.
+ObelyZK proves that a transformer model (LLaMA, Qwen, Phi, SmolLM, Mistral) produced a specific output for a given input. The proof compresses into ~950 felts via recursive STARK and verifies in one Starknet transaction. No trusted setup. No multi-step coordination.
+
+**Live on Starknet Sepolia** — Qwen2.5-14B (14 billion parameters):
+
+| Metric | Value |
+|--------|-------|
+| GKR proof (192 matmuls, 337 layers) | 46s (H100 GPU) |
+| Recursive STARK compression | 1.2s |
+| On-chain calldata | ~950 felts (single TX) |
+| Verification gas | ~117M L2 gas (~$0.03) |
+| Verified TX | [`0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) |
+
+> **[Full Getting Started Guide →](scripts/pipeline/GETTING_STARTED.md)**
 
 ---
 

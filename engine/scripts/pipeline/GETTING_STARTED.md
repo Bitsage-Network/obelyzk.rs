@@ -1,520 +1,378 @@
-# Obelysk Getting Started
+# ObelyZK — Getting Started
 
-Prove that an ML model ran correctly with a cryptographic STARK proof, verified on Starknet in a single transaction.
+Prove that an ML model ran correctly with a cryptographic proof, verified on Starknet in a single transaction.
 
-There are three ways to get started, from fastest to most flexible:
+**Live proof**: [`0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) — Qwen2.5-14B (14 billion parameters), 192 matmul reductions, verified on Sepolia.
 
-| Path | What you need | Time to first proof |
-|------|---------------|---------------------|
-| **Hosted API** | An API key | 2 minutes |
-| **CLI** | Rust nightly, 50 GB disk | 15 minutes |
-| **Self-hosted GPU prover** | NVIDIA GPU + CUDA 12+ | 30 minutes |
+## Quick Overview
+
+```
+Input text → Tokenize → Forward pass (GPU) → GKR proof (GPU) → Recursive STARK → On-chain TX
+                                                   46s              1.2s            ~15s
+```
+
+| Component | Description |
+|-----------|-------------|
+| **GKR Sumcheck** | Layer-by-layer interactive proof over M31/QM31 fields (192 matmuls, 337 layers) |
+| **Recursive STARK** | Compresses GKR proof (~46K felts) into ~950 felts via STWO Circle STARK |
+| **On-chain Verifier** | Cairo contract replays Fiat-Shamir transcript, checks FRI + Merkle proofs |
+| **Weight Binding** | Poseidon Merkle roots bind each weight matrix — swap detection is instant |
 
 ---
 
 ## 1. Prerequisites
 
-All three paths submit proofs to the same on-chain verifier:
-
-| Property | Value |
-|----------|-------|
-| Network | Starknet Sepolia |
-| Contract | `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` |
-| Proof type | Recursive STARK (single transaction) |
-
-For on-chain submission or verification queries you also need:
-
-- **Node.js 20+** with the `starknet` package
-- A funded Starknet Sepolia account (private key)
-
----
-
-## 2. Option 1: Hosted API (Fastest)
-
-The hosted fleet at **https://api.bitsage.network** handles model loading, GPU proving, and on-chain submission. No local GPU or Rust toolchain required.
-
-### Prove with curl
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| GPU | NVIDIA A10G / RTX 4090 | NVIDIA H100 |
+| CUDA | 12.0+ | 12.4+ |
+| RAM | 32 GB | 64 GB+ |
+| Disk | 60 GB | 100 GB |
+| Rust | nightly-2025-07-14 | nightly-2025-07-14 |
+| Node.js | 18+ | 20 LTS |
 
 ```bash
-curl -X POST https://api.bitsage.network/api/v1/prove \
-  -H "Authorization: Bearer $OBELYZK_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "smollm2-135m",
-    "input": "The capital of France is",
-    "recursive": true
-  }'
-```
-
-Response:
-
-```json
-{
-  "output": "The capital of France is Paris ...",
-  "proof_hash": "0x03af8b...",
-  "tx_hash": "0x07c1a2...",
-  "prove_time_ms": 9500,
-  "calldata_felts": 981
-}
-```
-
-### Prove with the TypeScript SDK
-
-```bash
-npm install @obelyzk/sdk
-```
-
-```typescript
-import { createClient } from "@obelyzk/sdk";
-
-const client = createClient({ apiKey: process.env.OBELYZK_API_KEY });
-
-const result = await client.prove({
-  model: "smollm2-135m",
-  input: "The capital of France is",
-  recursive: true,
-});
-
-console.log("Output:", result.output);
-console.log("Proof hash:", result.proofHash);
-console.log("TX hash:", result.txHash);
-console.log("Verify:", `https://sepolia.starkscan.co/tx/${result.txHash}`);
-```
-
-### Prove with the Python SDK
-
-```bash
-pip install obelyzk
-```
-
-```python
-import os
-import obelyzk
-
-client = obelyzk.Client(api_key=os.environ["OBELYZK_API_KEY"])
-
-result = client.prove(
-    model="smollm2-135m",
-    input="The capital of France is",
-    recursive=True,
-)
-
-print(f"Output: {result.output}")
-print(f"Proof hash: {result.proof_hash}")
-print(f"TX hash: {result.tx_hash}")
-print(f"Verify: https://sepolia.starkscan.co/tx/{result.tx_hash}")
-```
-
----
-
-## 3. Option 2: CLI
-
-Run the prover locally from your terminal. Works on CPU (slower) or GPU (recommended).
-
-### Install Rust nightly
-
-```bash
+# Rust nightly (required — STWO uses nightly features)
 rustup install nightly-2025-07-14
 rustup default nightly-2025-07-14
+
+# Node.js (for on-chain submission)
+# Ubuntu: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt install -y nodejs
+# macOS:  brew install node
 ```
 
-### Build the CLI binary
+---
 
-GPU build (requires CUDA 12+):
+## 2. Build
 
 ```bash
-cargo +nightly-2025-07-14 build --release \
-  --bin prove-model \
-  --features "std,gpu,cuda-runtime,model-loading,safetensors,cli"
+git clone https://github.com/Bitsage-Network/obelyzk.rs.git
+cd obelyzk.rs/engine
+
+# GPU build (CUDA 12+ required)
+cargo build --release --bin obelyzk \
+  --features "server,server-stream,cuda-runtime,cli"
+
+# CPU-only build (slower, no GPU needed)
+cargo build --release --bin obelyzk \
+  --features "server,cli"
 ```
 
-CPU-only build (no CUDA needed):
+The binary is at `target/release/obelyzk`.
+
+---
+
+## 3. Download a Model
+
+### SmolLM2-135M (small, fast — good for testing)
 
 ```bash
-cargo +nightly-2025-07-14 build --release \
-  --bin prove-model \
-  --features "std,model-loading,safetensors,cli"
-```
-
-### Download a model
-
-```bash
-mkdir -p ~/.obelysk/models/smollm2-135m && cd $_
+mkdir -p ~/.obelyzk/models/smollm2-135m && cd $_
 for f in config.json model.safetensors tokenizer.json tokenizer_config.json; do
   curl -sL "https://huggingface.co/HuggingFaceTB/SmolLM2-135M/resolve/main/$f" -o $f
 done
 ```
 
-### Generate a recursive proof
+### Qwen2.5-14B (production — 14 billion parameters)
 
 ```bash
-export STWO_SKIP_RMS_SQ_PROOF=1
-export STWO_ALLOW_MISSING_NORM_PROOF=1
-export STWO_PIECEWISE_ACTIVATION=0
-export STWO_ALLOW_LOGUP_ACTIVATION=1
-export STWO_AGGREGATED_FULL_BINDING=1
-export STWO_SKIP_BATCH_TOKENS=1
-
-./target/release/prove-model \
-  --model-dir ~/.obelysk/models/smollm2-135m \
-  --gkr --format ml_gkr --recursive \
-  --output proof.json
+pip install huggingface_hub
+huggingface-cli download Qwen/Qwen2.5-14B --local-dir ~/.obelyzk/models/qwen2.5-14b
 ```
 
-The prover runs inference, generates a GKR proof over every layer, wraps it in a recursive STARK, and writes `proof.json`.
-
-### Submit the proof on-chain
-
-```bash
-cd stwo-ml
-npm install starknet
-
-STARKNET_PRIVATE_KEY=0x... \
-RECURSIVE_CONTRACT=0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 \
-node scripts/submit_recursive.mjs proof.json
-```
-
-The script reads `proof.json`, encodes the recursive STARK as calldata, and sends a single transaction to the verifier contract.
+> Qwen2.5-14B is ~30 GB. Weight loading takes ~125s on first run (one-time).
 
 ---
 
-## 4. Option 3: Self-Host a GPU Prover
+## 4. Prove a Single Inference
 
-Run your own `prove-server` that exposes a REST API identical to the hosted service. This gives you full control over hardware, model selection, and network configuration.
-
-### Hardware requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| GPU | NVIDIA A10G or RTX 4090 | NVIDIA H100 |
-| CUDA | 12.0+ | 12.4+ |
-| RAM | 16 GB | 32 GB |
-| Disk | 50 GB | 100 GB |
-| Rust | nightly-2025-07-14 | nightly-2025-07-14 |
-| Node.js | 20+ | 22 LTS |
-
-### Build
+### One command — prove + recursive STARK + on-chain submission
 
 ```bash
-git clone https://github.com/obelyzk/stwo-ml.git
-cd stwo-ml
-
-rustup install nightly-2025-07-14
-
-cargo +nightly-2025-07-14 build --release \
-  --bin prove-model --bin prove-server \
-  --features "std,gpu,cuda-runtime,model-loading,safetensors,cli"
+echo "What is 2+2?" | \
+  OBELYSK_MODEL_DIR=~/.obelyzk/models/qwen2.5-14b \
+  OBELYZK_MAX_TOKENS=1 \
+  STARKNET_PRIVATE_KEY=0x<your-deployer-key> \
+  STARKNET_ACCOUNT=0x<your-account-address> \
+  RUST_MIN_STACK=16777216 \
+  ./target/release/obelyzk chat --model local
 ```
 
-### Download model weights
+This runs the full pipeline automatically:
+
+1. **Tokenize** input text
+2. **Forward pass** through all 48 transformer layers (GPU-accelerated)
+3. **GKR proof** — 192 matmul sumcheck reductions, 337 layer proofs (~46s on H100)
+4. **Recursive STARK** — compress to ~950 felts (~1.2s)
+5. **Register model** on Starknet (if not already registered)
+6. **Submit `verify_recursive` TX** — single transaction, full STARK verification on-chain
+7. **Report TX hash** and explorer link
+
+### Without on-chain submission (local proof only)
+
+Omit `STARKNET_PRIVATE_KEY`:
 
 ```bash
-mkdir -p ~/.obelysk/models/smollm2-135m && cd $_
-for f in config.json model.safetensors tokenizer.json tokenizer_config.json; do
-  curl -sL "https://huggingface.co/HuggingFaceTB/SmolLM2-135M/resolve/main/$f" -o $f
-done
+echo "Hello" | \
+  OBELYSK_MODEL_DIR=~/.obelyzk/models/qwen2.5-14b \
+  OBELYZK_MAX_TOKENS=1 \
+  RUST_MIN_STACK=16777216 \
+  ./target/release/obelyzk chat --model local
 ```
 
-### Start the server
+The proof is saved to `/tmp/obelyzk_recursive_prefill.json`. Submit manually later:
 
 ```bash
-./target/release/prove-server --port 8080 \
-  --model-dir ~/.obelysk/models/smollm2-135m
-```
+cd obelyzk.rs/engine/scripts && npm install starknet
 
-### Verify the server is running
-
-```bash
-curl http://localhost:8080/health
-```
-
-### Submit a proof request
-
-```bash
-curl -X POST http://localhost:8080/api/v1/prove \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"smollm2-135m","input":[1.0,2.0,3.0]}'
-```
-
-### Point the SDK at your server
-
-TypeScript:
-
-```typescript
-import { createClient } from "@obelyzk/sdk";
-
-const client = createClient({
-  url: "http://your-gpu-server:8080",
-  apiKey: "your-local-key",
-});
-
-const result = await client.prove({
-  model: "smollm2-135m",
-  input: "Hello world",
-  recursive: true,
-});
-```
-
-Python:
-
-```python
-import obelyzk
-
-client = obelyzk.Client(
-    url="http://your-gpu-server:8080",
-    api_key="your-local-key",
-)
-
-result = client.prove(model="smollm2-135m", input="Hello world", recursive=True)
+STARKNET_PRIVATE_KEY=0x... \
+STARKNET_ACCOUNT=0x... \
+node submit_recursive.mjs /tmp/obelyzk_recursive_prefill.json
 ```
 
 ---
 
-## 5. On-Chain Verification
+## 5. What's in the Proof
 
-Every recursive proof lands on Starknet as a single transaction. You can query the contract to check verification status.
+Each on-chain transaction contains these **named, decoded fields** visible in any block explorer:
 
-### Submit a proof
+| Parameter | Type | Example | Description |
+|-----------|------|---------|-------------|
+| `model_id` | felt252 | `0x05e8dc...6eaf` | Poseidon hash of all weight commitments (unique per model) |
+| `io_commitment` | felt252 | `0x06cf7d...d450` | Poseidon hash of input tokens + output logits |
+| `circuit_hash` | felt252 | `0x0998f3...6fa2` | Model architecture fingerprint |
+| `weight_super_root` | felt252 | `0x05cc23...2a82` | Poseidon Merkle root of all 192 weight matrices |
+| `n_layers` | u32 | 337 | Total GKR layers proven |
+| `n_matmuls` | u32 | 192 | Number of matmul sumcheck reductions |
+| `hidden_size` | u32 | 5120 | Model hidden dimension |
+| `num_transformer_blocks` | u32 | 48 | Transformer block count |
+| `policy_commitment` | felt252 | `0x0178ed...6162` | Proving policy hash |
+| `trace_log_size` | u32 | 15 | STARK trace: 2^15 = 32,768 rows |
+| `stark_proof_data` | Array | ~950 felts | FRI + Merkle decommitments |
 
-If you generated `proof.json` locally (Option 2 or 3), submit it:
+The contract performs **full cryptographic STARK verification** on-chain:
+- AIR boundary constraints (Poseidon digest chain)
+- Merkle tree decommitments (28 trace columns)
+- FRI low-degree proof (polynomial proximity)
+- Proof of work (grinding resistance)
 
-```bash
-cd stwo-ml
-npm install starknet
+---
 
-STARKNET_PRIVATE_KEY=0x... \
-RECURSIVE_CONTRACT=0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 \
-node scripts/submit_recursive.mjs proof.json
-```
+## 6. Verify a Proof Independently
 
-### Query verification count
-
-```javascript
-const { RpcProvider } = require("starknet");
-
-const provider = new RpcProvider({
-  nodeUrl: "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/demo",
-});
-
-const count = await provider.callContract({
-  contractAddress:
-    "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7",
-  entrypoint: "get_recursive_verification_count",
-  calldata: [modelId],
-});
-
-console.log("Verification count:", count);
-```
-
-### Query whether a specific proof is verified
-
-```javascript
-const { Contract, RpcProvider } = require("starknet");
-
-const provider = new RpcProvider({
-  nodeUrl: "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/demo",
-});
-
-const contract = new Contract(
-  abi,
-  "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7",
-  provider
-);
-
-const verified = await contract.is_recursive_proof_verified(proofHash);
-console.log("Verified:", verified);
-```
-
-### Inspect on a block explorer
+### On the block explorer
 
 ```
 https://sepolia.starkscan.co/tx/<tx_hash>
 ```
 
----
+Click **Events** to see the `RecursiveProofVerified` event with all metadata.
 
-## 5b. Multi-Turn Conversations (KV-Cache Decode)
+### Query the contract
 
-ObelyZK supports verifiable multi-turn inference via prefill + decode steps. Each decode step produces a GKR proof bound to the previous KV-cache Poseidon root, forming a commitment chain that proves the entire conversation history.
+```javascript
+import { RpcProvider } from "starknet";
 
-```bash
-prove-model --model-dir ~/.obelysk/models/smollm2-135m \
-  --decode --decode-steps 10 --prefill-len 5 \
-  --gkr --format ml_gkr
+const provider = new RpcProvider({
+  nodeUrl: "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/demo",
+});
+
+const CONTRACT = "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7";
+
+// Check if a specific proof was verified
+const verified = await provider.callContract({
+  contractAddress: CONTRACT,
+  entrypoint: "is_recursive_proof_verified",
+  calldata: ["<proof_hash>"],
+});
+console.log("Verified:", verified[0] === "0x1");
+
+// Get verification count for a model
+const count = await provider.callContract({
+  contractAddress: CONTRACT,
+  entrypoint: "get_recursive_verification_count",
+  calldata: ["<model_id>"],
+});
+console.log("Total verifications:", Number(BigInt(count[0])));
+
+// Get last verification details
+const details = await provider.callContract({
+  contractAddress: CONTRACT,
+  entrypoint: "get_last_verification",
+  calldata: ["<model_id>"],
+});
+console.log("Last IO commitment:", details[0]);
+console.log("Last proof hash:", details[1]);
+console.log("Timestamp:", Number(BigInt(details[2])));
+console.log("Proof felts:", Number(BigInt(details[3])));
+console.log("Layers:", Number(BigInt(details[4])));
+console.log("Trace log_size:", Number(BigInt(details[5])));
+console.log("Verification #:", Number(BigInt(details[6])));
 ```
 
-Flags:
+### Reproduce the proof locally
 
-| Flag | Description |
-|------|-------------|
-| `--decode` | Enable decode-step proving (prefill + autoregressive steps) |
-| `--decode-steps N` | Number of autoregressive decode steps after prefill |
-| `--prefill-len N` | Number of tokens in the initial prefill pass |
-
-Each decode step appends to an incremental Merkle tree over KV-cache entries. The on-chain contract verifies the commitment chain, so a verifier can confirm that token N was generated from the same context as tokens 1..N-1.
-
-Add `--recursive` to wrap the entire decode chain in a single recursive STARK for 1-TX on-chain verification.
-
----
-
-## 5c. MoE Models (Mixtral)
-
-Mixture-of-Experts architectures (e.g., Mixtral-8x7B) are supported. The HF loader auto-detects MoE routing layers, and the prover generates per-expert weight binding proofs with TopK routing verification.
-
-No special flags are needed. The compiler detects MoE architecture from `config.json` and maps expert tensor names automatically:
+Anyone with the same model weights can independently generate the same proof:
 
 ```bash
-prove-model --model-dir ~/.obelysk/models/mixtral-8x7b \
-  --gkr --format ml_gkr --recursive \
-  --output proof.json
+# 1. Download the same model
+huggingface-cli download Qwen/Qwen2.5-14B --local-dir /tmp/qwen2.5-14b
+
+# 2. Run the same inference with the same input
+echo "What is 2+2?" | \
+  OBELYSK_MODEL_DIR=/tmp/qwen2.5-14b \
+  OBELYZK_MAX_TOKENS=1 \
+  RUST_MIN_STACK=16777216 \
+  ./target/release/obelyzk chat --model local
+
+# 3. Compare the io_commitment — it must match the on-chain value
+# The weight_super_root will also match (same weights → same Merkle root)
 ```
-
-The GKR proof includes dynamic expert weight binding: for each token, only the TopK-selected experts are activated, and the prover binds their weight commitments through the Fiat-Shamir channel. 17 MoE-specific tests validate this path.
-
----
-
-## 6. Automated Node Deployment
-
-The `deploy_node.sh` script sets up both a Juno Starknet node and a `prove-server` instance on a single machine. It handles CUDA detection, model downloads, systemd service files, and on-chain registration.
-
-```bash
-cd stwo-ml
-
-STARKNET_PRIVATE_KEY=0x... ./scripts/deploy_node.sh
-```
-
-The script will:
-
-1. Detect your GPU and CUDA version
-2. Build `prove-model` and `prove-server` with appropriate features
-3. Download SmolLM2-135M weights
-4. Start `prove-server` on port 8080
-5. Register the node on-chain if not already registered
-
-### Production API Deployment
-
-For a production-grade deployment with HTTPS, use `deploy_api.sh`:
-
-```bash
-cd stwo-ml
-
-DOMAIN=api.example.com \
-STARKNET_PRIVATE_KEY=0x... \
-./scripts/deploy_api.sh
-```
-
-This script automates the full deployment stack:
-
-1. Builds `prove-model` and `prove-server` with GPU features (auto-detects CUDA)
-2. Creates a systemd service for `prove-server`
-3. Configures nginx as a reverse proxy
-4. Provisions HTTPS certificates via certbot (Let's Encrypt)
-5. Sets up Bearer token authentication and rate limiting (60 req/min)
-
-The hosted API at `https://api.bitsage.network` and `https://prover.bitsage.network` was deployed using this script.
 
 ---
 
-## 7. Contract Interface Reference
+## 7. Contract Reference
 
-The recursive verifier contract at `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` exposes the following entrypoints:
+**Verifier contract**: [`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7)
 
 | Entrypoint | Type | Description |
 |------------|------|-------------|
-| `verify_recursive_proof` | External | Verify a recursive STARK proof. Called by `submit_recursive.mjs`. |
-| `register_model_recursive` | External | Register a new model ID for recursive verification. Must be called before the first proof submission for that model. |
-| `is_recursive_proof_verified` | View | Returns `true` if the given proof hash has been verified. |
-| `get_recursive_verification_count` | View | Returns the total number of verified proofs for a model ID. |
-| `get_proof_details` | View | Returns proof metadata (timestamp, prover address, model ID) for a verified proof hash. |
-| `propose_upgrade` | External | Owner-only. Propose a contract class upgrade with a 5-minute timelock. |
-| `execute_upgrade` | External | Owner-only. Execute a proposed upgrade after the timelock expires. |
+| `verify_recursive` | External | Full STARK verification + record proof fact |
+| `register_model_recursive` | External | Register model (circuit_hash + weight_root) |
+| `is_recursive_proof_verified` | View | Check if a proof_hash was verified |
+| `get_recursive_verification_count` | View | Total verifications for a model |
+| `get_recursive_model_info` | View | Registered model details |
+| `get_last_verification` | View | Last proof details (io, hash, timestamp, felts, layers) |
+| `get_model_policy` | View | Registered policy commitment |
+| `propose_upgrade` | External | Owner-only timelock upgrade (5 min delay) |
+| `execute_upgrade` | External | Execute pending upgrade |
 
 ---
 
-## 8. Troubleshooting
+## 8. Performance Benchmarks (H100 PCIe, Qwen2.5-14B)
 
-### "Model not found"
+| Phase | Time | Notes |
+|-------|------|-------|
+| Weight loading | 125s | One-time per model (8 SafeTensor shards, 30 GB) |
+| GPU forward pass | ~10s | 192 matmuls across 48 transformer blocks |
+| GKR proof (GPU sumcheck) | 46s | 337 layer proofs, 192 matmul reductions |
+| Weight commitments | 0s | Warm cache (auto-saved to disk after first run) |
+| Recursive STARK | 1.2s | 22,771 Poseidon perms, log_size=15 |
+| On-chain submission | ~15s | Model registration (once) + verify TX |
+| **Total per token (warm)** | **~72s** | Includes on-chain confirmation |
 
-Download the model files to the expected directory:
+---
 
-```bash
-mkdir -p ~/.obelysk/models/smollm2-135m && cd $_
-for f in config.json model.safetensors tokenizer.json tokenizer_config.json; do
-  curl -sL "https://huggingface.co/HuggingFaceTB/SmolLM2-135M/resolve/main/$f" -o $f
-done
+## 9. Architecture
+
 ```
+┌─────────────────────────────────────────────────────────┐
+│                    obelyzk chat                         │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  1. Tokenize (tokenizers crate)                         │
+│     "What is 2+2?" → [1024, 318, 220, 17, 10, 17, 30]  │
+│                                                         │
+│  2. Embed (load_embedding_row)                          │
+│     token_id → (1, 5120) M31 matrix                     │
+│                                                         │
+│  3. Forward Pass (GPU GEMV, 48 transformer blocks)      │
+│     ┌──────────────────────────────────────┐             │
+│     │  RMSNorm → Q/K/V matmul → FFN       │ × 48       │
+│     │  gate×up → down_proj → Add(residual) │             │
+│     └──────────────────────────────────────┘             │
+│     → (1, 5120) output hidden state                     │
+│                                                         │
+│  4. GKR Proof (GPU sumcheck reductions)                 │
+│     192 matmul sumchecks over M31/QM31 fields           │
+│     Poseidon Fiat-Shamir channel (deterministic)        │
+│     Weight binding: Poseidon Merkle roots per matrix    │
+│     → GKRProof (337 layer proofs, ~46K felts)           │
+│                                                         │
+│  5. Recursive STARK (STWO Circle STARK prover)          │
+│     GKR verifier witness → execution trace              │
+│     → STARK proof (~950 calldata felts)                 │
+│                                                         │
+│  6. On-Chain (Starknet Sepolia)                         │
+│     register_model_recursive() — bind model identity    │
+│     verify_recursive() — full STARK verification        │
+│     → RecursiveProofVerified event (rich metadata)      │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 10. Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OBELYSK_MODEL_DIR` | — | Path to model directory (SafeTensors or GGUF) |
+| `OBELYZK_MAX_TOKENS` | 1 | Max tokens to generate per inference |
+| `STARKNET_PRIVATE_KEY` | — | Deployer private key (enables auto on-chain submission) |
+| `STARKNET_ACCOUNT` | — | Deployer account address |
+| `OBELYZK_TRUST_WEIGHT_CLAIMS` | — | Set to `1` for fast recursive STARK (skips MLE re-eval) |
+| `OBELYZK_GPU_FORWARD` | `1` | Set to `0` to force CPU forward pass |
+| `OBELYZK_BATCH_SIZE` | 1 | Tokens per proof batch |
+| `RUST_MIN_STACK` | — | Set to `16777216` (16 MB) for large models |
+
+---
+
+## 11. Verified Proofs on Sepolia
+
+| TX | Model | Felts | Block |
+|----|-------|-------|-------|
+| [`0x38a156d...`](https://sepolia.starkscan.co/tx/0x38a156d972cdc111f40bca7dedf056f42031088daf434d3849a1352da713317) | Qwen2.5-14B | 1,007 | 8592348 |
+| [`0x67a7b92...`](https://sepolia.starkscan.co/tx/0x67a7b9259d874aa40d593ac55fa47f3c4db6836f20893db718334d56ac0f0d9) | Qwen2.5-14B | 927 | 8593213 |
+| [`0x5ce1b41...`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) | Qwen2.5-14B | 946 | — |
+
+---
+
+## 12. Troubleshooting
 
 ### "CUDA not detected"
 
-Install CUDA 12+ and ensure `nvcc` is in your PATH:
-
 ```bash
 export PATH=/usr/local/cuda/bin:$PATH
-nvcc --version
+nvcc --version  # must be 12.0+
 ```
 
-The prover falls back to CPU automatically, but proving is roughly 10x slower without a GPU.
+The prover falls back to CPU automatically but proving is ~10x slower.
 
-### "self-verification failed"
+### "Model not registered" (on-chain)
 
-Set the required environment variables before running the prover:
+The model must be registered before the first proof. The pipeline does this automatically when `STARKNET_PRIVATE_KEY` is set. To register manually:
 
 ```bash
-export STWO_SKIP_RMS_SQ_PROOF=1
-export STWO_ALLOW_MISSING_NORM_PROOF=1
-export STWO_PIECEWISE_ACTIVATION=0
-export STWO_ALLOW_LOGUP_ACTIVATION=1
-export STWO_AGGREGATED_FULL_BINDING=1
-export STWO_SKIP_BATCH_TOKENS=1
+STARKNET_PRIVATE_KEY=0x... node scripts/submit_recursive.mjs proof.json
 ```
 
-### "Transaction reverted: Model not registered"
+### "Already verified"
 
-You must register the model on-chain before submitting proofs for it. Call `register_model_recursive` on the verifier contract with the model ID first.
-
-### "compiled_class_hash mismatch"
-
-When declaring a new contract class, use `starkli --casm-hash` with the sequencer's expected hash. The Sepolia sequencer recompiles Sierra and may produce a different CASM hash than your local toolchain.
-
-### Build fails on CUDA
-
-Verify your CUDA installation:
-
-```bash
-nvcc --version   # must be 12.0 or later
-nvidia-smi       # check driver version
-```
-
-If `nvcc` is present but the build still fails, confirm that `CUDA_HOME` or `CUDA_PATH` is set:
-
-```bash
-export CUDA_HOME=/usr/local/cuda
-```
+The contract deduplicates proofs by `(model_id, io_commitment)`. Run a different inference (different input) to generate a new proof.
 
 ### Out of GPU memory
 
-Reduce the layer count or lower the GPU Merkle threshold:
+Stop any running `obelyzk serve` process first:
+```bash
+sudo systemctl stop obelyzk.service
+nvidia-smi  # verify GPU is free
+```
+
+### Stack overflow on large models
 
 ```bash
-./target/release/prove-model \
-  --model-dir ~/.obelysk/models/smollm2-135m \
-  --gkr --format ml_gkr --recursive --layers 2 \
-  --output proof.json
-
-# Or lower the Merkle threshold
-export STWO_GPU_MERKLE_THRESHOLD=2048
+export RUST_MIN_STACK=16777216  # 16 MB stack
 ```
 
 ---
 
-## 9. Links
+## 13. Links
 
 | Resource | URL |
 |----------|-----|
-| GitHub | https://github.com/obelyzk/stwo-ml |
-| Hosted API | https://api.bitsage.network |
+| GitHub | https://github.com/Bitsage-Network/obelyzk.rs |
+| Contract (Sepolia) | https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 |
+| crates.io | https://crates.io/crates/obelyzk |
 | npm SDK | https://www.npmjs.com/package/@obelyzk/sdk |
 | PyPI SDK | https://pypi.org/project/obelyzk |
-| Documentation | https://docs.obelysk.xyz |
-| Paper | https://arxiv.org/abs/2026.obelyzk |
-| Contract (Sepolia) | https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 |
