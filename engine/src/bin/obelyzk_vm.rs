@@ -1039,17 +1039,29 @@ async fn run_dashboard() {
                         KeyCode::Char('q') if state.mode != Mode::Chat => break,
                         KeyCode::Esc if state.mode != Mode::Chat => break,
 
-                        // Mode switching
-                        KeyCode::Char('1') => state.mode = Mode::Monitor,
-                        KeyCode::Char('2') => state.mode = Mode::Prove,
-                        KeyCode::Char('3') => state.mode = Mode::Chat,
-                        KeyCode::Char('4') => state.mode = Mode::OnChain,
+                        // Mode switching (only when not typing in chat)
+                        KeyCode::Char('1') if state.mode != Mode::Chat => state.mode = Mode::Monitor,
+                        KeyCode::Char('2') if state.mode != Mode::Chat => state.mode = Mode::Prove,
+                        KeyCode::Char('3') if state.mode != Mode::Chat => state.mode = Mode::Chat,
+                        KeyCode::Char('4') if state.mode != Mode::Chat => state.mode = Mode::OnChain,
+
+                        // Theme cycling
+                        KeyCode::Char('t') if state.mode != Mode::Chat => {
+                            state.theme_idx = (state.theme_idx + 1) % obelyzk::tui::interactive::THEMES.len();
+                        }
+
+                        // Tick rate adjustment
+                        KeyCode::Char('+') | KeyCode::Char('=') if state.mode != Mode::Chat => {
+                            state.tick_rate_ms = (state.tick_rate_ms.saturating_sub(10)).max(10);
+                        }
+                        KeyCode::Char('-') if state.mode != Mode::Chat => {
+                            state.tick_rate_ms = (state.tick_rate_ms + 10).min(500);
+                        }
 
                         // Tab to cycle models
-                        KeyCode::Tab => {
+                        KeyCode::Tab if state.mode != Mode::Chat => {
                             if !state.models.is_empty() {
                                 state.selected_model = (state.selected_model + 1) % state.models.len();
-                                // Model selected via Tab — name from models vec
                             }
                         }
 
