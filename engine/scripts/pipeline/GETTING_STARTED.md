@@ -60,7 +60,23 @@ bitsage login --api-key <your-key>
 bitsage shell h100-prover
 ```
 
-You land in a branded H100 environment with Qwen2.5-14B + GLM-4-9B loaded. Type `prove` to generate an on-chain proof. The server is already running — no setup needed.
+You land in a branded H100 environment with Qwen2.5-14B + GLM-4-9B loaded. The API server is already running — no setup needed.
+
+**Quick commands inside the shell:**
+
+| Command | What it does |
+|---------|-------------|
+| `prove` | Run a single inference → GKR proof → recursive STARK → on-chain TX |
+| `dashboard` | Launch the interactive TUI monitor (5 modes, live graphs) |
+| `bench` | Run throughput benchmark (tok/s) |
+| `serve-status` | Check API server health |
+| `gpu` | Show GPU status (nvidia-smi) |
+| `models` | List downloaded models |
+
+**Full proving command (custom prompt):**
+```bash
+echo "What is artificial intelligence?" | OBELYZK_MAX_TOKENS=1 RUST_MIN_STACK=16777216 obelyzk chat --model local
+```
 
 ### Option B: Use the Python/TypeScript SDK (no SSH)
 
