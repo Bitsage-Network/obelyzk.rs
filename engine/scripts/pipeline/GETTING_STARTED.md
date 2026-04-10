@@ -176,9 +176,9 @@ huggingface-cli download THUDM/glm-4-9b --local-dir ~/.obelyzk/models/glm-4-9b
 
 ---
 
-## 5. Prove a Single Inference
+## 5. Prove Inference (Single + Multi-Token + Benchmarks)
 
-### One command — prove + recursive STARK + on-chain submission
+### Single inference — prove + recursive STARK + on-chain
 
 ```bash
 echo "What is 2+2?" | \
@@ -195,14 +195,71 @@ This runs the full pipeline automatically:
 1. **Tokenize** input text
 2. **Forward pass** through all 48 transformer layers (GPU-accelerated)
 3. **GKR proof** — 192 matmul sumcheck reductions, 337 layer proofs (~46s on H100)
-4. **Recursive STARK** — compress to ~950 felts (~1.2s)
+4. **Recursive STARK** — compress GKR proof (~46K felts) into ~950 felts (~1.2s)
 5. **Register model** on Starknet (if not already registered)
 6. **Submit `verify_recursive` TX** — single transaction, full STARK verification on-chain
-7. **Report TX hash** and explorer link
+7. **Report TX hash** and Starkscan explorer link
+
+Each token is individually proven with a GKR sumcheck over every matmul, norm, and activation layer, then compressed via a recursive Circle STARK that the on-chain Cairo contract verifies cryptographically.
+
+### Multi-token generation
+
+Generate multiple tokens — each one is proven and verified:
+
+```bash
+echo "Explain gravity" | \
+  OBELYSK_MODEL_DIR=~/.obelyzk/models/qwen2.5-14b \
+  OBELYZK_MAX_TOKENS=5 \
+  RUST_MIN_STACK=16777216 \
+  ./target/release/obelyzk chat --model local
+```
+
+Each decode step produces a separate GKR proof + recursive STARK. With `STARKNET_PRIVATE_KEY` set, each token is verified on-chain individually.
+
+### Throughput benchmark
+
+Measure tokens/second with batched proving:
+
+```bash
+OBELYSK_MODEL_DIR=~/.obelyzk/models/qwen2.5-14b \
+  RUST_MIN_STACK=16777216 \
+  ./target/release/obelyzk bench --tokens 8
+```
+
+Output:
+```
+  ════════════════════════════════════════
+    BENCHMARK RESULTS
+  ════════════════════════════════════════
+  Tokens:        8
+  Total time:    35.3s
+  Throughput:    0.23 tok/s
+  Per token:     4412.5ms
+  IO commitment: 0x03af8b...
+  GPU:           active
+  ════════════════════════════════════════
+```
+
+### On the H100 (via bitsage shell)
+
+All commands work inside the shell — no setup needed:
+
+```bash
+bitsage shell h100-prover
+
+# Single proven inference
+prove
+
+# Multi-token
+echo "Hello" | OBELYZK_MAX_TOKENS=5 obelyzk chat --model local
+
+# Benchmark
+obelyzk bench --tokens 8
+```
 
 ### Without on-chain submission (local proof only)
 
-Omit `STARKNET_PRIVATE_KEY`:
+Omit `STARKNET_PRIVATE_KEY` to generate the proof without submitting:
 
 ```bash
 echo "Hello" | \
