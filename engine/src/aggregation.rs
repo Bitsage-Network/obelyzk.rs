@@ -4786,11 +4786,17 @@ where
             if let Some(inp) = node_outputs.get(&first_input) {
                 current = inp.clone();
             }
-            // Also update GPU tensor if we have one cached
+            // Sync GPU tensor: use cached GPU output if available,
+            // otherwise re-upload current (after CPU-only ops like RMSNorm/Add).
             #[cfg(feature = "cuda-runtime")]
-            if gpu_forward.is_some() {
+            if let Some((ref exec, _)) = gpu_forward {
                 if let Some(gt) = gpu_node_outputs.remove(&first_input) {
                     gpu_current = Some(gt);
+                } else if gpu_current.is_some() {
+                    // Previous node ran on CPU — re-upload current to keep GPU in sync
+                    if let Ok(gt) = exec.upload(&current) {
+                        gpu_current = Some(gt);
+                    }
                 }
             }
         }
@@ -4928,6 +4934,27 @@ where
                 };
                 #[cfg(not(feature = "cuda-runtime"))]
                 let output = matmul_m31(&current, weight);
+
+                // Debug: validate GPU matmul against CPU for first few nodes
+                if std::env::var("STWO_CHANNEL_TRACE").is_ok() && step < 8 {
+                    let cpu_ref = matmul_m31(&current, weight);
+                    let n_total = output.data.len();
+                    let mismatches: usize = output.data.iter().zip(cpu_ref.data.iter())
+                        .filter(|(g, c)| g != c)
+                        .count();
+                    if mismatches > 0 {
+                        eprintln!("[FWD VALIDATE] Node {} MatMul {}x{}x{}: {} / {} mismatches",
+                            node.id, m, k, n, mismatches, n_total);
+                        // Show first few mismatches
+                        for (i, (g, c)) in output.data.iter().zip(cpu_ref.data.iter()).enumerate() {
+                            if g != c && i < 4 {
+                                eprintln!("  [{}] gpu={} cpu={}", i, g.0, c.0);
+                            }
+                        }
+                    } else {
+                        eprintln!("[FWD VALIDATE] Node {} MatMul {}x{}x{}: MATCH ✓", node.id, m, k, n);
+                    }
+                }
 
                 intermediates.push((node.id, current.clone()));
                 node_outputs.insert(node.id, output.clone());

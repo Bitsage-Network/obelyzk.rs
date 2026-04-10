@@ -409,8 +409,13 @@ pub fn generate_witness_with_policy(
     // ── Pass 1: production verification ──────────────────────────────
     // Run the real verifier to (a) confirm validity, (b) measure hash_count,
     // and (c) capture the final channel digest.
-    // Policy must match the prover's policy for channel alignment.
+    //
+    // The channel must match the prover's GKR channel state exactly.
+    // The pure GKR path (prove_model_pure_gkr_inner) seeds the GKR channel
+    // ONLY with optional KV-cache commitment — no io_commitment or policy
+    // outer seeding (that's only in prove_model_aggregated_onchain_gkr_auto).
     let mut prod_channel = crate::crypto::poseidon_channel::PoseidonChannel::new();
+
     let _claim = if let Some(p) = policy {
         crate::gkr::verifier::verify_gkr_with_policy(circuit, proof, output, weights, &mut prod_channel, p)?
     } else if let Some(w) = weights {
@@ -426,7 +431,9 @@ pub fn generate_witness_with_policy(
     let mut channel = InstrumentedChannel::new();
     let d = circuit.layers.len();
 
-    // Seed channel identically to prover
+    // No outer seeding needed — the pure GKR path starts fresh.
+
+    // Seed channel identically to GKR prover internal
     channel.mix_u64(d as u64);
     channel.mix_u64(circuit.input_shape.0 as u64);
     channel.mix_u64(circuit.input_shape.1 as u64);

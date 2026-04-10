@@ -124,7 +124,22 @@ if firewall.is_action_approved(action_id) {
 
 The VM31Pool contract manages a shielded transaction pool using a Poseidon2-M31 Merkle tree for note commitments. Supports deposits (public -> shielded), withdrawals (shielded -> public), and private transfers (2-in/2-out spends) — all verified via STARK proofs.
 
-### Deployed (Starknet Sepolia)
+### Deployed Contracts (Starknet Sepolia)
+
+#### RecursiveVerifierContract (ML Inference Proofs)
+
+| Field | Value |
+|-------|-------|
+| **Address** | [`0x01c208...0c40c7`](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7) |
+| **Class Hash** | `0x0779d720d49f5c071b6c5fb1d9aef24096ff65fd4f82b76ee11bc32b26514c21` |
+| **Owner** | `0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344` |
+| **Verifications** | 5+ (Qwen2.5-14B) |
+| **Latest TX** | [`0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) |
+
+`verify_recursive` accepts rich named parameters visible in block explorers:
+`model_id`, `io_commitment`, `circuit_hash`, `weight_super_root`, `n_layers`, `n_matmuls`, `hidden_size`, `num_transformer_blocks`, `policy_commitment`, `trace_log_size`, `stark_proof_data`
+
+#### VM31Pool (Privacy Pool)
 
 | Field | Value |
 |-------|-------|

@@ -96,8 +96,10 @@ async function main() {
     const proofRoot = weightSuperRoot.toLowerCase();
     const chainRoot = registeredWeightRoot.toLowerCase();
 
-    if (chainRoot !== "0x0" && chainRoot !== proofRoot && proofRoot !== "0x0") {
-      console.log("Register:      re-registering (weight_super_root changed: " + chainRoot.slice(0, 12) + "... → " + proofRoot.slice(0, 12) + "...)");
+    const needsRegister = chainRoot === "0x0" || (chainRoot !== proofRoot && proofRoot !== "0x0");
+    if (needsRegister) {
+      const reason = chainRoot === "0x0" ? "not registered" : "weight_super_root changed";
+      console.log("Register:      registering (" + reason + ")");
       const regTx = await account.execute({
         contractAddress: CONTRACT,
         entrypoint: "register_model_recursive",
@@ -140,7 +142,8 @@ async function main() {
     }
   }
 
-  // Step 2: Submit verify_recursive
+  // Step 2: Submit verify_recursive with rich on-chain metadata
+  const metadata = raw.metadata || {};
   process.stdout.write("Submitting:    ");
   const tx = await account.execute({
     contractAddress: CONTRACT,
@@ -148,6 +151,14 @@ async function main() {
     calldata: CallData.compile({
       model_id: modelId,
       io_commitment: ioCommitment,
+      circuit_hash: circuitHash,
+      weight_super_root: weightSuperRoot,
+      n_layers: metadata.n_layers || 337,
+      n_matmuls: metadata.n_matmuls || 192,
+      hidden_size: metadata.hidden_size || 5120,
+      num_transformer_blocks: metadata.num_transformer_blocks || 48,
+      policy_commitment: raw.policy_commitment || recursive.policy_commitment || "0x0",
+      trace_log_size: metadata.trace_log_size || 15,
       stark_proof_data: calldata,
     }),
   });

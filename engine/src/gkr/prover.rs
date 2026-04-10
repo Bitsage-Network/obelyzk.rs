@@ -2872,6 +2872,10 @@ pub fn prove_gkr_gpu_with_cache(
 
     mix_secure_field(channel, output_value);
 
+    if trace {
+        eprintln!("[PROVER-GPU] ch after output claim: {:?}", channel.digest());
+    }
+
     let output_claim = GKRClaim {
         point: r_out,
         value: output_value,
@@ -3144,6 +3148,15 @@ pub fn prove_gkr_gpu_with_cache(
 
         layer_proofs.push(proof);
         current_claim = next_claim;
+        if trace {
+            eprintln!(
+                "[PROVER-GPU] L{} type={:?} ch={:?} claim_val={:?}",
+                layer_idx,
+                std::mem::discriminant(&layer.layer_type),
+                channel.digest(),
+                current_claim.value,
+            );
+        }
         #[cfg(feature = "proof-stream")]
         emit_proof_event!(|| proof_stream::ProofEvent::LayerEnd {
             layer_idx,
@@ -5990,6 +6003,19 @@ fn reduce_matmul_layer_with_backend<B: crate::backend::ZkmlOps>(
         }
     })?;
     let d_reduce = t_reduce.map(|t| t.elapsed());
+
+    // Validate sumcheck at round 0: p(0)+p(1) must equal output_claim.value
+    if std::env::var("STWO_CHANNEL_TRACE").is_ok() && !reduction.round_polys.is_empty() {
+        let rp0 = &reduction.round_polys[0];
+        let p0_plus_p1 = rp0.c0 + (rp0.c0 + rp0.c1 + rp0.c2);
+        let matches = p0_plus_p1 == output_claim.value;
+        if !matches {
+            eprintln!(
+                "[MatMul PROVER] SUMCHECK MISMATCH at round 0: p(0)+p(1)={:?} != claim={:?} (m={},k={},n={})",
+                p0_plus_p1, output_claim.value, m, k, n,
+            );
+        }
+    }
 
     // Sub-phase 3: Bind final evaluations to transcript.
     let t_bind = if profiling { Some(std::time::Instant::now()) } else { None };
