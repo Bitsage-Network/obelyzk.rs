@@ -458,7 +458,9 @@ fn render_monitor(frame: &mut Frame, area: Rect, state: &InteractiveDashState, t
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),   // Top: dispatch + pulse + registers
-            Constraint::Min(6),     // Bottom: chart + sparkline | layer bars + trace
+            Constraint::Min(4),     // Middle: chart | layer bars + trace
+            Constraint::Length(4),   // Sparklines row
+            Constraint::Length(5),   // Bottom: GPU memory | proof artifact
         ])
         .split(area);
 
@@ -512,17 +514,11 @@ fn render_monitor(frame: &mut Frame, area: Rect, state: &InteractiveDashState, t
     ];
     frame.render_widget(Paragraph::new(reg_lines).block(panel_block("Registers", t)), top_cols[2]);
 
-    // Bottom: left (chart + sparkline) | right (layer bars + trace)
-    let bot_cols = Layout::default()
+    // Middle: chart (55%) | layer spotlight + trace (45%)
+    let mid_cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(rows[1]);
-
-    // Left: throughput chart + tempo trail
-    let left_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(4)])
-        .split(bot_cols[0]);
 
     // Chart: dual dataset (throughput + GPU util)
     let tp_points: Vec<(f64, f64)> = state.throughput_history.iter().enumerate()
@@ -553,30 +549,15 @@ fn render_monitor(frame: &mut Frame, area: Rect, state: &InteractiveDashState, t
             .bounds([0.0, max_y])
             .labels(vec![
                 Span::styled("0", Style::default().fg(t.muted)),
-                Span::styled(format!("{:.0}", max_y / 2.0), Style::default().fg(t.muted)),
                 Span::styled(format!("{:.0}", max_y), Style::default().fg(t.muted)),
             ]));
-    frame.render_widget(chart, left_rows[0]);
-
-    // Tempo trail sparkline
-    let sw = left_rows[1].width.saturating_sub(4) as usize;
-    let spark = sparkline_str(&state.throughput_history, sw);
-    let tempo_lines = vec![
-        Line::from(vec![
-            Span::styled("  current ", Style::default().fg(t.muted)),
-            Span::styled(format!("{:.1}", state.current_tok_per_sec), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
-            Span::styled("  peak ", Style::default().fg(t.muted)),
-            Span::styled(format!("{:.1}", state.peak_tok_per_sec), Style::default().fg(t.accent_alt)),
-        ]),
-        Line::from(Span::styled(format!("  {}", spark), Style::default().fg(t.accent))),
-    ];
-    frame.render_widget(Paragraph::new(tempo_lines).block(panel_block("Tempo Trail", t)), left_rows[1]);
+    frame.render_widget(chart, mid_cols[0]);
 
     // Right: layer spotlight + trace
     let right_rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(4)])
-        .split(bot_cols[1]);
+        .constraints([Constraint::Length(5), Constraint::Min(3)])
+        .split(mid_cols[1]);
 
     // Layer spotlight: timing bars
     let max_ms = state.layer_events.iter().map(|e| e.time_ms).max().unwrap_or(1);
@@ -605,6 +586,96 @@ fn render_monitor(frame: &mut Frame, area: Rect, state: &InteractiveDashState, t
         ]))
     }).collect();
     frame.render_widget(List::new(trace_items).block(panel_block("Live Trace", t)), right_rows[1]);
+
+    // Sparklines row: 3 sparklines side by side
+    let spark_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(33), Constraint::Percentage(33)])
+        .split(rows[2]);
+
+    // Throughput sparkline
+    let sw1 = spark_cols[0].width.saturating_sub(4) as usize;
+    let s1 = sparkline_str(&state.throughput_history, sw1);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(format!("  {}", s1), Style::default().fg(t.accent))),
+            Line::from(vec![
+                Span::styled(format!("  {:.1} tok/s", state.current_tok_per_sec), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  peak {:.1}", state.peak_tok_per_sec), Style::default().fg(t.accent_alt)),
+            ]),
+        ]).block(panel_block("Throughput", t)),
+        spark_cols[0],
+    );
+
+    // GPU utilization sparkline
+    let sw2 = spark_cols[1].width.saturating_sub(4) as usize;
+    let s2 = sparkline_str(&state.gpu_util_history, sw2);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(format!("  {}", s2), Style::default().fg(t.accent_alt))),
+            Line::from(vec![
+                Span::styled(format!("  {:.0}% util", state.gpu_util_pct), Style::default().fg(t.accent_alt).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {:.0}°C", state.gpu_temp_c), Style::default().fg(t.muted)),
+            ]),
+        ]).block(panel_block("GPU Load", t)),
+        spark_cols[1],
+    );
+
+    // Layer timing sparkline
+    let sw3 = spark_cols[2].width.saturating_sub(4) as usize;
+    let s3 = sparkline_str(&state.layer_time_history, sw3);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(format!("  {}", s3), Style::default().fg(t.accent_soft))),
+            Line::from(vec![
+                Span::styled(format!("  {}ms/layer", state.layer_time_history.last().unwrap_or(&0)), Style::default().fg(t.accent_soft).add_modifier(Modifier::BOLD)),
+            ]),
+        ]).block(panel_block("Layer Time", t)),
+        spark_cols[2],
+    );
+
+    // Bottom row: GPU Memory | Proof Artifact
+    let bot_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[3]);
+
+    // GPU Memory panel
+    let gpu_mem_ratio: f64 = 0.35;
+    let gpu_lines = vec![
+        gauge_line("VRAM", gpu_mem_ratio, t),
+        Line::from(vec![
+            Span::styled(format!("  {:.0}GB / {:.0}GB", state.gpu_memory_gb as f64 * gpu_mem_ratio, state.gpu_memory_gb), Style::default().fg(t.text)),
+            Span::styled(format!("  {}", state.gpu_name), Style::default().fg(t.muted)),
+        ]),
+        Line::from(vec![
+            Span::styled("  weights ", Style::default().fg(t.muted)),
+            Span::styled("loaded", Style::default().fg(t.success)),
+            Span::styled("  cache ", Style::default().fg(t.muted)),
+            Span::styled("warm", Style::default().fg(t.success)),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(gpu_lines).block(panel_block("GPU Memory", t)), bot_cols[0]);
+
+    // Proof Artifact panel
+    let proof_lines = vec![
+        Line::from(vec![
+            Span::styled("  GKR proof  ", Style::default().fg(t.muted)),
+            Span::styled(format!("{} layers", state.proving_total_layers), Style::default().fg(t.text)),
+            Span::styled(format!("  {} matmuls", state.proving_total_matmuls), Style::default().fg(t.text)),
+        ]),
+        Line::from(vec![
+            Span::styled("  STARK      ", Style::default().fg(t.muted)),
+            Span::styled(format!("{} felts", state.stark_felts.unwrap_or(0)), Style::default().fg(t.accent_alt).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {:.1}s", state.stark_time_secs.unwrap_or(0.0)), Style::default().fg(t.text)),
+        ]),
+        Line::from(vec![
+            Span::styled("  on-chain   ", Style::default().fg(t.muted)),
+            badge(&format!("{} verified", state.verification_count), t.bg, t.success),
+            Span::styled(format!("  {}", state.network), Style::default().fg(t.accent_soft)),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(proof_lines).block(panel_block("Proof Artifact", t)), bot_cols[1]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
