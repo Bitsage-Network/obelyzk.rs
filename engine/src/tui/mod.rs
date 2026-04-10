@@ -12,3 +12,6 @@ pub mod dashboard;
 
 #[cfg(feature = "tui")]
 pub mod vm_dashboard;
+
+#[cfg(feature = "tui")]
+pub mod interactive;

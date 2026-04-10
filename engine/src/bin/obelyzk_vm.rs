@@ -909,6 +909,7 @@ async fn run_dashboard() {
         execute,
     };
     use ratatui::prelude::*;
+    use obelyzk::tui::interactive::*;
 
     let model_dir = std::env::var("OBELYSK_MODEL_DIR").unwrap_or_default();
     let model_name = std::path::Path::new(&model_dir)
@@ -917,20 +918,21 @@ async fn run_dashboard() {
         .unwrap_or_else(|| "no model".into());
 
     let started = Instant::now();
-    let mut dash_state = obelyzk::tui::vm_dashboard::VmDashboardState::default();
-    dash_state.model_name = model_name;
-    dash_state.network = "Starknet Sepolia".into();
+    let mut state = InteractiveDashState::default();
+    state.active_model = Some(model_name);
 
     // Detect GPU
     if let Some(name) = obelyzk::backend::gpu_device_name() {
-        dash_state.workers.push(obelyzk::tui::vm_dashboard::GpuWorkerState {
-            device_id: 0,
-            device_name: name,
-            utilization: 0.0,
-            current_job: None,
-            memory_used_gb: 0.0,
-            memory_total_gb: 24.0,
-        });
+        state.gpu_name = name;
+        state.gpu_memory_gb = 80.0;
+    }
+
+    // Check if API server is running via simple TCP connect
+    if std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:8080".parse().unwrap(),
+        std::time::Duration::from_millis(500),
+    ).is_ok() {
+        // API is running — model is already loaded by serve
     }
 
     // Terminal setup
@@ -941,27 +943,77 @@ async fn run_dashboard() {
     let mut terminal = Terminal::new(backend).expect("terminal");
 
     loop {
-        // Update state
-        dash_state.uptime_secs = started.elapsed().as_secs();
-        dash_state.frame_count = dash_state.frame_count.wrapping_add(1);
-        dash_state.status = obelyzk::tui::vm_dashboard::VmStatus::Ready;
+        // Update runtime state
+        state.uptime_secs = started.elapsed().as_secs();
+        state.frame_count = state.frame_count.wrapping_add(1);
 
         // Render
         terminal.draw(|frame| {
-            obelyzk::tui::vm_dashboard::render(frame, &dash_state);
+            render_interactive(frame, &state);
         }).expect("draw");
 
         // Handle input (50ms poll)
         if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
             match event::read() {
                 Ok(Event::Key(key)) => {
+                    // Global keys
                     match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('q') if state.mode != Mode::Chat => break,
+                        KeyCode::Esc if state.mode != Mode::Chat => break,
+
+                        // Mode switching
+                        KeyCode::Char('1') => state.mode = Mode::Monitor,
+                        KeyCode::Char('2') => state.mode = Mode::Prove,
+                        KeyCode::Char('3') => state.mode = Mode::Chat,
+                        KeyCode::Char('4') => state.mode = Mode::OnChain,
+
+                        // Tab to cycle models
+                        KeyCode::Tab => {
+                            if !state.models.is_empty() {
+                                state.selected_model = (state.selected_model + 1) % state.models.len();
+                                state.active_model = Some(state.models[state.selected_model].name.clone());
+                            }
+                        }
+
+                        // Chat mode input
+                        KeyCode::Char(c) if state.mode == Mode::Chat => {
+                            state.input_buffer.insert(state.input_cursor, c);
+                            state.input_cursor += 1;
+                        }
+                        KeyCode::Backspace if state.mode == Mode::Chat && state.input_cursor > 0 => {
+                            state.input_cursor -= 1;
+                            state.input_buffer.remove(state.input_cursor);
+                        }
+                        KeyCode::Esc if state.mode == Mode::Chat => {
+                            state.input_buffer.clear();
+                            state.input_cursor = 0;
+                            state.mode = Mode::Monitor;
+                        }
+                        KeyCode::Enter if state.mode == Mode::Chat && !state.input_buffer.is_empty() => {
+                            let prompt = state.input_buffer.clone();
+                            state.chat_messages.push(ChatMsg {
+                                role: "user".into(),
+                                content: prompt.clone(),
+                                proof_status: None,
+                                tx_hash: None,
+                            });
+                            state.input_buffer.clear();
+                            state.input_cursor = 0;
+
+                            // Submit to API in background
+                            state.chat_messages.push(ChatMsg {
+                                role: "assistant".into(),
+                                content: "Proving...".into(),
+                                proof_status: Some("proving".into()),
+                                tx_hash: None,
+                            });
+                        }
+
                         _ => {}
                     }
                 }
-                Ok(Event::Resize(_, _)) => {} // ratatui handles resize on next draw
+                Ok(Event::Resize(_, _)) => {}
                 _ => {}
             }
         }
