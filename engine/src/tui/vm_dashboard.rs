@@ -696,14 +696,14 @@ fn render_onchain_panel(frame: &mut Frame, area: Rect, state: &VmDashboardState)
     let mut lines = vec![title, Line::from("")];
 
     if let Some(ref tx) = state.last_tx_hash {
-        let tx_short = if tx.len() > 20 {
+        let tx_short: String = if tx.len() > 20 {
             format!("{}...{}", &tx[..10], &tx[tx.len()-8..])
         } else {
             tx.clone()
         };
         lines.push(Line::from(vec![
             Span::styled("  TX  ", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
-            Span::styled(&tx_short, Style::default().fg(CYAN)),
+            Span::styled(tx_short.clone(), Style::default().fg(CYAN)),
             Span::styled(format!("  {} felts",
                 state.last_calldata_felts.unwrap_or(0)), Style::default().fg(GHOST)),
             Span::styled(format!("  {:.1}s prove",
