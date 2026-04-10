@@ -1185,8 +1185,43 @@ fn load_weights_from_shards(
             let tensor = tensors
                 .tensor(tensor_name)
                 .map_err(|e| WeightError::IoError(format!("{}: {e}", tensor_name)))?;
-            let data = tensor_to_f32(tensor.data(), tensor.dtype());
+            let mut data = tensor_to_f32(tensor.data(), tensor.dtype());
             let shape = tensor.shape().to_vec();
+
+            // FP8 per-block dequantization: apply weight_scale_inv if present.
+            // MiniMax-M2.5, DeepSeek-V3 store FP8 weights with companion
+            // scale tensors: tensor_name + "_scale_inv" with block_size [128, 128].
+            let is_fp8 = matches!(tensor.dtype(),
+                safetensors::Dtype::F8_E4M3 | safetensors::Dtype::F8_E5M2);
+            if is_fp8 {
+                let scale_name = format!("{}_scale_inv", tensor_name);
+                if let Ok(scale_tensor) = tensors.tensor(&scale_name) {
+                    let scales = tensor_to_f32(scale_tensor.data(), scale_tensor.dtype());
+                    let scale_shape = scale_tensor.shape();
+                    // Block size: weight shape / scale shape
+                    let (rows, cols) = if shape.len() == 2 { (shape[0], shape[1]) } else { (1, data.len()) };
+                    let (s_rows, s_cols) = if scale_shape.len() == 2 {
+                        (scale_shape[0], scale_shape[1])
+                    } else {
+                        (1, scales.len())
+                    };
+                    let block_r = if s_rows > 0 { rows / s_rows } else { rows };
+                    let block_c = if s_cols > 0 { cols / s_cols } else { cols };
+
+                    if block_r > 0 && block_c > 0 && scales.len() == s_rows * s_cols {
+                        for r in 0..rows {
+                            for c in 0..cols {
+                                let sr = (r / block_r).min(s_rows - 1);
+                                let sc = (c / block_c).min(s_cols - 1);
+                                data[r * cols + c] *= scales[sr * s_cols + sc];
+                            }
+                        }
+                        eprintln!("  FP8 dequant: {} [{rows}×{cols}] × scale [{s_rows}×{s_cols}] (block {block_r}×{block_c})",
+                            tensor_name);
+                    }
+                }
+            }
+
             all_raw.push((idx, k, n, data, shape));
         }
     }

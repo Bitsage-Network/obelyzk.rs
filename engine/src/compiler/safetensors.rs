@@ -90,6 +90,15 @@ pub fn tensor_to_f32(data: &[u8], dtype: safetensors::Dtype) -> Vec<f32> {
                 bf16_to_f32(bits)
             })
             .collect(),
+        safetensors::Dtype::F8_E4M3 => {
+            // FP8 E4M3: 1 sign, 4 exponent (bias=7), 3 mantissa
+            // Used by MiniMax-M2.5, DeepSeek-V3
+            data.iter().map(|&b| fp8_e4m3_to_f32(b)).collect()
+        }
+        safetensors::Dtype::F8_E5M2 => {
+            // FP8 E5M2: 1 sign, 5 exponent (bias=15), 2 mantissa
+            data.iter().map(|&b| fp8_e5m2_to_f32(b)).collect()
+        }
         safetensors::Dtype::I8 => data.iter().map(|&b| b as i8 as f32).collect(),
         safetensors::Dtype::U8 => data.iter().map(|&b| b as f32).collect(),
         other => {
@@ -107,6 +116,56 @@ pub fn tensor_to_f32(data: &[u8], dtype: safetensors::Dtype) -> Vec<f32> {
                 })
                 .collect()
         }
+    }
+}
+
+/// Convert FP8 E4M3 (1 sign, 4 exponent, 3 mantissa, bias=7) to f32.
+///
+/// Range: [-448.0, 448.0], NaN = 0x7F / 0xFF (no inf).
+/// Used by MiniMax-M2.5, DeepSeek-V3 for quantized weights.
+fn fp8_e4m3_to_f32(bits: u8) -> f32 {
+    let sign = (bits >> 7) & 1;
+    let exp = (bits >> 3) & 0xF; // 4 bits
+    let man = bits & 0x7;         // 3 bits
+
+    // NaN: exponent=15 and mantissa=7
+    if exp == 15 && man == 7 {
+        return f32::NAN;
+    }
+
+    let f_sign = if sign == 1 { -1.0f32 } else { 1.0f32 };
+
+    if exp == 0 {
+        // Subnormal: 0.mantissa * 2^(1-7) = mantissa/8 * 2^-6
+        f_sign * (man as f32 / 8.0) * (2.0f32).powi(-6)
+    } else {
+        // Normal: 1.mantissa * 2^(exp-7)
+        let mantissa = 1.0 + man as f32 / 8.0;
+        f_sign * mantissa * (2.0f32).powi(exp as i32 - 7)
+    }
+}
+
+/// Convert FP8 E5M2 (1 sign, 5 exponent, 2 mantissa, bias=15) to f32.
+fn fp8_e5m2_to_f32(bits: u8) -> f32 {
+    let sign = (bits >> 7) & 1;
+    let exp = (bits >> 2) & 0x1F; // 5 bits
+    let man = bits & 0x3;          // 2 bits
+
+    if exp == 31 {
+        return if man == 0 {
+            if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
+        } else {
+            f32::NAN
+        };
+    }
+
+    let f_sign = if sign == 1 { -1.0f32 } else { 1.0f32 };
+
+    if exp == 0 {
+        f_sign * (man as f32 / 4.0) * (2.0f32).powi(-14)
+    } else {
+        let mantissa = 1.0 + man as f32 / 4.0;
+        f_sign * mantissa * (2.0f32).powi(exp as i32 - 15)
     }
 }
 
