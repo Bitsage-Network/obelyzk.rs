@@ -356,12 +356,27 @@ impl LocalProvider {
             gkr_time,
         ) {
             Ok(recursive_proof) => {
+                let calldata = crate::cairo_serde::serialize_recursive_proof_calldata(
+                    &recursive_proof,
+                );
                 eprintln!(
-                    "[recursive] {label}: STARK compressed in {:.1}s (log_size={}, {} poseidon perms, on-chain ready)",
+                    "[recursive] {label}: STARK compressed in {:.1}s (log_size={}, {} poseidon perms, {} calldata felts, on-chain ready)",
                     t_recursive.elapsed().as_secs_f64(),
                     recursive_proof.metadata.trace_log_size,
                     recursive_proof.metadata.n_poseidon_perms,
+                    calldata.len(),
                 );
+
+                // Save calldata to file for on-chain submission
+                let calldata_path = format!("/tmp/obelyzk_recursive_{label}.json");
+                let calldata_hex: Vec<String> = calldata.iter()
+                    .map(|f| format!("0x{:064x}", f))
+                    .collect();
+                if let Ok(json) = serde_json::to_string_pretty(&calldata_hex) {
+                    if std::fs::write(&calldata_path, &json).is_ok() {
+                        eprintln!("[recursive] {label}: calldata saved to {calldata_path}");
+                    }
+                }
             }
             Err(e) => {
                 eprintln!(
