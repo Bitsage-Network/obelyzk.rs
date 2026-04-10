@@ -141,6 +141,24 @@ struct ObelyzkMeta {
     /// Inference latency in ms (fast path only, excludes proving).
     #[serde(skip_serializing_if = "Option::is_none")]
     inference_time_ms: Option<u64>,
+    /// On-chain verification TX hash (Starknet Sepolia).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_hash: Option<String>,
+    /// Poseidon hash of the verified proof (dedup key on-chain).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof_hash: Option<String>,
+    /// Unique model identifier (Poseidon hash of weight commitments).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_id: Option<String>,
+    /// Number of STARK calldata felts submitted on-chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calldata_felts: Option<usize>,
+    /// Block explorer URL for the verification TX.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explorer_url: Option<String>,
+    /// Total proving time in seconds (GKR + recursive STARK).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prove_time_secs: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -239,6 +257,7 @@ async fn chat_completions(
         .collect();
 
     let model_lower = req.model.to_lowercase();
+    let mut proof_meta = obelyzk::providers::local::ProofMeta::default();
     let (text, trust_str, io_hex, num_tokens) =
         if let Some(ref local) = state.local_provider {
             // Check if the requested model matches the local model
@@ -247,16 +266,18 @@ async fn chat_completions(
                 || state.anthropic_provider.is_none() && state.openai_provider.is_none() && state.upstream_provider.is_none()
             {
                 let local = Arc::clone(local);
+                let max_tok = req.max_tokens.unwrap_or(1) as usize;
                 let result = tokio::task::spawn_blocking(move || {
-                    local.infer_text(&prompt, None)
-                        .map(|(text, res, _)| (text, res))
+                    local.generate_with_proof(&prompt, max_tok, |_, _, _| {})
                         .map_err(|e| format!("{e}"))
                 })
                 .await
                 .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("join: {e}")))?
                 .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
-                let (text, res) = result;
-                (text, trust_model_str(&res.trust_model), res.io_commitment.map(|c| format!("0x{:x}", c)), res.num_tokens)
+                let (text, _ids, pm) = result;
+                let io_hex = pm.io_commitment.clone();
+                proof_meta = pm;
+                (text, "zk_proof", io_hex, max_tok)
             } else if model_lower.starts_with("claude") {
                 // Route to Anthropic
                 if let Some(ref anthropic) = state.anthropic_provider {
@@ -338,6 +359,12 @@ async fn chat_completions(
             proof_id, proof_status: "complete".into(), trust_model: trust_str.into(),
             io_commitment: io_hex, attestation_id,
             session_id: Some(session_id), turns: Some(turns), inference_time_ms: None,
+            tx_hash: proof_meta.tx_hash,
+            proof_hash: proof_meta.proof_hash,
+            model_id: proof_meta.model_id,
+            calldata_felts: proof_meta.calldata_felts,
+            explorer_url: proof_meta.explorer_url,
+            prove_time_secs: proof_meta.prove_time_secs,
         }),
     }).into_response())
 }

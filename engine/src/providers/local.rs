@@ -14,6 +14,34 @@ use crate::policy::PolicyConfig;
 use crate::providers::types::*;
 use crate::vm::trace::ExecutionTrace;
 
+/// Proof metadata returned after generate_with_proof().
+#[derive(Debug, Clone, Default)]
+pub struct ProofMeta {
+    /// On-chain TX hash (if submitted).
+    pub tx_hash: Option<String>,
+    /// Proof hash (Poseidon of model_id + io_commitment).
+    pub proof_hash: Option<String>,
+    /// Model identity (Poseidon hash of weight commitments).
+    pub model_id: Option<String>,
+    /// IO commitment (Poseidon hash of packed IO).
+    pub io_commitment: Option<String>,
+    /// Number of calldata felts in the recursive STARK.
+    pub calldata_felts: Option<usize>,
+    /// Explorer URL for the on-chain TX.
+    pub explorer_url: Option<String>,
+    /// Total proving time in seconds.
+    pub prove_time_secs: Option<f64>,
+    /// GKR proof time in seconds.
+    pub gkr_time_secs: Option<f64>,
+    /// Recursive STARK compression time in seconds.
+    pub recursive_time_secs: Option<f64>,
+}
+
+thread_local! {
+    /// Thread-local for capturing proof metadata from compress_to_recursive_stark.
+    static PROOF_META: std::cell::RefCell<Option<ProofMeta>> = std::cell::RefCell::new(None);
+}
+
 /// Local inference provider — loads HuggingFace models, runs M31 forward pass.
 ///
 /// Full production engine: GPU kernels, STWO backend, weight cache,
@@ -305,6 +333,24 @@ impl LocalProvider {
         Ok((generated_text, generated_ids))
     }
 
+    /// Generate tokens with full proof pipeline, returning rich proof metadata.
+    ///
+    /// Same as `generate()` but captures recursive STARK info and on-chain TX hash.
+    pub fn generate_with_proof(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        on_token: impl FnMut(&str, u32, usize),
+    ) -> Result<(String, Vec<u32>, ProofMeta), LocalProviderError> {
+        // Set up thread-local to capture proof metadata from compress_to_recursive_stark
+        PROOF_META.with(|cell| cell.borrow_mut().take());
+
+        let (text, ids) = self.generate(prompt, max_tokens, on_token)?;
+
+        let meta = PROOF_META.with(|cell| cell.borrow_mut().take()).unwrap_or_default();
+        Ok((text, ids, meta))
+    }
+
     /// Compress a GKR proof into a recursive STARK (~942 felts) for on-chain verification.
     #[cfg(feature = "cli")]
     fn compress_to_recursive_stark(
@@ -435,9 +481,23 @@ impl LocalProvider {
                                         eprintln!("[on-chain] {line}");
                                     }
                                 }
-                                // Extract tx hash
-                                if let Some(tx_line) = stdout.lines().find(|l| l.contains("tx=0x")) {
-                                    eprintln!("[on-chain] {label}: {tx_line}");
+                                // Parse RESULT_JSON from script output
+                                if let Some(json_line) = stdout.lines().find(|l| l.starts_with("RESULT_JSON:")) {
+                                    let json_str = &json_line["RESULT_JSON:".len()..];
+                                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                        let tx = result["tx_hash"].as_str().map(String::from);
+                                        let explorer = result["explorer_url"].as_str().map(String::from);
+                                        PROOF_META.with(|cell| {
+                                            let mut meta = cell.borrow_mut();
+                                            let m = meta.get_or_insert_with(ProofMeta::default);
+                                            m.tx_hash = tx;
+                                            m.explorer_url = explorer;
+                                            m.calldata_felts = Some(calldata.len());
+                                            m.model_id = Some(format!("0x{:064x}", model_id));
+                                            m.io_commitment = Some(format!("0x{:064x}", proof.io_commitment));
+                                            m.recursive_time_secs = Some(t_recursive.elapsed().as_secs_f64());
+                                        });
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -453,6 +513,15 @@ impl LocalProvider {
                 } else {
                     eprintln!("[recursive] {label}: proof saved to {proof_path}");
                     eprintln!("[recursive] set STARKNET_PRIVATE_KEY to auto-submit on-chain");
+                    // Store metadata even without on-chain submission
+                    PROOF_META.with(|cell| {
+                        let mut meta = cell.borrow_mut();
+                        let m = meta.get_or_insert_with(ProofMeta::default);
+                        m.calldata_felts = Some(calldata.len());
+                        m.model_id = Some(format!("0x{:064x}", model_id));
+                        m.io_commitment = Some(format!("0x{:064x}", proof.io_commitment));
+                        m.recursive_time_secs = Some(t_recursive.elapsed().as_secs_f64());
+                    });
                 }
             }
             Err(e) => {
