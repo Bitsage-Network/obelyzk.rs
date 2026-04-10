@@ -756,7 +756,12 @@ fn render_monitor(frame: &mut Frame, area: Rect, state: &InteractiveDashState, t
 fn render_prove(frame: &mut Frame, area: Rect, state: &InteractiveDashState, t: &Theme) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(4), Constraint::Min(4)])
+        .constraints([
+            Constraint::Length(4),   // GKR progress + STARK badges
+            Constraint::Length(4),   // STARK compression
+            Constraint::Length(4),   // Sparklines: matmul + poseidon + sumcheck
+            Constraint::Min(4),     // Chart + trace side by side
+        ])
         .split(area);
 
     // GKR progress
@@ -789,6 +794,77 @@ fn render_prove(frame: &mut Frame, area: Rect, state: &InteractiveDashState, t: 
     };
     frame.render_widget(Paragraph::new(stark_lines).block(panel_block("Recursive STARK", t)), rows[1]);
 
+    // Sparklines row: matmul timing + poseidon perms + sumcheck rounds
+    let prove_sparks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(33), Constraint::Percentage(33)])
+        .split(rows[2]);
+
+    let mw = prove_sparks[0].width.saturating_sub(4) as usize;
+    let ms = sparkline_str(&state.matmul_time_history, mw);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(format!("  {}", ms), Style::default().fg(t.accent))),
+            Line::from(vec![
+                Span::styled(format!("  {}ms", state.matmul_time_history.last().unwrap_or(&0)), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
+                Span::styled("  /matmul", Style::default().fg(t.muted)),
+            ]),
+        ]).block(panel_block("MatMul Time", t)),
+        prove_sparks[0],
+    );
+
+    let pw = prove_sparks[1].width.saturating_sub(4) as usize;
+    let ps = sparkline_str(&state.poseidon_history, pw);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(format!("  {}", ps), Style::default().fg(t.accent_alt))),
+            Line::from(vec![
+                Span::styled(format!("  {} perms", state.poseidon_perms), Style::default().fg(t.accent_alt).add_modifier(Modifier::BOLD)),
+            ]),
+        ]).block(panel_block("Poseidon Hash", t)),
+        prove_sparks[1],
+    );
+
+    let scw = prove_sparks[2].width.saturating_sub(4) as usize;
+    let scs = sparkline_str(&state.sumcheck_history, scw);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(format!("  {}", scs), Style::default().fg(t.accent_soft))),
+            Line::from(vec![
+                Span::styled(format!("  {}/{} rounds", state.sumcheck_round, state.sumcheck_total_rounds), Style::default().fg(t.accent_soft).add_modifier(Modifier::BOLD)),
+            ]),
+        ]).block(panel_block("Sumcheck", t)),
+        prove_sparks[2],
+    );
+
+    // Bottom: chart (55%) + trace (45%)
+    let prove_bot = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[3]);
+
+    // Matmul timing chart
+    let mt_points: Vec<(f64, f64)> = state.matmul_time_history.iter().enumerate()
+        .map(|(i, &v)| (i as f64, v as f64)).collect();
+    let pos_points: Vec<(f64, f64)> = state.poseidon_history.iter().enumerate()
+        .map(|(i, &v)| (i as f64, v as f64 / 3.0)).collect();
+    let mt_max = state.matmul_time_history.iter().copied().max().unwrap_or(10).max(10) as f64;
+
+    let prove_chart = Chart::new(vec![
+        Dataset::default().name("matmul").data(&mt_points)
+            .graph_type(GraphType::Line).marker(symbols::Marker::Braille)
+            .style(Style::default().fg(t.accent)),
+        Dataset::default().name("poseidon").data(&pos_points)
+            .graph_type(GraphType::Line).marker(symbols::Marker::Dot)
+            .style(Style::default().fg(t.accent_alt)),
+    ])
+    .block(panel_block("Proving Signal", t))
+    .x_axis(Axis::default().bounds([0.0, HISTORY_LIMIT as f64])
+        .labels(vec![Span::styled("0", Style::default().fg(t.muted)), Span::styled(format!("{}", HISTORY_LIMIT), Style::default().fg(t.muted))]))
+    .y_axis(Axis::default().bounds([0.0, mt_max])
+        .labels(vec![Span::styled("0", Style::default().fg(t.muted)), Span::styled(format!("{:.0}", mt_max), Style::default().fg(t.muted))]));
+    frame.render_widget(prove_chart, prove_bot[0]);
+
     // Live trace with timing bars
     let max_ms = state.layer_events.iter().map(|e| e.time_ms).max().unwrap_or(1);
     let items: Vec<ListItem> = state.layer_events.iter().take(15).map(|e| {
@@ -804,7 +880,7 @@ fn render_prove(frame: &mut Frame, area: Rect, state: &InteractiveDashState, t: 
             Span::styled(bar, Style::default().fg(tc)),
         ]))
     }).collect();
-    frame.render_widget(List::new(items).block(panel_block("Live Proof Trace", t)), rows[2]);
+    frame.render_widget(List::new(items).block(panel_block("Live Proof Trace", t)), prove_bot[1]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

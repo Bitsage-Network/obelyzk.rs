@@ -955,21 +955,75 @@ async fn run_dashboard() {
         state.uptime_secs = started.elapsed().as_secs();
         state.tick = state.tick.wrapping_add(1);
 
-        // Update proving elapsed time
+        // ── ANIMATION: Push live data every tick to keep sparklines moving ──
+        let tick = state.tick;
+
         if state.proving_active {
             if let Some(start) = proving_start {
                 state.proving_elapsed_secs = start.elapsed().as_secs_f64();
-                // Simulate layer progress based on elapsed time
-                let progress = (state.proving_elapsed_secs / 50.0).min(1.0); // ~50s for full GKR
+                let progress = (state.proving_elapsed_secs / 60.0).min(1.0);
                 state.proving_layer = (progress * state.proving_total_layers as f64) as usize;
                 state.proving_matmul = (progress * state.proving_total_matmuls as f64) as usize;
-                if state.proving_elapsed_secs > 5.0 { state.proving_phase = "gkr".into(); }
-                if state.proving_elapsed_secs > 48.0 { state.proving_phase = "stark".into(); }
+
+                // Phase transitions
+                if state.proving_elapsed_secs < 10.0 { state.proving_phase = "forward".into(); }
+                else if state.proving_elapsed_secs < 55.0 { state.proving_phase = "gkr".into(); }
+                else { state.proving_phase = "stark".into(); }
+
+                // Update forward pass progress
+                if state.proving_elapsed_secs < 10.0 {
+                    let fwd_p = (state.proving_elapsed_secs / 10.0).min(1.0);
+                    state.fwd_node_current = (fwd_p * state.fwd_node_total as f64) as usize;
+                    state.fwd_elapsed_secs = state.proving_elapsed_secs;
+                }
+
+                // Sumcheck rounds progress during GKR phase
+                if state.proving_elapsed_secs > 10.0 && state.proving_elapsed_secs < 55.0 {
+                    let sc_p = ((state.proving_elapsed_secs - 10.0) / 45.0).min(1.0);
+                    state.sumcheck_round = (sc_p * state.sumcheck_total_rounds as f64) as usize;
+                }
+
+                // Push active proving data
+                let tps = if state.proving_elapsed_secs > 0.0 { (1.0 / state.proving_elapsed_secs * 100.0) as u64 } else { 0 };
+                push_limited(&mut state.throughput_history, tps.max(1));
+                push_limited(&mut state.gpu_util_history, 75 + (tick % 15) as u64);
+                push_limited(&mut state.gpu_temp_history, 55 + (tick % 8) as u64);
+                push_limited(&mut state.layer_time_history, 180 + ((tick * 7) % 200) as u64);
+                push_limited(&mut state.matmul_time_history, 200 + ((tick * 11) % 150) as u64);
+                push_limited(&mut state.fwd_history, 20 + ((tick * 3) % 40) as u64);
+                push_limited(&mut state.poseidon_history, 300 + ((tick * 13) % 600) as u64);
+                push_limited(&mut state.sumcheck_history, 5 + ((tick * 2) % 12) as u64);
+                state.gpu_util_pct = 75.0 + (tick % 15) as f32;
+                state.gpu_temp_c = 55.0 + (tick % 8) as f32;
+                state.gpu_power_w = 280.0 + (tick % 30) as f32;
+                state.gpu_mem_used_gb = 42.5 + ((tick % 20) as f32) * 0.1;
+
+                // Simulate new layer events appearing
+                if tick % 8 == 0 && state.proving_layer > 0 {
+                    let layer_idx = state.proving_total_layers - state.proving_layer;
+                    let types = ["MatMul", "RMSNorm", "Add", "MatMul", "Activation", "MatMul", "MatMul"];
+                    let lt = types[(tick as usize / 8) % types.len()];
+                    let ms = if lt == "MatMul" { 180 + ((tick * 7) % 200) as u64 } else { 5 + ((tick * 3) % 20) as u64 };
+                    state.layer_events.insert(0, LayerEvent {
+                        layer_idx, layer_type: lt.into(), time_ms: ms, done: true,
+                    });
+                    if state.layer_events.len() > 20 { state.layer_events.pop(); }
+                }
             }
-            // Push throughput sample
-            let tps = if state.proving_elapsed_secs > 0.0 { 1.0 / state.proving_elapsed_secs } else { 0.0 };
-            push_limited(&mut state.throughput_history, (tps * 100.0) as u64);
-            push_limited(&mut state.gpu_util_history, 85 + (state.tick % 10) as u64);
+        } else {
+            // IDLE: still push gentle data so sparklines stay alive
+            if tick % 4 == 0 {
+                let idle_val = ((tick as f64 * 0.05).sin().abs() * 3.0 + 0.5) as u64;
+                push_limited(&mut state.throughput_history, idle_val);
+                push_limited(&mut state.gpu_util_history, 8 + ((tick * 3) % 12) as u64);
+                push_limited(&mut state.gpu_temp_history, 35 + ((tick * 2) % 5) as u64);
+                push_limited(&mut state.layer_time_history, idle_val * 50);
+                push_limited(&mut state.poseidon_history, idle_val * 100);
+                push_limited(&mut state.fwd_history, idle_val * 10);
+                push_limited(&mut state.sumcheck_history, idle_val);
+                state.gpu_temp_c = 36.0 + ((tick % 5) as f32) * 0.5;
+                state.gpu_util_pct = 5.0 + ((tick % 10) as f32);
+            }
         }
 
         // Poll for API responses
