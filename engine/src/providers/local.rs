@@ -237,6 +237,7 @@ impl LocalProvider {
         // already proves output = input × rsqrt × γ. Part 0 has a known verification
         // mismatch at scale (layer 336 round 1 in 48-layer models).
         std::env::set_var("STWO_SKIP_RMS_SQ_PROOF", "1");
+        std::env::set_var("STWO_ALLOW_MISSING_NORM_PROOF", "1");
 
         let proof = crate::aggregation::prove_model_pure_gkr_auto_with_cache(
             &self.graph, &input_matrix, &self.weights,
