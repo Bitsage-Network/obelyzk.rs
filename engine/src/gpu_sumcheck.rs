@@ -2825,6 +2825,15 @@ impl GpuSumcheckExecutor {
             let c2 = (s2 - s1 - s1 + s0) * inv2;
             let c1 = s1 - s0 - c2;
 
+            // Debug: verify sumcheck property s0+s1 == inner product
+            if std::env::var("STWO_CHANNEL_TRACE").is_ok() {
+                let p0_plus_p1 = s0 + s1;
+                eprintln!(
+                    "[GPU-SC] round {}/{}: s0+s1={:?} mid={} cur_n={}",
+                    round_polys.len(), log_k, p0_plus_p1, mid, cur_n,
+                );
+            }
+
             let round_poly = crate::components::matmul::RoundPoly { c0, c1, c2 };
             round_polys.push(round_poly);
 

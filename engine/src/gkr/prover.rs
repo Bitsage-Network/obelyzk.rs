@@ -6004,6 +6004,19 @@ fn reduce_matmul_layer_with_backend<B: crate::backend::ZkmlOps>(
     })?;
     let d_reduce = t_reduce.map(|t| t.elapsed());
 
+    // Validate sumcheck at round 0: p(0)+p(1) must equal output_claim.value
+    if std::env::var("STWO_CHANNEL_TRACE").is_ok() && !reduction.round_polys.is_empty() {
+        let rp0 = &reduction.round_polys[0];
+        let p0_plus_p1 = rp0.c0 + (rp0.c0 + rp0.c1 + rp0.c2);
+        let matches = p0_plus_p1 == output_claim.value;
+        if !matches {
+            eprintln!(
+                "[MatMul PROVER] SUMCHECK MISMATCH at round 0: p(0)+p(1)={:?} != claim={:?} (m={},k={},n={})",
+                p0_plus_p1, output_claim.value, m, k, n,
+            );
+        }
+    }
+
     // Sub-phase 3: Bind final evaluations to transcript.
     let t_bind = if profiling { Some(std::time::Instant::now()) } else { None };
     mix_secure_field(channel, reduction.final_a_eval);
