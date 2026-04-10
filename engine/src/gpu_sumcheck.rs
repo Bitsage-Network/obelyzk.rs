@@ -397,7 +397,23 @@ extern "C" __global__ void sumcheck_reduce_kernel(
 /// and element-wise add/mul/relu for forward pass acceleration.
 #[cfg(feature = "cuda-runtime")]
 const M31_FORWARD_KERNEL: &str = r#"
+typedef unsigned int uint32_t;
+typedef unsigned long long uint64_t;
+
 #define P 0x7FFFFFFFu
+
+__device__ __forceinline__ uint32_t m31_add(uint32_t a, uint32_t b) {
+    uint32_t sum = a + b;
+    return (sum >= P) ? (sum - P) : sum;
+}
+
+__device__ __forceinline__ uint32_t m31_mul(uint32_t a, uint32_t b) {
+    uint64_t prod = (uint64_t)a * (uint64_t)b;
+    uint32_t lo = (uint32_t)(prod & (uint64_t)P);
+    uint32_t hi = (uint32_t)(prod >> 31);
+    uint32_t result = lo + hi;
+    return (result >= P) ? (result - P) : result;
+}
 
 // --- GEMV: single-row matmul (m=1) ---
 extern "C" __global__ void m31_gemv_kernel(
@@ -410,15 +426,13 @@ extern "C" __global__ void m31_gemv_kernel(
     unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col >= n) return;
 
-    // Reduce after every multiply-add to guarantee correctness.
-    // After mod, acc < P < 2^31. Then acc + a*b < 2^31 + 2^62 < 2^63.
-    // So % P is always exact in 64-bit.
-    unsigned long long acc = 0;
+    // Use exact M31 arithmetic (same as CPU matmul_m31).
+    unsigned int acc = 0;
     for (unsigned int i = 0; i < k; i++) {
-        acc += (unsigned long long)input[i] * (unsigned long long)weight[i * n + col];
-        acc %= (unsigned long long)P;
+        unsigned int prod = m31_mul(input[i], weight[i * n + col]);
+        acc = m31_add(acc, prod);
     }
-    output[col] = (unsigned int)acc;
+    output[col] = acc;
 }
 
 // --- GEMM: multi-row matmul (m>1) ---
@@ -436,13 +450,13 @@ extern "C" __global__ void m31_gemm_kernel(
     unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
     if (row >= m || col >= n) return;
 
-    // Reduce after every multiply-add (safe: acc < 2^31 + 2^62 < 2^63).
-    unsigned long long acc = 0;
+    // Use exact M31 arithmetic (same as CPU matmul_m31).
+    unsigned int acc = 0;
     for (unsigned int l = 0; l < k; l++) {
-        acc += (unsigned long long)a[row * k + l] * (unsigned long long)b[l * n + col];
-        acc %= (unsigned long long)P;
+        unsigned int prod = m31_mul(a[row * k + l], b[l * n + col]);
+        acc = m31_add(acc, prod);
     }
-    c[row * n + col] = (unsigned int)acc;
+    c[row * n + col] = acc;
 }
 
 // --- Element-wise add ---
@@ -487,22 +501,9 @@ extern "C" __global__ void m31_relu_kernel(
     output[idx] = (val <= (P >> 1)) ? val : 0u;
 }
 
-// --- M31 field helpers for reduction kernels ---
-__device__ __forceinline__ unsigned int m31_add(unsigned int a, unsigned int b) {
-    unsigned int s = a + b;
-    return (s >= P) ? (s - P) : s;
-}
-
+// --- M31 field helpers (m31_add, m31_sub, m31_mul defined above) ---
 __device__ __forceinline__ unsigned int m31_sub(unsigned int a, unsigned int b) {
     return (a >= b) ? (a - b) : (a + P - b);
-}
-
-__device__ __forceinline__ unsigned int m31_mul(unsigned int a, unsigned int b) {
-    unsigned long long prod = (unsigned long long)a * (unsigned long long)b;
-    unsigned int lo = (unsigned int)(prod & P);
-    unsigned int hi = (unsigned int)(prod >> 31);
-    unsigned int result = lo + hi;
-    return (result >= P) ? (result - P) : result;
 }
 
 // --- LayerNorm kernel ---
