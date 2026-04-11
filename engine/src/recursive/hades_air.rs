@@ -635,9 +635,8 @@ impl FrameworkEval for HadesVerifierEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Mul constraints are degree 2 (a[i] * b[j]).
-        // With selectors (is_active), effective degree = 3.
-        self.log_n_rows + 2
+        // Constraints are degree ≤ 2 (products with is_real/is_full_round selectors).
+        self.log_n_rows + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {

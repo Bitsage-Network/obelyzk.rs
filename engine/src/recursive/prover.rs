@@ -201,15 +201,7 @@ pub fn prove_recursive_with_policy(
     };
     let chain_log_size = trace_data.log_size;
     let hades_log_size = hades_trace.log_size;
-    // Twiddles must cover the largest domain (Hades has more rows than chain)
-    let max_log_size = chain_log_size.max(hades_log_size);
-    let max_degree_bound = max_log_size + 2; // +2 for degree-3 Hades constraints
-
-    let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(max_degree_bound + config.fri_config.log_blowup_factor)
-            .circle_domain()
-            .half_coset,
-    );
+    // Twiddles computed after unified_log_size is known (below).
 
     // Use Poseidon252MerkleChannel so the STARK is verifiable by stwo-cairo-verifier
     // (Cairo's native Poseidon). This eliminates the need to constrain felt252 Hades
@@ -263,20 +255,37 @@ pub fn prove_recursive_with_policy(
     }
     eprintln!("  [Recursive] Channel after public inputs: {:?}", channel.digest());
 
+    // When Hades AIR is enabled, use the SAME domain for both components
+    // to avoid STWO's SIMD mixed-size column evaluation issues.
+    // Chain columns are padded to unified_log_size (zeros beyond n_real_rows).
+    let unified_log_size = if hades_enabled { chain_log_size.max(hades_log_size) } else { chain_log_size };
+    let max_degree_bound = unified_log_size + 1;
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(max_degree_bound + config.fri_config.log_blowup_factor)
+            .circle_domain()
+            .half_coset,
+    );
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
-    // Store polynomial coefficients for OODS evaluation during proving.
     commitment_scheme.set_store_polynomials_coefficients();
 
-    let chain_domain = CanonicCoset::new(chain_log_size).circle_domain();
-    let hades_domain = CanonicCoset::new(hades_log_size).circle_domain();
+    let chain_domain = CanonicCoset::new(unified_log_size).circle_domain();
+    let hades_domain = CanonicCoset::new(unified_log_size).circle_domain();
 
     // Tree 0: Preprocessed columns (is_first, is_last, is_chain)
     {
         let mut tree_builder = commitment_scheme.tree_builder();
-        let is_first_col = simd_column_from_vec(&trace_data.preprocessed_is_first);
-        let is_last_col = simd_column_from_vec(&trace_data.preprocessed_is_last);
-        let is_chain_col = simd_column_from_vec(&trace_data.preprocessed_is_chain);
+        // Pad preprocessed columns to unified_log_size if needed
+        let pad_to = 1 << unified_log_size;
+        let mut is_first = trace_data.preprocessed_is_first.clone();
+        let mut is_last = trace_data.preprocessed_is_last.clone();
+        let mut is_chain = trace_data.preprocessed_is_chain.clone();
+        is_first.resize(pad_to, M31::from_u32_unchecked(0));
+        is_last.resize(pad_to, M31::from_u32_unchecked(0));
+        is_chain.resize(pad_to, M31::from_u32_unchecked(0));
+        let is_first_col = simd_column_from_vec(&is_first);
+        let is_last_col = simd_column_from_vec(&is_last);
+        let is_chain_col = simd_column_from_vec(&is_chain);
         let simd_evals = vec![
             CircleEvaluation::new(chain_domain, is_first_col),
             CircleEvaluation::new(chain_domain, is_last_col),
@@ -294,12 +303,19 @@ pub fn prove_recursive_with_policy(
     {
         let mut tree_builder = commitment_scheme.tree_builder();
 
-        // Chain columns: 64 columns at chain_log_size
+        // Chain columns: 64 columns, padded to unified_log_size if needed
         let chain_evals: Vec<CircleEvaluation<SimdBackend, M31, _>> = trace_data
             .execution_trace
             .iter()
             .map(|col| {
-                let simd_col = simd_column_from_vec(col);
+                let padded = if col.len() < (1 << unified_log_size) {
+                    let mut p = col.clone();
+                    p.resize(1 << unified_log_size, M31::from_u32_unchecked(0));
+                    p
+                } else {
+                    col.clone()
+                };
+                let simd_col = simd_column_from_vec(&padded);
                 CircleEvaluation::new(chain_domain, simd_col)
             })
             .collect();
@@ -393,7 +409,7 @@ pub fn prove_recursive_with_policy(
 
     // Component 1: Chain AIR (digest chain + boundary constraints)
     let chain_eval = RecursiveVerifierEval {
-        log_n_rows: chain_log_size,
+        log_n_rows: unified_log_size,
         initial_digest_limbs: zero_limbs,
         final_digest_limbs: final_limbs,
         hades_lookup: None, // LogUp for Hades binding (TODO: draw from channel)
@@ -406,7 +422,7 @@ pub fn prove_recursive_with_policy(
 
     // Component 2: Hades AIR (permutation verification)
     let hades_eval = super::hades_air::HadesVerifierEval {
-        log_n_rows: hades_log_size,
+        log_n_rows: unified_log_size,
         round_constants_limbs: Vec::new(),
         range_check: None,
     };
