@@ -156,7 +156,31 @@ pub fn prove_recursive_with_policy(
 
     // ── Step 3: Commit traces ────────────────────────────────────────
     eprintln!("  [Recursive] Step 3/4: Committing traces...");
-    let config = PcsConfig::default();
+    // Security-hardened PCS config for recursive proofs.
+    //
+    // PcsConfig::default() gives only 13 bits of security
+    // (pow_bits=10, log_blowup=1, n_queries=3).
+    //
+    // Production config: 96+ bits of STARK security.
+    //   log_blowup=3  (8x blowup — moderate proof size)
+    //   n_queries=30   (30 FRI queries — 3*30=90 bits FRI security)
+    //   pow_bits=16    (proof-of-work grinding protection)
+    //   Total: 90 + 16 = 106 bits
+    //
+    // Override via OBELYZK_RECURSIVE_SECURITY env var:
+    //   "test"       → 13 bits  (fast, for unit tests)
+    //   "production" → 106 bits (default)
+    let config = {
+        let level = std::env::var("OBELYZK_RECURSIVE_SECURITY")
+            .unwrap_or_else(|_| "production".to_string());
+        match level.as_str() {
+            "test" => PcsConfig::default(), // 13 bits — unit tests only
+            _ => PcsConfig {
+                pow_bits: 16,
+                fri_config: stwo::core::fri::FriConfig::new(3, 3, 30),
+            },
+        }
+    };
     let log_size = trace_data.log_size;
     let max_degree_bound = log_size + 1;
 
@@ -430,6 +454,7 @@ mod tests {
 
     #[test]
     fn test_prove_recursive_1layer() {
+        std::env::set_var("OBELYZK_RECURSIVE_SECURITY", "test");
         // End-to-end: prove a 1-layer MatMul GKR → recursive STARK.
         let mut builder = GraphBuilder::new((1, 4));
         builder.linear(2);

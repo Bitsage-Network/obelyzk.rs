@@ -32,7 +32,19 @@ pub fn verify_recursive(
     log_size: u32,
     final_digest: starknet_ff::FieldElement,
 ) -> Result<(), RecursiveError> {
-    let pcs_config = PcsConfig::default();
+    // PcsConfig must match what the prover used. The Cairo verifier reads
+    // it from the proof body. For Rust pre-flight, match the prover's config.
+    let pcs_config = {
+        let level = std::env::var("OBELYZK_RECURSIVE_SECURITY")
+            .unwrap_or_else(|_| "production".to_string());
+        match level.as_str() {
+            "test" => PcsConfig::default(),
+            _ => PcsConfig {
+                pow_bits: 16,
+                fri_config: stwo::core::fri::FriConfig::new(3, 3, 30),
+            },
+        }
+    };
 
     // Build evaluator from public inputs
     let zero_limbs = super::air::felt252_to_limbs(&starknet_ff::FieldElement::ZERO);
@@ -118,6 +130,7 @@ mod tests {
 
     #[test]
     fn test_verify_recursive_roundtrip() {
+        std::env::set_var("OBELYZK_RECURSIVE_SECURITY", "test");
         // Full roundtrip: prove GKR → prove recursive → verify recursive.
         let mut builder = GraphBuilder::new((1, 4));
         builder.linear(2);
@@ -181,6 +194,7 @@ mod tests {
 
     /// Helper: produce a valid recursive proof for adversarial testing.
     fn adversarial_proof() -> super::super::types::RecursiveProof {
+        std::env::set_var("OBELYZK_RECURSIVE_SECURITY", "test");
         let mut builder = GraphBuilder::new((1, 4));
         builder.linear(2);
         let graph = builder.build();

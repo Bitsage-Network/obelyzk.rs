@@ -368,6 +368,8 @@ mod tests {
     /// Helper: produce a valid recursive proof for adversarial testing.
     fn adversarial_recursive_proof() -> crate::recursive::types::RecursiveProof {
         use stwo::core::fields::cm31::CM31;
+        // Use fast config for tests (production config would be too slow)
+        std::env::set_var("OBELYZK_RECURSIVE_SECURITY", "test");
 
         let mut builder = GraphBuilder::new((1, 4));
         builder.linear(2);

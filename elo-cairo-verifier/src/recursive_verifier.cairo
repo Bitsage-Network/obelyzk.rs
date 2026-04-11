@@ -178,7 +178,11 @@ pub mod RecursiveVerifierContract {
     }
 
     /// Minimum delay (seconds) between propose_upgrade and execute_upgrade.
-    const UPGRADE_DELAY: u64 = 300; // 5 minutes
+    // Minimum time between proposing and executing a contract upgrade.
+    // Set to 24 hours to give validators and monitoring tools time to
+    // detect and react to malicious upgrade proposals.
+    // 86400 seconds = 24 hours (~1440 Starknet blocks at 1 min/block)
+    const UPGRADE_DELAY: u64 = 86400;
 
     #[event]
     #[derive(Drop, starknet::Event)]
@@ -268,6 +272,10 @@ pub mod RecursiveVerifierContract {
             let caller = get_caller_address();
             assert(caller == self.owner.read(), 'Only owner can register');
 
+            // Prevent accidental overwrite of existing registrations
+            let existing = self.recursive_models.read(model_id);
+            assert(existing.circuit_hash == 0, 'Model already registered');
+
             let info = RecursiveModelInfo {
                 circuit_hash,
                 weight_super_root,
@@ -310,7 +318,13 @@ pub mod RecursiveVerifierContract {
             assert(circuit_hash == model.circuit_hash, 'Circuit hash mismatch (param)');
             assert(weight_super_root == model.weight_super_root, 'Weight root mismatch (param)');
 
-            // 2. Compute proof hash for dedup
+            // 2. Compute proof hash for dedup.
+            // Hash covers (model_id, io_commitment) — ensures each inference
+            // can only be verified once. Does NOT include submitter address
+            // to prevent the same IO from being double-counted.
+            // NOTE: The submitter field in the event is not fraud-proof —
+            // an MEV bot could frontrun and steal submission attribution.
+            // A commit-reveal scheme would fix this but adds complexity.
             let mut hash_input = array![model_id, io_commitment];
             let proof_hash = poseidon_hash_span(hash_input.span());
 
