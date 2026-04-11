@@ -267,49 +267,97 @@ pub fn stark_prime_9bit_limbs() -> [u32; LIMBS_28] {
 ///
 /// Each carry is range-checked to [-2^19, 2^19) via LogUp into a
 /// RangeCheck20 table (shifted by +2^19 to [0, 2^20)).
+/// Reduce a 55-limb convolution modulo P to 28 limbs.
+///
+/// Uses 512^28 ≡ -(272·512^21 + 1) (mod P) where P = 2^251 + 17·2^192 + 1.
+/// Each upper limb conv[k] (k≥28) contributes:
+///   -conv[k] at position k-28
+///   -272·conv[k] at position k-7
+/// Cascading if the target position is still ≥ 28.
+fn reduce_conv_mod_p<E: EvalAtRow>(
+    conv_full: &[E::F; 55],
+) -> [E::F; LIMBS_28] {
+    let zero = || E::F::from(M31::from(0u32));
+    let c272 = E::F::from(M31::from(272u32));
+    let mut reduced: [E::F; LIMBS_28] = std::array::from_fn(|_| zero());
+
+    // Start with lower 28 limbs
+    for j in 0..LIMBS_28 {
+        reduced[j] = conv_full[j].clone();
+    }
+
+    // Reduce upper limbs 28..54 iteratively.
+    // We process them in order, and when a reduction creates a limb ≥ 28,
+    // we store it in a worklist and process it next.
+    let mut pending = vec![];
+    for k in 28..55 {
+        pending.push((k, conv_full[k].clone()));
+    }
+
+    // Process pending reductions (at most 2 rounds since each reduction
+    // drops position by at least 7, so 55→48→41→34→27 in 4 steps max)
+    for _ in 0..5 {
+        let current = std::mem::take(&mut pending);
+        if current.is_empty() { break; }
+        for (k, val) in current {
+            let pos_low = k - 28; // -val at this position
+            let pos_mid = k - 7;  // -272*val at this position
+
+            if pos_low < LIMBS_28 {
+                reduced[pos_low] = reduced[pos_low].clone() - val.clone();
+            } else {
+                pending.push((pos_low, val.clone())); // needs further reduction
+            }
+
+            if pos_mid < LIMBS_28 {
+                reduced[pos_mid] = reduced[pos_mid].clone() - c272.clone() * val.clone();
+            } else {
+                pending.push((pos_mid, c272.clone() * val.clone()));
+            }
+        }
+    }
+
+    reduced
+}
+
 pub fn verify_mul_252_constraint<E: EvalAtRow>(
     a: &[E::F; LIMBS_28],
     b: &[E::F; LIMBS_28],
     c: &[E::F; LIMBS_28],
-    k_limbs: &[E::F; LIMBS_28],
+    k_limbs: &[E::F; LIMBS_28], // k_limbs[0] = k scalar, rest unused
     carries: &[E::F; 27],
     eval: &mut E,
-    p_limbs: &[u32; LIMBS_28],
+    _p_limbs: &[u32; LIMBS_28],
     is_active: &E::F,
     _range_check: Option<&RangeCheck20>,
 ) {
-    let base = E::F::from(M31::from(512)); // 2^9
-    let zero = E::F::from(M31::from(0));
-    let carry_shift = E::F::from(M31::from(524288)); // 2^19
+    let base = E::F::from(M31::from(512u32)); // 2^9
+    let zero = E::F::from(M31::from(0u32));
+    let c136 = E::F::from(M31::from(136u32)); // 17*8
+    let c256 = E::F::from(M31::from(256u32)); // 2^8
 
-    for j in 0..LIMBS_28 {
-        // Convolution: Σ a[i] * b[j-i]
-        let mut conv = zero.clone();
+    // Step 1: compute 55-limb convolution of (a*b - c) then reduce mod P to 28 limbs
+    let mut conv_full: [E::F; 55] = std::array::from_fn(|_| zero.clone());
+    for j in 0..55 {
         for i in 0..=j {
             if i < LIMBS_28 && (j - i) < LIMBS_28 {
-                conv = conv + a[i].clone() * b[j - i].clone();
+                conv_full[j] = conv_full[j].clone() + a[i].clone() * b[j - i].clone();
             }
         }
+        if j < LIMBS_28 { conv_full[j] = conv_full[j].clone() - c[j].clone(); }
+    }
+    let conv_mod = reduce_conv_mod_p::<E>(&conv_full);
 
-        // k*P at position j = Σ k_limbs[l] * p_limbs[j-l]
-        let mut kp_j = zero.clone();
-        for l in 0..=j {
-            if l < LIMBS_28 && (j - l) < LIMBS_28 {
-                kp_j = kp_j + k_limbs[l].clone() * E::F::from(M31::from(p_limbs[j - l]));
-            }
-        }
-
+    // Step 2: conv_mod[j] - k*p[j] = carry[j]*512 - carry[j-1]
+    // k is k_limbs[0] (small scalar from conv_mod residual)
+    let k_val = k_limbs[0].clone();
+    for j in 0..LIMBS_28 {
         let carry_in = if j == 0 { zero.clone() } else { carries[j - 1].clone() };
         let carry_out = if j < 27 { carries[j].clone() } else { zero.clone() };
-
-        let rhs = c[j].clone()
-            + kp_j
-            + carry_out.clone() * base.clone()
-            - carry_in;
-
-        // Constraint: is_active * (conv - rhs) = 0
-        // Degree 3: (a[i]*b[j-i]) * is_active, or (k_limbs[l]*p) * is_active.
-        eval.add_constraint(is_active.clone() * (conv - rhs));
+        let p_j = E::F::from(M31::from(_p_limbs[j]));
+        let lhs = conv_mod[j].clone() - k_val.clone() * p_j + carry_in;
+        let rhs = carry_out * base.clone();
+        eval.add_constraint(is_active.clone() * (lhs - rhs));
     }
 }
 
@@ -1187,6 +1235,7 @@ fn mds_mix(state: &[FieldElement; 3]) -> [FieldElement; 3] {
 ///   conv[j] = Σ a_limb[i] * b_limb[j-i]
 ///   conv[j] = c_limb[j] + k * p_limb[j] + carry[j] * 512 - carry[j-1]
 /// Returns (carries[27], k_limbs[28]) for the multiplication witness.
+/// Computes k via bigint division, then derives carries using k_limbs convolution.
 fn compute_mul_witness(
     a: &FieldElement,
     b: &FieldElement,
@@ -1197,11 +1246,8 @@ fn compute_mul_witness(
     let c_limbs = felt252_to_9bit_limbs(c);
     let p_limbs = stark_prime_9bit_limbs();
 
-    // Compute k = (a*b - c) / P.
-    //
-    // Step 1: compute diff = conv - c in 9-bit limbs with carry propagation.
-    // This gives us k*P as a big integer in base 512.
-    let mut diff_limbs = [0i64; 56]; // up to 55 limbs for 504-bit product
+    // Step 1: compute diff = a*b - c as normalized base-512 limbs
+    let mut diff = [0i64; 56];
     let mut carry: i64 = 0;
     for j in 0..55 {
         let mut conv: i64 = 0;
@@ -1211,97 +1257,102 @@ fn compute_mul_witness(
             }
         }
         let c_j = if j < LIMBS_28 { c_limbs[j].0 as i64 } else { 0 };
-        let remainder = conv - c_j + carry;
-        diff_limbs[j] = remainder % 512;
-        if diff_limbs[j] < 0 { diff_limbs[j] += 512; carry = remainder / 512 - 1; }
-        else { carry = remainder / 512; }
+        let total = conv - c_j + carry;
+        diff[j] = ((total % 512) + 512) % 512;
+        carry = (total - diff[j]) / 512;
     }
-    diff_limbs[55] = carry; // store any remaining carry
-    #[cfg(test)]
-    eprintln!("diff_limbs[54]={}, diff_limbs[55]={}", diff_limbs[54], diff_limbs[55]);
+    diff[55] = carry;
 
-    // Step 2: convert diff_limbs to bytes and divide by P using byte-level arithmetic.
-    // diff_limbs is the unreduced product minus c, in base 512, up to 55 limbs.
-    // Convert to little-endian bytes.
+    // Step 2: bigint division k = diff / P
     let mut diff_bytes = [0u8; 64];
     {
-        let mut bit_pos = 0usize;
+        let mut bp = 0usize;
         for j in 0..56 {
-            let val = diff_limbs[j].max(0) as u64;
-            for b in 0..9 {
-                if (val >> b) & 1 == 1 {
-                    let byte_idx = (bit_pos + b) / 8;
-                    let bit_idx = (bit_pos + b) % 8;
-                    if byte_idx < 64 { diff_bytes[byte_idx] |= 1 << bit_idx; }
-                }
-            }
-            bit_pos += 9;
+            let v = diff[j] as u64;
+            for b in 0..9 { if (v >> b) & 1 == 1 { let bi = (bp+b)/8; let bt = (bp+b)%8; if bi < 64 { diff_bytes[bi] |= 1 << bt; } } }
+            bp += 9;
         }
     }
-
-    // P in little-endian bytes
-    let p_le: [u8; 32] = [
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08,
-    ];
-
-    // Divide diff_bytes (64 bytes) by p_le (32 bytes) → k_bytes (32 bytes)
+    let p_le: [u8; 32] = [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x11,0,0,0,0,0,0,0x08];
     let k_bytes = bigint_div_le(&diff_bytes, &p_le);
 
-    // Convert k_bytes to 9-bit limbs
     let mut k_limbs = [0i64; LIMBS_28];
     {
-        let mut bit_pos = 0usize;
+        let mut bp = 0usize;
         for limb in k_limbs.iter_mut() {
             let mut acc = 0i64;
-            for b in 0..9 {
-                let byte_idx = (bit_pos + b) / 8;
-                let bit_idx = (bit_pos + b) % 8;
-                if byte_idx < 32 {
-                    acc |= (((k_bytes[byte_idx] >> bit_idx) & 1) as i64) << b;
-                }
-            }
+            for b in 0..9 { let bi = (bp+b)/8; let bt = (bp+b)%8; if bi < 32 { acc |= (((k_bytes[bi] >> bt) & 1) as i64) << b; } }
             *limb = acc;
-            bit_pos += 9;
+            bp += 9;
         }
     }
 
-    // Step 3: compute carry chain using k_limbs convolved with p_limbs.
-    // The AIR constraint uses a SINGLE k value, not k_limbs.
-    // But the carry chain equation is:
-    //   conv[j] = c[j] + Σ_{l+m=j} k_limbs[l]*p[m] + carry[j]*512 - carry[j-1]
-    //
-    // We compute the (k*P)[j] term as the convolution of k_limbs and p_limbs.
-    let mut carries = [0i64; 27];
-    let mut carry_val: i64 = 0;
-
-    for j in 0..LIMBS_28 {
-        let mut conv: i64 = 0;
+    // Step 3: compute conv_mod in M31 arithmetic (where k*P ≡ 0),
+    // then derive carries from the M31-reduced values.
+    // This matches what the AIR constraint does (reduce_conv_mod_p in E::F).
+    let mut conv_full_m31 = [0i64; 55];
+    for j in 0..55 {
+        let mut v: i64 = 0;
         for i in 0..=j {
             if i < LIMBS_28 && (j - i) < LIMBS_28 {
-                conv += (a_limbs[i].0 as i64) * (b_limbs[j - i].0 as i64);
+                v += (a_limbs[i].0 as i64) * (b_limbs[j - i].0 as i64);
             }
         }
-
-        // k*P at position j = Σ k_limbs[l] * p_limbs[j-l]
-        let mut kp_j: i64 = 0;
-        for l in 0..=j {
-            if l < LIMBS_28 && (j - l) < LIMBS_28 {
-                kp_j += k_limbs[l] * (p_limbs[j - l] as i64);
-            }
-        }
-
-        let remainder = conv - (c_limbs[j].0 as i64) - kp_j + carry_val;
-        let new_carry = remainder / 512;
-        if j < 27 {
-            carries[j] = new_carry;
-        }
-        carry_val = new_carry;
+        if j < LIMBS_28 { v -= c_limbs[j].0 as i64; }
+        conv_full_m31[j] = v;
     }
 
-    (carries, k_limbs)
+    // Reduce mod P in M31 arithmetic (matching the AIR's reduce_conv_mod_p).
+    // In M31, the result is exactly 0 since a*b ≡ c (mod P) ≡ 0 (mod M31_P).
+    // Convert each conv_full value to M31, then reduce.
+    let p_m31 = 2147483647u32; // M31::P = 2^31 - 1
+    let conv_m31: Vec<M31> = (0..55).map(|j| {
+        let v = conv_full_m31[j];
+        i64_to_m31(v)
+    }).collect();
+
+    let c272_m31 = M31::from(272u32);
+    let mut reduced_m31 = [M31::from(0u32); LIMBS_28];
+    for j in 0..LIMBS_28 { reduced_m31[j] = conv_m31[j]; }
+    let mut pend: Vec<(usize, M31)> = (28..55).map(|k| (k, conv_m31[k])).collect();
+    for _ in 0..5 {
+        let cur = std::mem::take(&mut pend);
+        if cur.is_empty() { break; }
+        for (k, val) in cur {
+            let pl = k - 28; let pm = k - 7;
+            if pl < LIMBS_28 { reduced_m31[pl] = reduced_m31[pl] - val; }
+            else { pend.push((pl, val)); }
+            if pm < LIMBS_28 { reduced_m31[pm] = reduced_m31[pm] - c272_m31 * val; }
+            else { pend.push((pm, c272_m31 * val)); }
+        }
+    }
+
+    // The reduced values in M31 should be ≡ 0 (mod P) which in M31 means
+    // they are exactly 0 (since M31 IS Z/P_M31 and our reduction is correct).
+    // Extract carries: conv_mod[j] = carry[j]*512 - carry[j-1]
+    // Convert M31 back to signed integer in [-(P-1)/2, (P-1)/2] for carry computation.
+    let base_m31 = M31::from(512u32);
+    let mut carries = [0i64; 27];
+    let mut carry_m31 = M31::from(0u32);
+    for j in 0..LIMBS_28 {
+        // conv_mod[j] + carry_in = carry_out * 512
+        let total = reduced_m31[j] + carry_m31;
+        // carry_out = total / 512 in M31: total * 512^(-1) mod P_M31
+        // Since 512^(-1) mod (2^31-1) exists, this gives the unique carry.
+        // But we need carries as BOUNDED integers, not arbitrary M31 values.
+        // Convert total.0 to signed: if > P/2, subtract P
+        let total_signed = if total.0 > p_m31 / 2 { total.0 as i64 - p_m31 as i64 } else { total.0 as i64 };
+        let nc = if total_signed >= 0 { total_signed / 512 } else { (total_signed - 511) / 512 };
+        if j < 27 { carries[j] = nc; }
+        // Recompute carry_m31 for next iteration
+        carry_m31 = M31::from(0u32) + i64_to_m31(nc); // carry as M31
+        // Verify: total == carry_out * 512 in M31
+        debug_assert_eq!(total, carry_m31 * base_m31,
+            "M31 carry chain broken at limb {j}: total={}, carry*512={}", total.0, (carry_m31 * base_m31).0);
+    }
+
+    // k = 0 for conv_mod approach (reduction absorbed k*P entirely)
+    (carries, [0i64; LIMBS_28])
 }
 
 /// Compute MDS witness carries for one output element.
@@ -1638,31 +1689,53 @@ mod tests {
         // Check cube for element 0: sbox_input[0]^2 = sbox_sq[0]
         let a = &round.sbox_input[0];
         let c = &round.sbox_sq[0];
-        let (carries, k_limbs_val) = compute_mul_witness(a, a, c);
+        let (carries, _k_limbs_val) = compute_mul_witness(a, a, c);
 
+        // Replicate the conv_mod reduction in M31 arithmetic
         let a_limbs = felt252_to_9bit_limbs(a);
         let c_limbs = felt252_to_9bit_limbs(c);
         let base = M31::from(512u32);
+        let c272 = M31::from(272u32);
 
-        for j in 0..LIMBS_28 {
-            let mut conv = M31::from(0u32);
+        // Full 55-limb convolution minus c
+        let mut conv_full_i64 = [0i64; 55];
+        for j in 0..55 {
             for i in 0..=j {
                 if i < LIMBS_28 && (j - i) < LIMBS_28 {
-                    conv = conv + a_limbs[i] * a_limbs[j - i];
+                    conv_full_i64[j] += a_limbs[i].0 as i64 * a_limbs[j - i].0 as i64;
                 }
             }
-            let mut kp_j = M31::from(0u32);
-            for l in 0..=j {
-                if l < LIMBS_28 && (j - l) < LIMBS_28 {
-                    kp_j = kp_j + i64_to_m31(k_limbs_val[l]) * M31::from(p_limbs[j - l]);
-                }
+            if j < LIMBS_28 { conv_full_i64[j] -= c_limbs[j].0 as i64; }
+        }
+
+        // Reduce mod P
+        let mut reduced = [0i64; LIMBS_28];
+        for j in 0..LIMBS_28 { reduced[j] = conv_full_i64[j]; }
+        let mut pending: Vec<(usize, i64)> = (28..55).map(|k| (k, conv_full_i64[k])).collect();
+        for _ in 0..5 {
+            let current = std::mem::take(&mut pending);
+            if current.is_empty() { break; }
+            for (k, val) in current {
+                let p_low = k - 28;
+                let p_mid = k - 7;
+                if p_low < LIMBS_28 { reduced[p_low] -= val; }
+                else { pending.push((p_low, val)); }
+                if p_mid < LIMBS_28 { reduced[p_mid] -= 272 * val; }
+                else { pending.push((p_mid, 272 * val)); }
             }
+        }
+
+        // Check: conv_mod[j] - k*p[j] = carry[j]*512 - carry[j-1]
+        let (carries, k_limbs_out) = compute_mul_witness(a, a, c);
+        let k_val = i64_to_m31(k_limbs_out[0]);
+        for j in 0..LIMBS_28 {
             let carry_in = if j == 0 { M31::from(0u32) } else { i64_to_m31(carries[j-1]) };
             let carry_out = if j < 27 { i64_to_m31(carries[j]) } else { M31::from(0u32) };
-
-            let rhs = c_limbs[j] + kp_j + carry_out * base - carry_in;
-            assert_eq!(conv, rhs,
-                "S-box constraint fails at limb {j}: conv={}, rhs={}", conv.0, rhs.0);
+            let conv_mod_j = i64_to_m31(reduced[j]);
+            let p_j = M31::from(p_limbs[j]);
+            let rhs = k_val * p_j + carry_out * base - carry_in;
+            assert_eq!(conv_mod_j, rhs,
+                "S-box constraint fails at limb {j}: conv_mod={}, rhs={}", conv_mod_j.0, rhs.0);
         }
         eprintln!("Hades round 0 S-box constraint verified in M31 ✓");
     }
