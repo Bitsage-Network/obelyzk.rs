@@ -519,10 +519,10 @@ mod tests {
             assert_eq!(trace.execution_trace[j][0], before_limbs[j]);
         }
 
-        // Verify digest_after limbs (columns 9-17)
+        // Verify digest_after limbs (columns 27-35 in expanded layout)
         let after_limbs = felt252_to_limbs(&digest_after);
         for j in 0..LIMBS_PER_FELT {
-            assert_eq!(trace.execution_trace[LIMBS_PER_FELT + j][0], after_limbs[j]);
+            assert_eq!(trace.execution_trace[COLS_PER_STATE + j][0], after_limbs[j]);
         }
 
         assert_eq!(trace.preprocessed_is_first[0], M31::from_u32_unchecked(1));
@@ -566,8 +566,9 @@ mod tests {
         assert_eq!(trace.n_channel_ops, 2);
 
         // Verify chain: digest_after[row0] == digest_before[row1]
+        // digest_after starts at column COLS_PER_STATE (27) in expanded layout
         for j in 0..LIMBS_PER_FELT {
-            let after_row0 = trace.execution_trace[LIMBS_PER_FELT + j][0];
+            let after_row0 = trace.execution_trace[COLS_PER_STATE + j][0];
             let before_row1 = trace.execution_trace[j][1];
             assert_eq!(after_row0, before_row1,
                 "chain broken at limb {j}: digest_after[0] != digest_before[1]");

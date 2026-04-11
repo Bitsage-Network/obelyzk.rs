@@ -379,9 +379,10 @@ mod chain_debug {
         let mut chain_breaks = 0;
         for row in 0..trace.n_real_rows.saturating_sub(1) {
             for j in 0..LIMBS_PER_FELT {
-                let digest_after = trace.execution_trace[LIMBS_PER_FELT + j][row];
+                // Expanded layout: digest_after at COLS_PER_STATE, shifted at 2*COLS_PER_STATE
+                let digest_after = trace.execution_trace[super::super::air::COLS_PER_STATE + j][row];
                 let next_in_digest = trace.execution_trace[j][row + 1];
-                let shifted = trace.execution_trace[2 * LIMBS_PER_FELT + j][row];
+                let shifted = trace.execution_trace[2 * super::super::air::COLS_PER_STATE + j][row];
                 
                 if digest_after != next_in_digest {
                     if chain_breaks < 3 {
