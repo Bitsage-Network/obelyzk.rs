@@ -452,7 +452,6 @@ mod tests {
             io_commitment: QM31(CM31(M31::from(5), M31::from(6)), CM31(M31::from(7), M31::from(8))),
             weight_super_root: QM31(CM31(M31::from(9), M31::from(10)), CM31(M31::from(11), M31::from(12))),
             n_layers: 337,
-            verified: true,
         };
         let err = crate::recursive::verify_recursive(
             &rp.stark_proof, &tampered, rp.log_size, rp.final_digest,

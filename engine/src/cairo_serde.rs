@@ -3587,7 +3587,7 @@ mod recursive_serde {
     /// │   io_commitment: QM31            [4 felts]               │
     /// │   weight_super_root: QM31        [4 felts]               │
     /// │   n_layers: u32                  [1 felt]                │
-    /// │   verified: bool (u32)           [1 felt]                │
+    /// │ io_commitment_felt252: felt252   [1 felt]                │
     /// │ final_digest: felt252            [1 felt]                │
     /// │ log_size: u32                    [1 felt]                │
     /// ├──────────────────────────────────────────────────────────┤
@@ -3609,7 +3609,6 @@ mod recursive_serde {
         serialize_qm31(proof.public_inputs.io_commitment, &mut output);
         serialize_qm31(proof.public_inputs.weight_super_root, &mut output);
         serialize_u32(proof.public_inputs.n_layers, &mut output);
-        serialize_u32(if proof.public_inputs.verified { 1 } else { 0 }, &mut output);
 
         // Full felt252 IO commitment for on-chain cross-checking.
         // The QM31 io_commitment above only carries the low 124 bits (lossy).

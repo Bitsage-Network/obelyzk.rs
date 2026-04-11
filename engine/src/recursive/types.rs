@@ -136,9 +136,6 @@ pub struct RecursivePublicInputs {
 
     /// Total number of GKR layers verified (for the AIR log_size).
     pub n_layers: u32,
-
-    /// Whether verification succeeded (must be true for a valid proof).
-    pub verified: bool,
 }
 
 /// The recursive STARK proof — replaces the 112K felt GKR calldata.

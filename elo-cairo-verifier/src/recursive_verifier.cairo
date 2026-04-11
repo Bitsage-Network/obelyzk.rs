@@ -338,11 +338,10 @@ pub mod RecursiveVerifierContract {
             //   [4..8)   io_commitment: QM31 (4 felts)
             //   [8..12)  weight_super_root: QM31 (4 felts)
             //   [12]     n_layers: u32
-            //   [13]     verified: u32 (bool)
-            //   [14]     io_commitment_felt252: felt252 (full 252-bit hash)
-            //   [15]     final_digest: felt252
-            //   [16]     log_size: u32
-            //   [17..)   CommitmentSchemeProof (Serde-compatible)
+            //   [13]     io_commitment_felt252: felt252 (full 252-bit hash)
+            //   [14]     final_digest: felt252
+            //   [15]     log_size: u32
+            //   [16..)   CommitmentSchemeProof (Serde-compatible)
 
             let stark_proof_data_len: u32 = stark_proof_data.len();
             let mut proof_span = stark_proof_data.span();
@@ -366,9 +365,8 @@ pub mod RecursiveVerifierContract {
             let wr2: felt252 = *proof_span.pop_front().unwrap();
             let wr3: felt252 = *proof_span.pop_front().unwrap();
 
-            // Parse n_layers and verified from proof body
+            // Parse n_layers from proof body
             let proof_n_layers: felt252 = *proof_span.pop_front().unwrap();
-            let _ = proof_span.pop_front().unwrap(); // verified
 
             // Full felt252 IO commitment (preserves all 252 bits)
             let proof_io_commitment_felt252: felt252 = *proof_span.pop_front().unwrap();

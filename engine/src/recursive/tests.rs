@@ -240,7 +240,6 @@ mod integration_tests {
         assert!(witness.n_equality_checks > 0, "should have equality checks");
 
         // Verify public inputs
-        assert!(witness.public_inputs.verified);
         assert!(witness.public_inputs.n_layers > 0);
 
         println!("Witness stats:");

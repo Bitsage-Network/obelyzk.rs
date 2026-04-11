@@ -589,7 +589,6 @@ pub fn generate_witness_with_policy(
             io_commitment,
             weight_super_root,
             n_layers: d as u32,
-            verified: true,
         },
         // Use the production verifier's total count (covers ALL layer types)
         n_poseidon_perms: total_poseidon_calls,
