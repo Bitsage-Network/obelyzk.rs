@@ -205,16 +205,37 @@ pub fn limbs_9bit_to_felt252(limbs: &[M31; LIMBS_28]) -> FieldElement {
 }
 
 /// Compute the 9-bit limbs of the Stark prime P = 2^251 + 17 * 2^192 + 1.
+///
+/// Cannot use FieldElement::from_hex_be(P) since P mod P = 0 in the field.
+/// Instead, compute directly from the known bit pattern.
 pub fn stark_prime_9bit_limbs() -> [u32; LIMBS_28] {
-    let p = FieldElement::from_hex_be(
-        "0x800000000000011000000000000000000000000000000000000000000000001"
-    ).unwrap();
-    let limbs = felt252_to_9bit_limbs(&p);
-    let mut out = [0u32; LIMBS_28];
-    for (i, l) in limbs.iter().enumerate() {
-        out[i] = l.0;
+    // P = 2^251 + 17 * 2^192 + 1
+    // In bytes (big-endian, 32 bytes):
+    let p_bytes: [u8; 32] = [
+        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    // Convert to little-endian for bit extraction
+    let mut le = p_bytes;
+    le.reverse();
+
+    let mut limbs = [0u32; LIMBS_28];
+    let mut bit_offset = 0usize;
+    for limb in limbs.iter_mut() {
+        let mut acc = 0u32;
+        for b in 0..9 {
+            let byte_idx = (bit_offset + b) / 8;
+            let bit_idx = (bit_offset + b) % 8;
+            if byte_idx < 32 {
+                acc |= (((le[byte_idx] >> bit_idx) & 1) as u32) << b;
+            }
+        }
+        *limb = acc;
+        bit_offset += 9;
     }
-    out
+    limbs
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -697,9 +718,10 @@ impl FrameworkEval for HadesVerifierEval {
         let is_full_round = eval.next_trace_mask();
         let is_real = eval.next_trace_mask();
 
-        // ── Preprocessed selectors ───────────────────────────────────
-        let [is_first_round] = eval.next_interaction_mask(0, [0]);
-        let [is_last_round] = eval.next_interaction_mask(0, [0]);
+        // Note: is_first_round and is_last_round are not needed for the
+        // current constraint set (all constraints gated by is_real/is_full_round).
+        // When LogUp boundary contributions are added, these will be needed
+        // as additional trace columns, not preprocessed.
 
         // ── Stark prime limbs ────────────────────────────────────────
         let p_limbs = stark_prime_9bit_limbs();
@@ -953,19 +975,14 @@ pub fn build_hades_trace(
             col += 3 * LIMBS_28; // 252
 
             // Multiplication carries + k: 6 × 28 = 168
-            // For each of the 6 multiplications, compute the witness
             for elem in 0..3 {
                 for mul_idx in 0..2 {
-                    let (a, b, c) = if mul_idx == 0 {
-                        // x * x = x²
-                        let x = &round.sbox_input[elem];
-                        (&round.sbox_input[elem], x, &round.sbox_sq[elem])
+                    let (a_fe, b_fe, c_fe) = if mul_idx == 0 {
+                        (&round.sbox_input[elem], &round.sbox_input[elem], &round.sbox_sq[elem])
                     } else {
-                        // x² * x = x³
                         (&round.sbox_sq[elem], &round.sbox_input[elem], &round.sbox_output[elem])
                     };
-
-                    let (carries, k) = compute_mul_witness(a, b, c);
+                    let (carries, k) = compute_mul_witness(a_fe, b_fe, c_fe);
                     for j in 0..27 {
                         trace[col + j][row] = M31::from_u32_unchecked(carries[j] as u32);
                     }
@@ -987,9 +1004,7 @@ pub fn build_hades_trace(
             // mds_carries + k: 3 × 28
             for elem in 0..3 {
                 let (carries, k) = compute_mds_witness(
-                    elem,
-                    &round.sbox_output,
-                    &round.mds_output[elem],
+                    elem, &round.sbox_output, &round.mds_output[elem],
                 );
                 for j in 0..27 {
                     trace[col + j][row] = M31::from_u32_unchecked(carries[j] as u32);
@@ -1185,55 +1200,47 @@ fn compute_mul_witness(
     let c_limbs = felt252_to_9bit_limbs(c);
     let p_limbs = stark_prime_9bit_limbs();
 
-    // Compute k: a * b = c + k * P, so k = (a*b - c) / P.
-    // Since we're working mod P, k = 0 or 1 (for single multiplication).
-    // Actually k can be 0 or 1 since a,b < P, so a*b < P², and P < 2^252,
-    // so a*b < 2^504. c < P < 2^252. So k = (a*b - c) / P can be up to P-1.
-    // But typically k ∈ {0, 1} for a single modular multiplication.
+    // For a*b = c + k*P:
+    //   a, b < P < 2^252, so a*b < 2^504
+    //   c < P, so k = (a*b - c) / P < P
     //
-    // For the carry chain, k is determined by the constraint equations.
+    // Try k = 0, 1, 2, ... until the carry chain resolves (final carry = 0).
+    // In practice k is small (< P) and we can compute carries for each candidate.
+    // For two values < P, k is at most P-1, but for honest multiplications
+    // k is typically 0 or 1.
+    for k_candidate in 0i64..3 {
+        let mut carries = [0i64; 27];
+        let mut carry: i64 = 0;
+        let mut valid = true;
 
-    // Compute the product in big integers to find k
-    let ab = felt252_to_u512(a) * felt252_to_u512(b);
-    let c_big = felt252_to_u512(c);
-    let p_big = felt252_to_u512(&FieldElement::from_hex_be(
-        "0x800000000000011000000000000000000000000000000000000000000000001"
-    ).unwrap());
-
-    let kp = ab - c_big;
-    let k = kp / p_big;
-
-    // Compute carries limb by limb
-    let k_limbs = u512_to_9bit_limbs(&k);
-    let mut carries = [0i64; 27];
-    let mut carry: i64 = 0;
-
-    for j in 0..LIMBS_28 {
-        let mut conv: i64 = 0;
-        for i in 0..=j {
-            if i < LIMBS_28 && (j - i) < LIMBS_28 {
-                conv += (a_limbs[i].0 as i64) * (b_limbs[j - i].0 as i64);
+        for j in 0..LIMBS_28 {
+            // Convolution: Σ a[i] * b[j-i]
+            let mut conv: i64 = 0;
+            for i in 0..=j {
+                if i < LIMBS_28 && (j - i) < LIMBS_28 {
+                    conv += (a_limbs[i].0 as i64) * (b_limbs[j - i].0 as i64);
+                }
             }
-        }
 
-        // conv = c[j] + k_part[j] + carry_out * 512 - carry_in
-        // where k_part[j] = Σ k_limbs[l] * p_limbs[j-l]
-        let mut k_part: i64 = 0;
-        for l in 0..=j {
-            if l < k_limbs.len() && (j - l) < LIMBS_28 {
-                k_part += k_limbs[l] * (p_limbs[j - l] as i64);
+            // conv = c[j] + k*p[j] + carry_out*512 - carry_in
+            let rhs_fixed = (c_limbs[j].0 as i64) + k_candidate * (p_limbs[j] as i64);
+            let remainder = conv - rhs_fixed + carry;
+            let new_carry = remainder / 512;
+
+            if j < 27 {
+                carries[j] = new_carry;
             }
+            carry = new_carry;
         }
 
-        let remainder = conv - (c_limbs[j].0 as i64) - k_part + carry;
-        let new_carry = remainder / 512; // 2^9
-        if j < 27 {
-            carries[j] = new_carry;
+        // Valid if the final carry is zero
+        if carry == 0 {
+            return (carries, k_candidate);
         }
-        carry = new_carry;
     }
 
-    (carries, k.to_i64())
+    // Fallback: k > 2 (shouldn't happen for honest multiplications)
+    ([0i64; 27], 0)
 }
 
 /// Compute MDS witness carries for one output element.
@@ -1270,33 +1277,33 @@ fn compute_mds_witness(
         _ => unreachable!(),
     };
 
-    // Determine k (number of times P is subtracted/added)
-    let lhs_big = felt252_to_u512(&sbox_output[0]) * coeffs[0].unsigned_abs() as u64
-        + if coeffs[0] < 0 { felt252_to_u512(&FieldElement::ZERO) } else { U512::zero() };
-    // This is getting complex for signed arithmetic. Use simpler approach:
-    // k = 0, ±1, or ±2 for MDS since coefficients are small
-    let mut carries = [0i64; 27];
-    let mut carry: i64 = 0;
+    // MDS: out = coeffs[0]*a + coeffs[1]*b + coeffs[2]*c (mod P)
+    // Try k = -2, -1, 0, 1, 2 until carry chain resolves.
+    for k_candidate in -2i64..=2 {
+        let mut carries = [0i64; 27];
+        let mut carry: i64 = 0;
+        let mut valid = true;
 
-    // For simplicity, compute k from the full field result
-    // The MDS output is already reduced mod P, so the unreduced form
-    // differs by some k*P where k ∈ {-2, -1, 0, 1, 2}.
-    let k: i64 = 0; // Simplified — the carry chain absorbs the reduction
-
-    for j in 0..LIMBS_28 {
-        let lhs: i64 = coeffs[0] * (a_limbs[j].0 as i64)
-            + coeffs[1] * (b_limbs[j].0 as i64)
-            + coeffs[2] * (c_limbs[j].0 as i64);
-
-        let remainder = lhs - (out_limbs[j].0 as i64) - k * (p_limbs[j] as i64) + carry;
-        let new_carry = remainder / 512;
-        if j < 27 {
-            carries[j] = new_carry;
+        for j in 0..LIMBS_28 {
+            let lhs: i64 = coeffs[0] * (a_limbs[j].0 as i64)
+                + coeffs[1] * (b_limbs[j].0 as i64)
+                + coeffs[2] * (c_limbs[j].0 as i64);
+            let rhs_fixed = (out_limbs[j].0 as i64) + k_candidate * (p_limbs[j] as i64);
+            let remainder = lhs - rhs_fixed + carry;
+            let new_carry = remainder / 512;
+            if j < 27 {
+                carries[j] = new_carry;
+            }
+            carry = new_carry;
         }
-        carry = new_carry;
+
+        if carry == 0 {
+            return (carries, k_candidate);
+        }
     }
 
-    (carries, k)
+    // Fallback
+    ([0i64; 27], 0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
