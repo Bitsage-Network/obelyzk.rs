@@ -34,6 +34,10 @@ pub struct RecursiveModelInfo {
     pub weight_super_root: felt252,
     /// Expected policy commitment (Poseidon hash of PolicyConfig). 0 = any policy.
     pub policy_commitment: felt252,
+    /// Model architecture metadata (set at registration, validated at verification).
+    pub n_matmuls: u32,
+    pub hidden_size: u32,
+    pub num_transformer_blocks: u32,
     /// Owner who registered the model.
     pub owner: starknet::ContractAddress,
 }
@@ -50,6 +54,9 @@ pub trait IRecursiveVerifier<TContractState> {
         circuit_hash: felt252,
         weight_super_root: felt252,
         policy_commitment: felt252,
+        n_matmuls: u32,
+        hidden_size: u32,
+        num_transformer_blocks: u32,
     );
 
     /// Verify a recursive STARK proof for a registered model.
@@ -253,6 +260,9 @@ pub mod RecursiveVerifierContract {
             circuit_hash: felt252,
             weight_super_root: felt252,
             policy_commitment: felt252,
+            n_matmuls: u32,
+            hidden_size: u32,
+            num_transformer_blocks: u32,
         ) {
             // Only owner can register models
             let caller = get_caller_address();
@@ -262,6 +272,9 @@ pub mod RecursiveVerifierContract {
                 circuit_hash,
                 weight_super_root,
                 policy_commitment,
+                n_matmuls,
+                hidden_size,
+                num_transformer_blocks,
                 owner: caller,
             };
             self.recursive_models.write(model_id, info);
@@ -383,6 +396,16 @@ pub mod RecursiveVerifierContract {
 
             // trace_log_size: must match proof body
             assert(trace_log_size == proof_log_size, 'trace_log_size mismatch');
+
+            // Model architecture metadata: must match registration.
+            // These are fixed per model — set once at register_model_recursive,
+            // validated here so the event cannot contain false architecture claims.
+            assert(n_matmuls == model.n_matmuls, 'n_matmuls mismatch');
+            assert(hidden_size == model.hidden_size, 'hidden_size mismatch');
+            assert(
+                num_transformer_blocks == model.num_transformer_blocks,
+                'num_transformer_blocks mismatch'
+            );
 
             // Build RecursiveAir from public inputs.
             // Initial digest is always zero (fresh Poseidon channel).
