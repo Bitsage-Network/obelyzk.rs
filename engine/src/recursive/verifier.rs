@@ -66,6 +66,22 @@ pub fn verify_recursive(
     ]);
     channel.mix_u64(public_inputs.n_layers as u64);
 
+    // Also bind the felt252 io_commitment (4 × u64, matching prover)
+    {
+        let io_felt = crate::crypto::poseidon_channel::securefield_to_felt(
+            public_inputs.io_commitment,
+        );
+        let bytes = io_felt.to_bytes_be();
+        let u0 = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+        let u1 = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+        let u2 = u64::from_be_bytes(bytes[16..24].try_into().unwrap());
+        let u3 = u64::from_be_bytes(bytes[24..32].try_into().unwrap());
+        channel.mix_u64(u0);
+        channel.mix_u64(u1);
+        channel.mix_u64(u2);
+        channel.mix_u64(u3);
+    }
+
     let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(pcs_config);
 
     // Replay commitments (Tree 0 = preprocessed, Tree 1 = execution)

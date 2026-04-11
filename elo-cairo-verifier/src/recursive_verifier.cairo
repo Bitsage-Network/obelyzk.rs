@@ -484,6 +484,16 @@ pub mod RecursiveVerifierContract {
             let proof_n_layers_u64: u64 = proof_n_layers.try_into().unwrap();
             channel.mix_u64(proof_n_layers_u64);
 
+            // Bind the full felt252 io_commitment into the channel.
+            // This ensures the proof body's io_commitment_felt252 field
+            // cannot be tampered without invalidating the STARK.
+            // Split into 4 × u64 to match the Rust prover's 4 × mix_u64 calls.
+            let io_u256: u256 = proof_io_commitment_felt252.into();
+            channel.mix_u64((io_u256 / 0x10000000000000000_u256 / 0x10000000000000000_u256 / 0x10000000000000000_u256).try_into().unwrap());
+            channel.mix_u64(((io_u256 / 0x10000000000000000_u256 / 0x10000000000000000_u256) & 0xFFFFFFFFFFFFFFFF_u256).try_into().unwrap());
+            channel.mix_u64(((io_u256 / 0x10000000000000000_u256) & 0xFFFFFFFFFFFFFFFF_u256).try_into().unwrap());
+            channel.mix_u64((io_u256 & 0xFFFFFFFFFFFFFFFF_u256).try_into().unwrap());
+
             let mut commitment_scheme = stwo_verifier_core::pcs::verifier::CommitmentSchemeVerifierImpl::new();
             commitment_scheme.commit(preprocessed_commitment, preprocessed_sizes.span(), ref channel, log_blowup);
             commitment_scheme.commit(trace_commitment, trace_sizes.span(), ref channel, log_blowup);
