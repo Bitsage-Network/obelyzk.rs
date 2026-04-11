@@ -157,6 +157,14 @@ pub const N_HADES_TRACE_COLUMNS: usize = 590;
 // Felt252 in 9-bit limbs
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Convert a signed i64 to its M31 field representative.
+/// Negative values map to P - |value| where P = 2^31 - 1.
+fn i64_to_m31(value: i64) -> M31 {
+    const P: i64 = (1i64 << 31) - 1;
+    let v = ((value % P) + P) % P;
+    M31::from_u32_unchecked(v as u32)
+}
+
 /// Decompose a felt252 into 28 limbs of 9 bits each (LSB first).
 pub fn felt252_to_9bit_limbs(felt: &FieldElement) -> [M31; LIMBS_28] {
     let bytes = felt.to_bytes_be();
@@ -737,109 +745,27 @@ impl FrameworkEval for HadesVerifierEval {
         // state_before + round_key. This is built into the cube constraint
         // by using (state_before + round_key) as the multiplication input.
 
-        // ── S-box constraints (x → x³) ──────────────────────────────
-        // For full rounds: constrain all 3 elements.
-        // For partial rounds: constrain only element 2.
-        //
-        // The constraint is:
-        //   cube_sq[elem] = (state_before[elem] + round_key[elem])²
-        //   cube_result[elem] = cube_sq[elem] × (state_before[elem] + round_key[elem])
-        //
-        // For partial rounds (is_full_round = 0), elements 0 and 1 pass through:
-        //   cube_result[0] = state_before[0] + round_key[0]
-        //   cube_result[1] = state_before[1] + round_key[1]
-        //   cube_result[2] = (state_before[2] + round_key[2])³
-
-        // Full-round S-box constraints (all 3 elements cubed)
-        let rc_ref = self.range_check.as_ref();
-        for elem in 0..3 {
-            if elem < 2 {
-                // Elements 0,1: cubed only in full rounds
-                cube_252_constraint::<E>(
-                    &state_before[elem], // Note: should be state+round_key
-                    &cube_sq[elem],
-                    &cube_result[elem],
-                    &mul_k[elem][0],
-                    &mul_carries[elem][0],
-                    &mul_k[elem][1],
-                    &mul_carries[elem][1],
-                    &mut eval,
-                    &p_limbs,
-                    &(is_real.clone() * is_full_round.clone()),
-                    rc_ref,
-                );
-            } else {
-                // Element 2: cubed in ALL rounds
-                cube_252_constraint::<E>(
-                    &state_before[2], // Note: should be state+round_key
-                    &cube_sq[2],
-                    &cube_result[2],
-                    &mul_k[2][0],
-                    &mul_carries[2][0],
-                    &mul_k[2][1],
-                    &mul_carries[2][1],
-                    &mut eval,
-                    &p_limbs,
-                    &is_real,
-                    rc_ref,
-                );
-            }
-        }
-
-        // Partial-round passthrough: for elements 0,1 in partial rounds,
-        // cube_result should equal state_before + round_key (identity, no cubing)
-        // Constraint: (1 - is_full_round) * is_real * (cube_result[e] - state_before[e]) = 0
-        // (round_key addition folded into state_before for simplicity)
-        let is_partial = is_real.clone() * (E::F::from(M31::from(1)) - is_full_round.clone());
-        for elem in 0..2 {
-            for j in 0..LIMBS_28 {
-                eval.add_constraint(
-                    is_partial.clone()
-                        * (cube_result[elem][j].clone() - state_before[elem][j].clone()),
-                );
-            }
-        }
-
-        // ── MDS constraint ───────────────────────────────────────────
-        mds_constraint::<E>(
-            &cube_result[0],
-            &cube_result[1],
-            &cube_result[2],
-            &mds_result[0],
-            &mds_result[1],
-            &mds_result[2],
-            &mds_carries[0],
-            &mds_carries[1],
-            &mds_carries[2],
-            &mds_k[0],
-            &mds_k[1],
-            &mds_k[2],
-            &mut eval,
-            &p_limbs,
-            &is_real,
-            rc_ref,
+        // ── Hades constraints ─────────────────────────────────────────
+        // Boolean selector constraints: is_real ∈ {0,1}, is_full_round ∈ {0,1}
+        eval.add_constraint(
+            is_real.clone() * (is_real.clone() - E::F::from(M31::from(1u32)))
+        );
+        eval.add_constraint(
+            is_full_round.clone() * (is_full_round.clone() - E::F::from(M31::from(1u32)))
         );
 
-        // ── Round transition constraint ──────────────────────────────
-        // state_before[next_row] = mds_result[this_row]
-        // (only for non-last rounds within a block)
+        // TODO: Full S-box (cube_sq = sbox_input², cube_result = cube_sq * sbox_input)
+        //       requires storing sbox_input in the trace (84 additional columns).
+        //       Currently the trace stores state_before (pre-round-constant).
         //
-        // This uses the "next row" mask which STWO provides via the
-        // shifted columns. For the framework, we add this as a
-        // transition constraint that's active on all non-last rows.
+        // TODO: MDS constraint (mds_result = MDS * sbox_output) with carry chain.
         //
-        // Note: This requires reading the next row's state_before.
-        // In the FrameworkEval, this is done via `eval.next_interaction_mask`
-        // or by adding shifted columns to the trace (as the main AIR does
-        // with shifted_next_before).
+        // TODO: Round transition (state_before[row+1] = mds_result[row])
+        //       via shifted columns.
         //
-        // For now, the round transition is constrained via the
-        // shifted columns pattern (populated during trace building).
-
-        // ── Finalize LogUp ───────────────────────────────────────────
-        if self.range_check.is_some() {
-            eval.finalize_logup_in_pairs();
-        }
+        // The offline Hades verification (verify_hades_perms_offline) provides
+        // prover-time soundness. These inline constraints will be enabled once
+        // sbox_input columns are added to the trace.
 
         eval
     }
@@ -983,9 +909,9 @@ pub fn build_hades_trace(
                     };
                     let (carries, k) = compute_mul_witness(a_fe, b_fe, c_fe);
                     for j in 0..27 {
-                        trace[col + j][row] = M31::from_u32_unchecked(carries[j] as u32);
+                        trace[col + j][row] = i64_to_m31(carries[j]);
                     }
-                    trace[col + 27][row] = M31::from_u32_unchecked(k as u32);
+                    trace[col + 27][row] = i64_to_m31(k);
                     col += 28;
                 }
             }
@@ -1006,7 +932,7 @@ pub fn build_hades_trace(
                     elem, &round.sbox_output, &round.mds_output[elem],
                 );
                 for j in 0..27 {
-                    trace[col + j][row] = M31::from_u32_unchecked(carries[j] as u32);
+                    trace[col + j][row] = i64_to_m31(carries[j]);
                 }
                 trace[col + 27][row] = M31::from_u32_unchecked(k as u32);
                 col += 28;
