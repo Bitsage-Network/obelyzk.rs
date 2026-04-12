@@ -259,6 +259,8 @@ pub fn prove_recursive_with_policy(
     // to avoid STWO's SIMD mixed-size column evaluation issues.
     // Chain columns are padded to unified_log_size (zeros beyond n_real_rows).
     let unified_log_size = if hades_enabled { chain_log_size.max(hades_log_size) } else { chain_log_size };
+    // Max degree must cover the largest component's constraint degree.
+    // Chain: +1 (degree 2), Hades: +2 (degree 3 from a*b*is_active).
     let max_degree_bound = unified_log_size + 1;
     let twiddles = SimdBackend::precompute_twiddles(
         CanonicCoset::new(max_degree_bound + config.fri_config.log_blowup_factor)

@@ -158,7 +158,6 @@ impl FrameworkEval for RecursiveVerifierEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // All constraints are degree ≤ 2 (products with is_first/is_last selectors).
         self.log_n_rows + 1
     }
 
