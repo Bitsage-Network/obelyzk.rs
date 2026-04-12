@@ -148,15 +148,16 @@ pub const MUL_WITNESS_COLS: usize = 54 + LIMBS_28; // 82
 /// Breakdown:
 ///   state_before:        3 × 28 = 84
 ///   sbox_input:          3 × 28 = 84   (state_before + round_constant)
-///   cube_result:         3 × 28 = 84   (sbox_output)
-///   cube_sq_aux:         3 × 28 = 84   (x² intermediate)
+///   cube_result:         3 × 28 = 84   (ALWAYS sbox_input^3 for all elements/rounds)
+///   cube_sq_aux:         3 × 28 = 84   (ALWAYS sbox_input^2)
 ///   mul_witness:         6 × 82 = 492  (6 muls: 54 carries + 28 k_limbs each)
+///   post_sbox:           3 × 28 = 84   (actual MDS input: cube for full, passthrough for partial)
 ///   mds_result:          3 × 28 = 84
-///   mds_carries+k_val:   3 × 28 = 84   (MDS uses small k, single value ok)
+///   mds_carries+k_val:   3 × 30 = 90   (29 carries + 1 k per element)
 ///   is_full_round:       1
 ///   is_real:             1
-///   Total: 998
-pub const N_HADES_TRACE_COLUMNS: usize = 998;
+///   Total: 1088
+pub const N_HADES_TRACE_COLUMNS: usize = 1088;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Felt252 in 9-bit limbs
@@ -411,9 +412,9 @@ pub fn mds_constraint<E: EvalAtRow>(
     out0: &[E::F; LIMBS_28],
     out1: &[E::F; LIMBS_28],
     out2: &[E::F; LIMBS_28],
-    carries0: &[E::F; 27],
-    carries1: &[E::F; 27],
-    carries2: &[E::F; 27],
+    carries0: &[E::F; 29],
+    carries1: &[E::F; 29],
+    carries2: &[E::F; 29],
     k0: &E::F,
     k1: &E::F,
     k2: &E::F,
@@ -435,17 +436,23 @@ pub fn mds_constraint<E: EvalAtRow>(
     // Helper: constrain one MDS row and range-check its carries
     let mut constrain_mds_row = |coeffs: [E::F; 3],
                                   out: &[E::F; LIMBS_28],
-                                  carries: &[E::F; 27],
+                                  carries: &[E::F; 29],
                                   k: &E::F| {
-        for j in 0..LIMBS_28 {
-            let p_j = E::F::from(M31::from(p_limbs[j]));
+        // Check 30 limb positions (28 data + 2 overflow for k*P spill)
+        for j in 0..30 {
+            let p_j = if j < LIMBS_28 { E::F::from(M31::from(p_limbs[j])) } else { zero.clone() };
             let carry_in = if j == 0 { zero.clone() } else { carries[j - 1].clone() };
-            let carry_out = if j < 27 { carries[j].clone() } else { zero.clone() };
+            let carry_out = if j < 29 { carries[j].clone() } else { zero.clone() };
 
-            let lhs = coeffs[0].clone() * a[j].clone()
-                + coeffs[1].clone() * b[j].clone()
-                + coeffs[2].clone() * c[j].clone();
-            let rhs = out[j].clone()
+            let a_j = if j < LIMBS_28 { a[j].clone() } else { zero.clone() };
+            let b_j = if j < LIMBS_28 { b[j].clone() } else { zero.clone() };
+            let c_j = if j < LIMBS_28 { c[j].clone() } else { zero.clone() };
+            let out_j = if j < LIMBS_28 { out[j].clone() } else { zero.clone() };
+
+            let lhs = coeffs[0].clone() * a_j
+                + coeffs[1].clone() * b_j
+                + coeffs[2].clone() * c_j;
+            let rhs = out_j
                 + k.clone() * p_j
                 + carry_out.clone() * base.clone()
                 - carry_in;
@@ -753,6 +760,14 @@ impl FrameworkEval for HadesVerifierEval {
             }
         }
 
+        // post_sbox: actual MDS input (cube for full, passthrough for partial)
+        let mut post_sbox: [[E::F; LIMBS_28]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| zero_f()));
+        for elem in 0..3 {
+            for j in 0..LIMBS_28 {
+                post_sbox[elem][j] = eval.next_trace_mask();
+            }
+        }
+
         // MDS result columns
         let mut mds_result: [[E::F; LIMBS_28]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| zero_f()));
         for elem in 0..3 {
@@ -761,11 +776,11 @@ impl FrameworkEval for HadesVerifierEval {
             }
         }
 
-        // MDS carries + k
-        let mut mds_carries: [[E::F; 27]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| zero_f()));
+        // MDS carries (29) + k (1) per element
+        let mut mds_carries: [[E::F; 29]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| zero_f()));
         let mut mds_k: [E::F; 3] = std::array::from_fn(|_| zero_f());
         for elem in 0..3 {
-            for j in 0..27 {
+            for j in 0..29 {
                 mds_carries[elem][j] = eval.next_trace_mask();
             }
             mds_k[elem] = eval.next_trace_mask();
@@ -802,64 +817,49 @@ impl FrameworkEval for HadesVerifierEval {
             is_full_round.clone() * (is_full_round.clone() - E::F::from(M31::from(1u32)))
         );
 
-        // ── Stark prime limbs ────────────────────────────────────────
-        let p_limbs = stark_prime_9bit_limbs();
-
-        // ── S-box constraints (x → x³) ──────────────────────────────
-        // sbox_input is now in the trace (state_before + round_constant).
-        // Verify: cube_sq = sbox_input², cube_result = cube_sq * sbox_input.
+        // ── S-box constraints (degree 2, NO selector) ────────────────
+        // cube_result = sbox_input^3 for ALL elements on ALL rows.
         let rc_ref = self.range_check.as_ref();
-
-        // ── S-box constraints (disabled for testing) ────────────────
-        if false { for elem in 0..3 {
-            if elem < 2 {
-                cube_252_constraint::<E>(
-                    &sbox_input[elem],
-                    &cube_sq[elem],
-                    &cube_result[elem],
-                    &mul_k_limbs[elem][0][0],
-                    &mul_carries[elem][0],
-                    &mul_k_limbs[elem][1][0],
-                    &mul_carries[elem][1],
-                    &mut eval,
-                    &p_limbs,
-                    &(is_real.clone() * is_full_round.clone()),
-                    rc_ref,
-                );
-            } else {
-                cube_252_constraint::<E>(
-                    &sbox_input[2],
-                    &cube_sq[2],
-                    &cube_result[2],
-                    &mul_k_limbs[2][0][0],
-                    &mul_carries[2][0],
-                    &mul_k_limbs[2][1][0],
-                    &mul_carries[2][1],
-                    &mut eval,
-                    &p_limbs,
-                    &is_real,
-                    rc_ref,
-                );
-            }
+        let one = E::F::from(M31::from(1u32));
+        for elem in 0..3 {
+            cube_252_constraint::<E>(
+                &sbox_input[elem],
+                &cube_sq[elem],
+                &cube_result[elem],
+                &mul_k_limbs[elem][0][0],
+                &mul_carries[elem][0],
+                &mul_k_limbs[elem][1][0],
+                &mul_carries[elem][1],
+                &mut eval,
+                &p_limbs,
+                &one, // always active — no selector
+                rc_ref,
+            );
         }
 
-        // Partial-round passthrough: for elements 0,1 in partial rounds
-        } let _is_partial = is_real.clone() * (E::F::from(M31::from(1u32)) - is_full_round.clone());
-        if false { for elem in 0..2 {
+        // ── post_sbox linking (degree 2, no is_real selector) ────────
+        // post_sbox[e] = is_full_round * cube_result[e] + (1 - is_full_round) * sbox_input[e]
+        // Degree 2: is_full_round × trace_col. On padding rows: all zero → 0=0.
+        // Element 2: always cubed → post_sbox[2] = cube_result[2]
+        for j in 0..LIMBS_28 {
+            eval.add_constraint(
+                post_sbox[2][j].clone() - cube_result[2][j].clone(),
+            );
+        }
+        // Elements 0,1: interpolate between cube and passthrough
+        for elem in 0..2 {
             for j in 0..LIMBS_28 {
-                eval.add_constraint(
-                    _is_partial.clone()
-                        * (cube_result[elem][j].clone() - sbox_input[elem][j].clone()),
-                );
+                let expected = is_full_round.clone() * cube_result[elem][j].clone()
+                    + (one.clone() - is_full_round.clone()) * sbox_input[elem][j].clone();
+                eval.add_constraint(post_sbox[elem][j].clone() - expected);
             }
         }
 
-        }
-        // ── MDS constraint (disabled) ─────────────────────────────────
-        if false { mds_constraint::<E>(
-            &cube_result[0],
-            &cube_result[1],
-            &cube_result[2],
+        // ── MDS constraint ───────────────────────────────────────────
+        mds_constraint::<E>(
+            &post_sbox[0],
+            &post_sbox[1],
+            &post_sbox[2],
             &mds_result[0],
             &mds_result[1],
             &mds_result[2],
@@ -873,7 +873,7 @@ impl FrameworkEval for HadesVerifierEval {
             &p_limbs,
             &is_real,
             rc_ref,
-        ); }
+        );
 
         eval
     }
@@ -998,46 +998,50 @@ pub fn build_hades_trace(
             }
             col += 3 * LIMBS_28; // 168
 
-            // cube_result: 3 × 28
+            // cube_result: 3 × 28 (ALWAYS sbox_input^3)
             for elem in 0..3 {
-                let limbs = felt252_to_9bit_limbs(&round.sbox_output[elem]);
+                let limbs = felt252_to_9bit_limbs(&round.cube_result[elem]);
                 for j in 0..LIMBS_28 {
                     trace[col + elem * LIMBS_28 + j][row] = limbs[j];
                 }
             }
-            col += 3 * LIMBS_28; // 168
+            col += 3 * LIMBS_28;
 
-            // cube_sq_aux: 3 × 28
+            // cube_sq: 3 × 28 (ALWAYS sbox_input^2)
             for elem in 0..3 {
-                let limbs = felt252_to_9bit_limbs(&round.sbox_sq[elem]);
+                let limbs = felt252_to_9bit_limbs(&round.cube_sq[elem]);
                 for j in 0..LIMBS_28 {
                     trace[col + elem * LIMBS_28 + j][row] = limbs[j];
                 }
             }
-            col += 3 * LIMBS_28; // 252
+            col += 3 * LIMBS_28;
 
-            // Multiplication witness: 6 × 55 = 330 (27 carries + 28 k_limbs each)
+            // Multiplication witness: 6 × 82 (ALL elements, ALL rounds — no selector needed)
             for elem in 0..3 {
-                let should_compute = is_full || elem == 2;
                 for mul_idx in 0..2 {
-                    if should_compute {
-                        let (a_fe, b_fe, c_fe) = if mul_idx == 0 {
-                            (&round.sbox_input[elem], &round.sbox_input[elem], &round.sbox_sq[elem])
-                        } else {
-                            (&round.sbox_sq[elem], &round.sbox_input[elem], &round.sbox_output[elem])
-                        };
-                        let (carries, k_lmbs) = compute_mul_witness(a_fe, b_fe, c_fe);
-                        for j in 0..54 {
-                            trace[col + j][row] = i64_to_m31(carries[j]);
-                        }
-                        for j in 0..LIMBS_28 {
-                            trace[col + 54 + j][row] = i64_to_m31(k_lmbs[j]);
-                        }
+                    let (a_fe, b_fe, c_fe) = if mul_idx == 0 {
+                        (&round.sbox_input[elem], &round.sbox_input[elem], &round.cube_sq[elem])
+                    } else {
+                        (&round.cube_sq[elem], &round.sbox_input[elem], &round.cube_result[elem])
+                    };
+                    let (carries, k_lmbs) = compute_mul_witness(a_fe, b_fe, c_fe);
+                    for j in 0..54 {
+                        trace[col + j][row] = i64_to_m31(carries[j]);
                     }
-                    col += MUL_WITNESS_COLS; // 55
+                    for j in 0..LIMBS_28 {
+                        trace[col + 54 + j][row] = i64_to_m31(k_lmbs[j]);
+                    }
+                    col += MUL_WITNESS_COLS;
                 }
             }
-            // col now at 252 + 168 = 420
+            // post_sbox: 3 × 28 (actual MDS input: cube for full, passthrough for partial)
+            for elem in 0..3 {
+                let limbs = felt252_to_9bit_limbs(&round.post_sbox[elem]);
+                for j in 0..LIMBS_28 {
+                    trace[col + elem * LIMBS_28 + j][row] = limbs[j];
+                }
+            }
+            col += 3 * LIMBS_28;
 
             // mds_result: 3 × 28
             for elem in 0..3 {
@@ -1048,16 +1052,16 @@ pub fn build_hades_trace(
             }
             col += 3 * LIMBS_28; // 504
 
-            // mds_carries + k: 3 × 28
+            // mds_carries + k: 3 × 30 (29 carries + 1 k)
             for elem in 0..3 {
                 let (carries, k) = compute_mds_witness(
-                    elem, &round.sbox_output, &round.mds_output[elem],
+                    elem, &round.post_sbox, &round.mds_output[elem],
                 );
-                for j in 0..27 {
+                for j in 0..29 {
                     trace[col + j][row] = i64_to_m31(carries[j]);
                 }
-                trace[col + 27][row] = M31::from_u32_unchecked(k as u32);
-                col += 28;
+                trace[col + 29][row] = i64_to_m31(k);
+                col += 30;
             }
             // col now at 504 + 84 = 588
 
@@ -1103,10 +1107,14 @@ pub struct HadesRoundState {
     pub state_before: [FieldElement; 3],
     /// State after adding the round constant.
     pub sbox_input: [FieldElement; 3],
-    /// x² intermediate (for S-box witness).
-    pub sbox_sq: [FieldElement; 3],
-    /// State after applying S-box.
-    pub sbox_output: [FieldElement; 3],
+    /// sbox_input² — ALWAYS computed for all 3 elements (even partial rounds).
+    pub cube_sq: [FieldElement; 3],
+    /// sbox_input³ — ALWAYS computed for all 3 elements.
+    pub cube_result: [FieldElement; 3],
+    /// Actual post-S-box values fed to MDS:
+    ///   Full rounds: cube_result (cubed)
+    ///   Partial rounds: [sbox_input[0], sbox_input[1], cube_result[2]]
+    pub post_sbox: [FieldElement; 3],
     /// State after MDS multiplication (= state_before of next round).
     pub mds_output: [FieldElement; 3],
 }
@@ -1141,19 +1149,22 @@ pub fn execute_hades_rounds(
             state[1] + comp[idx + 1],
             state[2] + comp[idx + 2],
         ];
-        let sbox_sq = [
+        // ALWAYS cube all 3 elements (for constraint degree 2)
+        let cube_sq = [
             sbox_input[0] * sbox_input[0],
             sbox_input[1] * sbox_input[1],
             sbox_input[2] * sbox_input[2],
         ];
-        let sbox_output = [
-            sbox_sq[0] * sbox_input[0],
-            sbox_sq[1] * sbox_input[1],
-            sbox_sq[2] * sbox_input[2],
+        let cube_result = [
+            cube_sq[0] * sbox_input[0],
+            cube_sq[1] * sbox_input[1],
+            cube_sq[2] * sbox_input[2],
         ];
-        let mds_output = mds_mix(&sbox_output);
+        // Full rounds: all elements cubed
+        let post_sbox = cube_result;
+        let mds_output = mds_mix(&post_sbox);
         rounds.push(HadesRoundState {
-            state_before, sbox_input, sbox_sq, sbox_output, mds_output,
+            state_before, sbox_input, cube_sq, cube_result, post_sbox, mds_output,
         });
         state = mds_output;
         idx += 3;
@@ -1162,21 +1173,23 @@ pub fn execute_hades_rounds(
     // ── 83 partial rounds ────────────────────────────────────────
     for _ in 0..N_PARTIAL_ROUNDS {
         let state_before = state;
-        // Only state[2] gets the round constant in compressed form
         let sbox_input = [state[0], state[1], state[2] + comp[idx]];
-        let sbox_sq = [
-            state[0],            // passthrough (not cubed)
-            state[1],            // passthrough
+        // ALWAYS cube all 3 elements for the constraint
+        let cube_sq = [
+            sbox_input[0] * sbox_input[0],
+            sbox_input[1] * sbox_input[1],
             sbox_input[2] * sbox_input[2],
         ];
-        let sbox_output = [
-            state[0],            // passthrough
-            state[1],            // passthrough
-            sbox_sq[2] * sbox_input[2],
+        let cube_result = [
+            cube_sq[0] * sbox_input[0],
+            cube_sq[1] * sbox_input[1],
+            cube_sq[2] * sbox_input[2],
         ];
-        let mds_output = mds_mix(&sbox_output);
+        // Partial rounds: only element 2 uses cubed value
+        let post_sbox = [sbox_input[0], sbox_input[1], cube_result[2]];
+        let mds_output = mds_mix(&post_sbox);
         rounds.push(HadesRoundState {
-            state_before, sbox_input, sbox_sq, sbox_output, mds_output,
+            state_before, sbox_input, cube_sq, cube_result, post_sbox, mds_output,
         });
         state = mds_output;
         idx += 1;
@@ -1190,19 +1203,20 @@ pub fn execute_hades_rounds(
             state[1] + comp[idx + 1],
             state[2] + comp[idx + 2],
         ];
-        let sbox_sq = [
+        let cube_sq = [
             sbox_input[0] * sbox_input[0],
             sbox_input[1] * sbox_input[1],
             sbox_input[2] * sbox_input[2],
         ];
-        let sbox_output = [
-            sbox_sq[0] * sbox_input[0],
-            sbox_sq[1] * sbox_input[1],
-            sbox_sq[2] * sbox_input[2],
+        let cube_result = [
+            cube_sq[0] * sbox_input[0],
+            cube_sq[1] * sbox_input[1],
+            cube_sq[2] * sbox_input[2],
         ];
-        let mds_output = mds_mix(&sbox_output);
+        let post_sbox = cube_result;
+        let mds_output = mds_mix(&post_sbox);
         rounds.push(HadesRoundState {
-            state_before, sbox_input, sbox_sq, sbox_output, mds_output,
+            state_before, sbox_input, cube_sq, cube_result, post_sbox, mds_output,
         });
         state = mds_output;
         idx += 3;
@@ -1323,7 +1337,7 @@ fn compute_mds_witness(
     elem_idx: usize,
     sbox_output: &[FieldElement; 3],
     mds_output: &FieldElement,
-) -> ([i64; 27], i64) {
+) -> ([i64; 29], i64) {
     // MDS coefficients per output element:
     // out[0] = 3*a + b + c
     // out[1] = a - b + c
@@ -1355,21 +1369,22 @@ fn compute_mds_witness(
     // MDS: out = coeffs[0]*a + coeffs[1]*b + coeffs[2]*c (mod P)
     // Try k = -2, -1, 0, 1, 2 until carry chain resolves.
     for k_candidate in -10i64..=10 {
-        let mut carries = [0i64; 27];
+        let mut carries = [0i64; 29];
         let mut carry: i64 = 0;
-        let mut valid = true;
 
-        for j in 0..LIMBS_28 {
-            let lhs: i64 = coeffs[0] * (a_limbs[j].0 as i64)
-                + coeffs[1] * (b_limbs[j].0 as i64)
-                + coeffs[2] * (c_limbs[j].0 as i64);
-            let rhs_fixed = (out_limbs[j].0 as i64) + k_candidate * (p_limbs[j] as i64);
+        for j in 0..30 {
+            let a_j = if j < LIMBS_28 { a_limbs[j].0 as i64 } else { 0 };
+            let b_j = if j < LIMBS_28 { b_limbs[j].0 as i64 } else { 0 };
+            let c_j = if j < LIMBS_28 { c_limbs[j].0 as i64 } else { 0 };
+            let out_j = if j < LIMBS_28 { out_limbs[j].0 as i64 } else { 0 };
+            let p_j = if j < LIMBS_28 { p_limbs[j] as i64 } else { 0 };
+
+            let lhs = coeffs[0] * a_j + coeffs[1] * b_j + coeffs[2] * c_j;
+            let rhs_fixed = out_j + k_candidate * p_j;
             let remainder = lhs - rhs_fixed + carry;
-            let new_carry = remainder / 512;
-            if j < 27 {
-                carries[j] = new_carry;
-            }
-            carry = new_carry;
+            let nc = if remainder >= 0 { remainder / 512 } else { (remainder - 511) / 512 };
+            if j < 29 { carries[j] = nc; }
+            carry = nc;
         }
 
         if carry == 0 {
@@ -1378,7 +1393,7 @@ fn compute_mds_witness(
     }
 
     // Fallback
-    ([0i64; 27], 0)
+    ([0i64; 29], 0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1639,7 +1654,7 @@ mod tests {
 
     #[test]
     fn test_hades_round_sbox_constraint_m31() {
-        // Verify the S-box constraint holds for REAL Hades round data.
+        // Verify the S-box constraint (55-limb) holds for real Hades data.
         let input = [
             FieldElement::from(1u64),
             FieldElement::from(2u64),
@@ -1648,59 +1663,38 @@ mod tests {
         let rounds = execute_hades_rounds(&input);
         let round = &rounds[0]; // First round (full round)
         let p_limbs = stark_prime_9bit_limbs();
+        let base = M31::from(512u32);
 
-        // Check cube for element 0: sbox_input[0]^2 = sbox_sq[0]
+        // Check: sbox_input[0]^2 = cube_sq[0] via 55-limb carry chain
         let a = &round.sbox_input[0];
-        let c = &round.sbox_sq[0];
-        let (carries, _k_limbs_val) = compute_mul_witness(a, a, c);
-
-        // Replicate the conv_mod reduction in M31 arithmetic
+        let c = &round.cube_sq[0];
+        let (carries, k_limbs_val) = compute_mul_witness(a, a, c);
         let a_limbs = felt252_to_9bit_limbs(a);
         let c_limbs = felt252_to_9bit_limbs(c);
-        let base = M31::from(512u32);
-        let c272 = M31::from(272u32);
 
-        // Full 55-limb convolution minus c
-        let mut conv_full_i64 = [0i64; 55];
         for j in 0..55 {
+            let mut conv = M31::from(0u32);
             for i in 0..=j {
                 if i < LIMBS_28 && (j - i) < LIMBS_28 {
-                    conv_full_i64[j] += a_limbs[i].0 as i64 * a_limbs[j - i].0 as i64;
+                    conv = conv + a_limbs[i] * a_limbs[j - i];
                 }
             }
-            if j < LIMBS_28 { conv_full_i64[j] -= c_limbs[j].0 as i64; }
-        }
-
-        // Reduce mod P
-        let mut reduced = [0i64; LIMBS_28];
-        for j in 0..LIMBS_28 { reduced[j] = conv_full_i64[j]; }
-        let mut pending: Vec<(usize, i64)> = (28..55).map(|k| (k, conv_full_i64[k])).collect();
-        for _ in 0..5 {
-            let current = std::mem::take(&mut pending);
-            if current.is_empty() { break; }
-            for (k, val) in current {
-                let p_low = k - 28;
-                let p_mid = k - 7;
-                if p_low < LIMBS_28 { reduced[p_low] -= val; }
-                else { pending.push((p_low, val)); }
-                if p_mid < LIMBS_28 { reduced[p_mid] -= 272 * val; }
-                else { pending.push((p_mid, 272 * val)); }
+            let c_j = if j < LIMBS_28 { c_limbs[j] } else { M31::from(0u32) };
+            let mut kp_j = M31::from(0u32);
+            for l in 0..=j {
+                if l < LIMBS_28 && (j - l) < LIMBS_28 {
+                    kp_j = kp_j + i64_to_m31(k_limbs_val[l]) * M31::from(p_limbs[j - l]);
+                }
             }
-        }
-
-        // Check: conv_mod[j] - k*p[j] = carry[j]*512 - carry[j-1]
-        let (carries, k_limbs_out) = compute_mul_witness(a, a, c);
-        let k_val = i64_to_m31(k_limbs_out[0]);
-        for j in 0..LIMBS_28 {
             let carry_in = if j == 0 { M31::from(0u32) } else { i64_to_m31(carries[j-1]) };
-            let carry_out = if j < 27 { i64_to_m31(carries[j]) } else { M31::from(0u32) };
-            let conv_mod_j = i64_to_m31(reduced[j]);
-            let p_j = M31::from(p_limbs[j]);
-            let rhs = k_val * p_j + carry_out * base - carry_in;
-            assert_eq!(conv_mod_j, rhs,
-                "S-box constraint fails at limb {j}: conv_mod={}, rhs={}", conv_mod_j.0, rhs.0);
+            let carry_out = if j < 54 { i64_to_m31(carries[j]) } else { M31::from(0u32) };
+
+            let lhs = conv - c_j - kp_j + carry_in;
+            let rhs = carry_out * base;
+            assert_eq!(lhs, rhs,
+                "S-box 55-limb fails at j={}: lhs={}, rhs={}", j, lhs.0, rhs.0);
         }
-        eprintln!("Hades round 0 S-box constraint verified in M31 ✓");
+        eprintln!("Hades round 0 S-box 55-limb constraint verified ✓");
     }
 
     #[test]
