@@ -75,8 +75,10 @@ pub const COLS_EXTRA_STATE: usize = 2 * LIMBS_PER_FELT; // 18
 /// + digest_after[9]  + output_value[9] + output_capacity[9]
 /// + shifted_next_before[9] + op_type[1]
 /// + addition_digest[9]    (intermediate addition between consecutive HadesPerms)
+/// + addition_carry[8]     (carry chain for modular limb addition)
+/// + addition_k[1]         (modular reduction quotient: 0 or 1)
 /// + is_active[1] + is_active_next[1] + active_count[1] + active_count_next[1]
-/// + is_chain_gate[1] + is_boundary_gate[1] + is_active_prev[1] = 80
+/// + is_chain_gate[1] + is_boundary_gate[1] + is_active_prev[1] = 89
 ///
 /// Each row = one Hades permutation (not one ChannelOp). Multi-Hades ChannelOps
 /// (mix_poly_coeffs: 2 Hades calls) produce 2 rows. The addition_digest column
@@ -92,14 +94,66 @@ pub const COLS_PER_ROW: usize = COLS_PER_STATE   // input full state: 27
     + COLS_PER_DIGEST // shifted_next_before: 9
     + 1  // op_type
     + COLS_PER_DIGEST // addition_digest: 9 (intermediate additions between Hades calls)
-    + 7; // [73] is_active, [74] is_active_next, [75] active_count,
-         // [76] active_count_next, [77] is_chain_gate, [78] is_boundary_gate,
-         // [79] is_active_prev
+    + 8  // addition_carry: 8 (carry chain for modular limb addition)
+    + 1  // addition_k: 1 (modular reduction quotient, 0 or 1)
+    + 7; // [82] is_active, [83] is_active_next, [84] active_count,
+         // [85] active_count_next, [86] is_chain_gate, [87] is_boundary_gate,
+         // [88] is_active_prev
          // Total: 27 + 27 + 9 + 1 = 64
 
 // ═══════════════════════════════════════════════════════════════════════
 // Felt252 ↔ M31 limb decomposition
 // ═══════════════════════════════════════════════════════════════════════
+
+/// Stark prime P decomposed into 9 × 28-bit limbs (LSB first).
+/// P = 2^251 + 17 * 2^192 + 1
+pub const P_LIMBS_28: [u32; 9] = [1, 0, 0, 0, 0, 0, 16777216, 1, 134217728];
+
+/// Compute carry-chain witnesses for modular limb addition:
+///   a[j] + b[j] + carry[j-1] = result[j] + k*P[j] + carry[j]*2^28
+///
+/// Returns (carries[8], k) where carries[j] ∈ {0,1} and k ∈ {0,1}.
+/// `a_limbs` = digest_after, `b_limbs` = addition_digest, `result_limbs` = shifted_next_before.
+pub fn compute_addition_carry_chain(
+    a_limbs: &[M31; LIMBS_PER_FELT],
+    b_limbs: &[M31; LIMBS_PER_FELT],
+    result_limbs: &[M31; LIMBS_PER_FELT],
+) -> ([M31; 8], M31) {
+    // First determine k: if a + b >= P then k=1, else k=0.
+    // In integer arithmetic: sum = a_int + b_int, if sum >= P then k=1.
+    // We compute this by checking if the carry chain works with k=0.
+    // If it doesn't (carry[8] != 0), try k=1.
+    for k in 0..=1u32 {
+        let mut carries = [M31::from_u32_unchecked(0); 8];
+        let mut carry: i64 = 0;
+        let mut valid = true;
+
+        for j in 0..LIMBS_PER_FELT {
+            let lhs = a_limbs[j].0 as i64 + b_limbs[j].0 as i64 + carry;
+            let rhs_base = result_limbs[j].0 as i64 + (k as i64) * (P_LIMBS_28[j] as i64);
+            let diff = lhs - rhs_base;
+            // diff = carry_out * 2^28
+            if diff % (1i64 << 28) != 0 {
+                valid = false;
+                break;
+            }
+            carry = diff >> 28;
+            if j < 8 {
+                if carry != 0 && carry != 1 {
+                    valid = false;
+                    break;
+                }
+                carries[j] = M31::from_u32_unchecked(carry as u32);
+            }
+        }
+        // Last limb: carry must be 0
+        if valid && carry == 0 {
+            return (carries, M31::from_u32_unchecked(k));
+        }
+    }
+    // Fallback: shouldn't happen for valid felt252 values
+    ([M31::from_u32_unchecked(0); 8], M31::from_u32_unchecked(0))
+}
 
 /// Decompose a felt252 into 9 M31 limbs (LSB first).
 ///
@@ -232,6 +286,12 @@ impl FrameworkEval for RecursiveVerifierEval {
         // Zero for single-perm ops.
         let addition_digest: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
 
+        // Carry chain for modular limb addition:
+        //   digest_after[j] + addition[j] + carry[j-1] = result[j] + k*P[j] + carry[j]*2^28
+        // where result[j] = shifted_next_before[j], k ∈ {0,1}, carry[j] ∈ {0,1}
+        let addition_carry: [E::F; 8] = std::array::from_fn(|_| eval.next_trace_mask());
+        let addition_k = eval.next_trace_mask();
+
         // ── Execution-trace selectors ────────────────────────────────
         // Read but used only for the amortized accumulator (unconditional constraint).
         let is_active = eval.next_trace_mask();
@@ -286,15 +346,56 @@ impl FrameworkEval for RecursiveVerifierEval {
             );
         }
 
-        // C5: Chain — consecutive Hades perms have chained digests [degree 2]
-        // For single-perm ops: addition_digest = 0, so digest_after == shifted_next
-        // For multi-perm ops: digest_after + addition == shifted_next (= next perm's input[0])
-        for j in 0..LIMBS_PER_FELT {
+        // C5: Chain — carry-chain modular addition [degree 2]
+        // digest_after[j] + addition[j] + carry[j-1] - result[j] - k*P[j] - carry[j]*2^28 = 0
+        // where result[j] = shifted_next_before[j]
+        //
+        // Stark prime P in 28-bit limbs (LSB first):
+        // P = 2^251 + 17*2^192 + 1
+        // P_limbs = [1, 0, 0, 0, 0, 0, 16777216, 1, 134217728]
+        {
+            let p_limbs_28: [u32; 9] = [1, 0, 0, 0, 0, 0, 16777216, 1, 134217728];
+            let two_pow_28 = E::F::from(M31::from(1u32 << 28));
+
+            // k must be boolean
             eval.add_constraint(
-                _is_chain.clone()
-                    * (digest_after[j].clone() + addition_digest[j].clone()
-                        - shifted_next_before[j].clone()),
+                _is_chain.clone() * addition_k.clone() * (addition_k.clone() - E::F::from(M31::from(1u32))),
             );
+            // Carries must be boolean
+            for j in 0..8 {
+                eval.add_constraint(
+                    _is_chain.clone()
+                        * addition_carry[j].clone()
+                        * (addition_carry[j].clone() - E::F::from(M31::from(1u32))),
+                );
+            }
+
+            // Per-limb carry-chain constraint
+            for j in 0..LIMBS_PER_FELT {
+                let carry_in = if j == 0 {
+                    E::F::from(M31::from(0u32))
+                } else {
+                    addition_carry[j - 1].clone()
+                };
+                let carry_out_term = if j < 8 {
+                    addition_carry[j].clone() * two_pow_28.clone()
+                } else {
+                    // Last limb: carry out must be 0 (no overflow past 252 bits)
+                    E::F::from(M31::from(0u32))
+                };
+                let p_j = E::F::from(M31::from(p_limbs_28[j]));
+
+                // da[j] + add[j] + carry_in - snb[j] - k*P[j] - carry_out*2^28 = 0
+                eval.add_constraint(
+                    _is_chain.clone()
+                        * (digest_after[j].clone()
+                            + addition_digest[j].clone()
+                            + carry_in
+                            - shifted_next_before[j].clone()
+                            - addition_k.clone() * p_j
+                            - carry_out_term),
+                );
+            }
         }
 
         // ── LogUp: Hades permutation binding ─────────────────────────
@@ -370,50 +471,37 @@ struct ChainRow {
 pub fn build_recursive_trace(witness: &super::types::GkrVerifierWitness) -> RecursiveTraceData {
     use super::types::WitnessOp;
 
-    // Build one row per ChannelOp (digest transition).
-    // Each row represents one atomic channel state change.
-    // Multi-Hades ChannelOps (mix_poly_coeffs: 2 Hades calls) produce ONE row
-    // with the NET digest transition.
-    //
-    // LogUp binding requires per-permutation matching, which needs a trace
-    // architecture redesign with carry-chain addition columns. The current
-    // defenses (amortized accumulator, seed_digest, n_poseidon_perms, offline
-    // Hades verification) provide strong security without LogUp.
+    // Build one row per HadesPerm — 1:1 correspondence with Hades AIR for LogUp.
+    // Multi-Hades ChannelOps (mix_poly_coeffs: 2 calls) produce 2 rows.
+    // The addition_digest column stores the value added to output[0] before
+    // the next perm's input[0]. The carry-chain constraint handles modular
+    // limb addition overflow.
     let mut rows: Vec<ChainRow> = Vec::new();
-    let mut pending_hades: Option<([FieldElement; 3], [FieldElement; 3])> = None;
 
-    for op in &witness.ops {
-        match op {
-            WitnessOp::HadesPerm { input, output } => {
-                pending_hades = Some((*input, *output));
+    let hades_ops: Vec<([FieldElement; 3], [FieldElement; 3])> = witness
+        .ops
+        .iter()
+        .filter_map(|op| {
+            if let WitnessOp::HadesPerm { input, output } = op {
+                Some((*input, *output))
+            } else {
+                None
             }
-            WitnessOp::ChannelOp {
-                digest_before,
-                digest_after,
-            } => {
-                let (full_input, full_output) = if let Some((inp, out)) = pending_hades.take() {
-                    if inp[0] == *digest_before && out[0] == *digest_after {
-                        (inp, out)
-                    } else {
-                        (
-                            [*digest_before, FieldElement::ZERO, FieldElement::ZERO],
-                            [*digest_after, FieldElement::ZERO, FieldElement::ZERO],
-                        )
-                    }
-                } else {
-                    (
-                        [*digest_before, FieldElement::ZERO, FieldElement::ZERO],
-                        [*digest_after, FieldElement::ZERO, FieldElement::ZERO],
-                    )
-                };
-                rows.push(ChainRow {
-                    full_input,
-                    full_output,
-                    addition_digest: FieldElement::ZERO, // ChannelOp level: no intermediate additions
-                });
-            }
-            _ => {}
-        }
+        })
+        .collect();
+
+    for i in 0..hades_ops.len() {
+        let (input, output) = hades_ops[i];
+        let addition = if i + 1 < hades_ops.len() {
+            hades_ops[i + 1].0[0] - output[0]
+        } else {
+            FieldElement::ZERO
+        };
+        rows.push(ChainRow {
+            full_input: input,
+            full_output: output,
+            addition_digest: addition,
+        });
     }
 
     let n_ops = rows.len();
@@ -470,13 +558,17 @@ pub fn build_recursive_trace(witness: &super::types::GkrVerifierWitness) -> Recu
         // op_type
         execution_trace[2 * COLS_PER_STATE + LIMBS_PER_FELT][row_idx] = M31::from_u32_unchecked(0);
 
-        // addition_digest: 9 limbs (value added to output[0] before next input[0])
+        // addition_digest: 9 limbs + carry chain
         let addition_col_start = 2 * COLS_PER_STATE + LIMBS_PER_FELT + 1;
+        let carry_col_start = addition_col_start + LIMBS_PER_FELT; // after addition_digest
+        let k_col = carry_col_start + 8; // after carries
         if row_idx < n_ops {
             let add_limbs = felt252_to_limbs(&rows[row_idx].addition_digest);
             for j in 0..LIMBS_PER_FELT {
                 execution_trace[addition_col_start + j][row_idx] = add_limbs[j];
             }
+
+            // Carry witnesses computed in second pass (need next row's data first)
         }
     }
 
@@ -490,10 +582,33 @@ pub fn build_recursive_trace(witness: &super::types::GkrVerifierWitness) -> Recu
         }
     }
 
-    // ── Execution-trace selectors (columns 73..79) ──────────────────
+    // Third pass: compute carry-chain witnesses for modular addition
+    {
+        let addition_col = 2 * COLS_PER_STATE + LIMBS_PER_FELT + 1;
+        let carry_col = addition_col + LIMBS_PER_FELT;
+        let k_col_idx = carry_col + 8;
+        for row_idx in 0..n_real_rows.saturating_sub(1) {
+            let da_limbs: [M31; LIMBS_PER_FELT] =
+                std::array::from_fn(|j| execution_trace[COLS_PER_STATE + j][row_idx]);
+            let add_limbs: [M31; LIMBS_PER_FELT] =
+                std::array::from_fn(|j| execution_trace[addition_col + j][row_idx]);
+            let next_before_limbs: [M31; LIMBS_PER_FELT] =
+                std::array::from_fn(|j| execution_trace[j][row_idx + 1]);
+            let (carries, k) =
+                compute_addition_carry_chain(&da_limbs, &add_limbs, &next_before_limbs);
+            for j in 0..8 {
+                execution_trace[carry_col + j][row_idx] = carries[j];
+            }
+            execution_trace[k_col_idx][row_idx] = k;
+        }
+    }
+
+    // Carry columns (73..81) populated by third pass above.
+
+    // ── Execution-trace selectors (columns 82..88) ──────────────────
     // These replace preprocessed is_last/is_chain with unconditional
     // constraints that prevent the all-zeros-selector attack.
-    let col_is_active = 2 * COLS_PER_STATE + LIMBS_PER_FELT + 1 + LIMBS_PER_FELT; // column 73
+    let col_is_active = 2 * COLS_PER_STATE + LIMBS_PER_FELT + 1 + LIMBS_PER_FELT + 8 + 1; // column 82
     let col_is_active_next = col_is_active + 1;     // 65
     let col_active_count = col_is_active + 2;       // 66
     let col_active_count_next = col_is_active + 3;  // 67
@@ -607,8 +722,8 @@ mod tests {
         assert_eq!(LIMBS_PER_FELT, 9);
         assert_eq!(COLS_PER_DIGEST, 9);
         assert_eq!(COLS_PER_STATE, 27);
-        // Expanded: 27 (input) + 27 (output) + 9 (shifted) + 1 (op_type) + 9 (addition) + 7 (selectors) = 80
-        assert_eq!(COLS_PER_ROW, 80);
+        // 27 + 27 + 9 + 1 + 9 (addition) + 8 (carry) + 1 (k) + 7 (selectors) = 89
+        assert_eq!(COLS_PER_ROW, 89);
     }
 
     #[test]

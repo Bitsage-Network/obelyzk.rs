@@ -456,17 +456,19 @@ pub fn prove_recursive_with_policy(
     // witness only partially records the chain (Pass 2 covers core layers).
     let zero_limbs = super::air::felt252_to_limbs(&starknet_ff::FieldElement::ZERO);
 
-    // Find the last ChannelOp's digest_after — this is the chain trace's final digest.
-    let last_channel_op = witness.ops.iter().rev().find_map(|op| {
-        if let super::types::WitnessOp::ChannelOp { digest_after, .. } = op {
-            Some(*digest_after)
+    // Find the last HadesPerm's output[0] — the chain trace's final digest.
+    // (Chain trace has one row per HadesPerm, so the last row's digest_after
+    // is the last HadesPerm's output[0].)
+    let last_hades_digest = witness.ops.iter().rev().find_map(|op| {
+        if let super::types::WitnessOp::HadesPerm { output, .. } = op {
+            Some(output[0])
         } else {
             None
         }
     });
 
     let final_digest_felt =
-        last_channel_op.unwrap_or(starknet_ff::FieldElement::ZERO);
+        last_hades_digest.unwrap_or(starknet_ff::FieldElement::ZERO);
 
     if final_digest_felt != witness.final_digest {
         recursive_log!(

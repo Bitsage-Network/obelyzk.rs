@@ -40,10 +40,10 @@ pub const LIMBS_PER_FELT: u32 = 9;
 
 /// Total trace columns (expanded):
 ///   input_state(27) + output_state(27) + shifted_next(9) + op_type(1)
-///   + addition_digest(9)
+///   + addition_digest(9) + addition_carry(8) + addition_k(1)
 ///   + is_active(1) + is_active_next(1) + active_count(1) + active_count_next(1)
-///   + is_chain_gate(1) + is_boundary_gate(1) + is_active_prev(1) = 80.
-const TRACE_COLS: u32 = 80;
+///   + is_chain_gate(1) + is_boundary_gate(1) + is_active_prev(1) = 89.
+const TRACE_COLS: u32 = 89;
 
 /// Columns per full Hades state (3 felt252 × 9 limbs).
 const COLS_PER_STATE: u32 = 27;
