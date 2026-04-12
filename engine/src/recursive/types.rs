@@ -67,22 +67,15 @@ pub enum WitnessOp {
 
     /// Equality assertion: `lhs == rhs`.
     /// The AIR constrains `lhs - rhs = 0`.
-    EqualityCheck {
-        lhs: SecureField,
-        rhs: SecureField,
-    },
+    EqualityCheck { lhs: SecureField, rhs: SecureField },
 
     /// Mix a SecureField into the Fiat-Shamir channel.
     /// This is a Hades permutation with specific packing — recorded for
     /// consistency but implemented via HadesPerm in the AIR.
-    ChannelMix {
-        value: SecureField,
-    },
+    ChannelMix { value: SecureField },
 
     /// Draw a SecureField from the Fiat-Shamir channel.
-    ChannelDraw {
-        result: SecureField,
-    },
+    ChannelDraw { result: SecureField },
 }
 
 /// The complete witness of a GKR verifier execution.

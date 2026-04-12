@@ -38,18 +38,13 @@ pub const CARRY_SHIFT: u32 = 524288;
 /// P = 2^251 + 17 * 2^192 + 1
 /// Computed from felt252_to_9bit_limbs(P) in the Rust side.
 /// These values are constant and can be hardcoded.
+/// P = 2^251 + 17·2^192 + 1, decomposed into 28 × 9-bit limbs (LSB first).
+/// Matches Rust's stark_prime_9bit_limbs() exactly.
+/// Nonzero limbs: [0]=1, [21]=136, [27]=256. All others zero.
 pub fn stark_prime_limbs() -> Array<u32> {
-    // P = 0x800000000000011000000000000000000000000000000000000000000000001
-    // Decomposed into 28 × 9-bit limbs (LSB first).
-    // TODO: populate from Rust's stark_prime_9bit_limbs() output.
-    // For now, returns placeholder — the Rust prover verifies offline.
-    let mut limbs: Array<u32> = array![];
-    let mut i: u32 = 0;
-    loop {
-        if i >= 28 { break; }
-        limbs.append(0);
-        i += 1;
-    };
+    let mut limbs: Array<u32> = array![
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 136, 0, 0, 0, 0, 0, 256
+    ];
     limbs
 }
 

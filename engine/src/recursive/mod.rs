@@ -28,6 +28,8 @@
 pub mod air;
 pub mod hades_air;
 pub mod prover;
+#[cfg(all(test, feature = "red-team-recursive-forgery"))]
+mod red_team;
 pub mod types;
 pub mod verifier;
 pub mod witness;
@@ -39,7 +41,9 @@ pub use air::{
     build_recursive_trace, RecursiveTraceData, RecursiveVerifierComponent, RecursiveVerifierEval,
     COLS_PER_ROW,
 };
-pub use prover::{prove_recursive, prove_recursive_with_policy, verify_hades_perms_offline, RecursiveError};
-pub use verifier::verify_recursive;
+pub use prover::{
+    prove_recursive, prove_recursive_with_policy, verify_hades_perms_offline, RecursiveError,
+};
 pub use types::{GkrVerifierWitness, RecursiveProof, RecursivePublicInputs, WitnessOp};
+pub use verifier::verify_recursive;
 pub use witness::{generate_witness, InstrumentedChannel};

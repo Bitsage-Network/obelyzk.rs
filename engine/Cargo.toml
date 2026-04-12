@@ -36,6 +36,7 @@ multi-query     = ["server"]
 parallel-audit  = []
 tui = ["dep:ratatui", "dep:crossterm", "serde", "dep:serde_json", "dep:ureq"]
 metal = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+red-team-recursive-forgery = []
 
 [dependencies]
 stwo = { package = "stwo-gpu", version = "2.0.0", path = "../stwo-gpu/crates/stwo", features = ["prover"] }

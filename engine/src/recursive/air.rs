@@ -38,7 +38,7 @@ use starknet_ff::FieldElement;
 use stwo::core::fields::m31::BaseField as M31;
 use stwo_constraint_framework::{
     preprocessed_columns::PreProcessedColumnId, EvalAtRow, FrameworkComponent, FrameworkEval,
-    RelationEntry, Relation,
+    Relation, RelationEntry,
 };
 
 // ── LogUp relation: binds chain AIR ↔ Hades AIR ─────────────────────
@@ -68,12 +68,11 @@ pub const COLS_EXTRA_STATE: usize = 2 * LIMBS_PER_FELT; // 18
 ///   digest_before[9] + input_value[9] + input_capacity[9]
 /// + digest_after[9]  + output_value[9] + output_capacity[9]
 /// + shifted_next_before[9] + op_type[1] = 64
-pub const COLS_PER_ROW: usize =
-    COLS_PER_STATE   // input full state: 27
+pub const COLS_PER_ROW: usize = COLS_PER_STATE   // input full state: 27
     + COLS_PER_STATE // output full state: 27
     + COLS_PER_DIGEST // shifted_next_before: 9
-    + 1;             // op_type
-    // Total: 27 + 27 + 9 + 1 = 64
+    + 1; // op_type
+         // Total: 27 + 27 + 9 + 1 = 64
 
 // ═══════════════════════════════════════════════════════════════════════
 // Felt252 ↔ M31 limb decomposition
@@ -175,18 +174,14 @@ impl FrameworkEval for RecursiveVerifierEval {
 
         // ── Read execution trace columns ─────────────────────────────
         // Full input state: digest_before[9] + input_value[9] + input_capacity[9]
-        let digest_before: [E::F; LIMBS_PER_FELT] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let input_value: [E::F; LIMBS_PER_FELT] =
-            std::array::from_fn(|_| eval.next_trace_mask());
+        let digest_before: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
+        let input_value: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
         let input_capacity: [E::F; LIMBS_PER_FELT] =
             std::array::from_fn(|_| eval.next_trace_mask());
 
         // Full output state: digest_after[9] + output_value[9] + output_capacity[9]
-        let digest_after: [E::F; LIMBS_PER_FELT] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let output_value: [E::F; LIMBS_PER_FELT] =
-            std::array::from_fn(|_| eval.next_trace_mask());
+        let digest_after: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
+        let output_value: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
         let output_capacity: [E::F; LIMBS_PER_FELT] =
             std::array::from_fn(|_| eval.next_trace_mask());
 
@@ -216,8 +211,7 @@ impl FrameworkEval for RecursiveVerifierEval {
         // ── Chain: digest_after[row] == digest_before[row+1] ─────────
         for j in 0..LIMBS_PER_FELT {
             eval.add_constraint(
-                is_chain.clone()
-                    * (digest_after[j].clone() - shifted_next_before[j].clone()),
+                is_chain.clone() * (digest_after[j].clone() - shifted_next_before[j].clone()),
             );
         }
 
@@ -228,12 +222,24 @@ impl FrameworkEval for RecursiveVerifierEval {
         if let Some(ref hades_rel) = self.hades_lookup {
             // Build the 54-column key: [input_state[27], output_state[27]]
             let mut key_values: Vec<E::F> = Vec::with_capacity(54);
-            for v in &digest_before { key_values.push(v.clone()); }
-            for v in &input_value { key_values.push(v.clone()); }
-            for v in &input_capacity { key_values.push(v.clone()); }
-            for v in &digest_after { key_values.push(v.clone()); }
-            for v in &output_value { key_values.push(v.clone()); }
-            for v in &output_capacity { key_values.push(v.clone()); }
+            for v in &digest_before {
+                key_values.push(v.clone());
+            }
+            for v in &input_value {
+                key_values.push(v.clone());
+            }
+            for v in &input_capacity {
+                key_values.push(v.clone());
+            }
+            for v in &digest_after {
+                key_values.push(v.clone());
+            }
+            for v in &output_value {
+                key_values.push(v.clone());
+            }
+            for v in &output_capacity {
+                key_values.push(v.clone());
+            }
 
             eval.add_to_relation(RelationEntry::new(
                 hades_rel,
@@ -278,9 +284,7 @@ struct ChainRow {
 ///   [45..54)  output_capacity   (output state[2])
 ///   [54..63)  shifted_next_before (next row's digest_before)
 ///   [63]      op_type
-pub fn build_recursive_trace(
-    witness: &super::types::GkrVerifierWitness,
-) -> RecursiveTraceData {
+pub fn build_recursive_trace(witness: &super::types::GkrVerifierWitness) -> RecursiveTraceData {
     use super::types::WitnessOp;
 
     // Pair each ChannelOp with its preceding HadesPerm to get full states.
@@ -294,7 +298,10 @@ pub fn build_recursive_trace(
             WitnessOp::HadesPerm { input, output } => {
                 pending_hades = Some((*input, *output));
             }
-            WitnessOp::ChannelOp { digest_before, digest_after } => {
+            WitnessOp::ChannelOp {
+                digest_before,
+                digest_after,
+            } => {
                 let (full_input, full_output) = if let Some((inp, out)) = pending_hades.take() {
                     // Use the full Hades state if the digest matches.
                     // Some channel ops (mix_poly_coeffs) have multiple Hades
@@ -303,15 +310,22 @@ pub fn build_recursive_trace(
                         (inp, out)
                     } else {
                         // Mismatch: use digest-only (pending Hades was for a different op)
-                        ([*digest_before, FieldElement::ZERO, FieldElement::ZERO],
-                         [*digest_after, FieldElement::ZERO, FieldElement::ZERO])
+                        (
+                            [*digest_before, FieldElement::ZERO, FieldElement::ZERO],
+                            [*digest_after, FieldElement::ZERO, FieldElement::ZERO],
+                        )
                     }
                 } else {
                     // No HadesPerm for this ChannelOp — use digest + zeros
-                    ([*digest_before, FieldElement::ZERO, FieldElement::ZERO],
-                     [*digest_after, FieldElement::ZERO, FieldElement::ZERO])
+                    (
+                        [*digest_before, FieldElement::ZERO, FieldElement::ZERO],
+                        [*digest_after, FieldElement::ZERO, FieldElement::ZERO],
+                    )
                 };
-                rows.push(ChainRow { full_input, full_output });
+                rows.push(ChainRow {
+                    full_input,
+                    full_output,
+                });
             }
             _ => {} // Skip non-chain ops
         }
@@ -340,10 +354,15 @@ pub fn build_recursive_trace(
     for row_idx in 0..n_padded_rows {
         let (input_limbs, output_limbs) = if row_idx < n_ops {
             let r = &rows[row_idx];
-            (hades_state_to_limbs(&r.full_input), hades_state_to_limbs(&r.full_output))
+            (
+                hades_state_to_limbs(&r.full_input),
+                hades_state_to_limbs(&r.full_output),
+            )
         } else {
-            ([M31::from_u32_unchecked(0); COLS_PER_STATE],
-             [M31::from_u32_unchecked(0); COLS_PER_STATE])
+            (
+                [M31::from_u32_unchecked(0); COLS_PER_STATE],
+                [M31::from_u32_unchecked(0); COLS_PER_STATE],
+            )
         };
 
         // Write full input state (27 columns: digest_before + input_value + input_capacity)
@@ -491,7 +510,10 @@ mod tests {
         let digest_after = state[0];
 
         let witness = GkrVerifierWitness {
-            ops: vec![WitnessOp::ChannelOp { digest_before, digest_after }],
+            ops: vec![WitnessOp::ChannelOp {
+                digest_before,
+                digest_after,
+            }],
             public_inputs: crate::recursive::types::RecursivePublicInputs {
                 circuit_hash: stwo::core::fields::qm31::QM31::default(),
                 io_commitment: stwo::core::fields::qm31::QM31::default(),
@@ -544,8 +566,14 @@ mod tests {
 
         let witness = GkrVerifierWitness {
             ops: vec![
-                WitnessOp::ChannelOp { digest_before: d0, digest_after: d1 },
-                WitnessOp::ChannelOp { digest_before: d1, digest_after: d2 },
+                WitnessOp::ChannelOp {
+                    digest_before: d0,
+                    digest_after: d1,
+                },
+                WitnessOp::ChannelOp {
+                    digest_before: d1,
+                    digest_after: d2,
+                },
             ],
             public_inputs: crate::recursive::types::RecursivePublicInputs {
                 circuit_hash: stwo::core::fields::qm31::QM31::default(),
@@ -569,8 +597,10 @@ mod tests {
         for j in 0..LIMBS_PER_FELT {
             let after_row0 = trace.execution_trace[COLS_PER_STATE + j][0];
             let before_row1 = trace.execution_trace[j][1];
-            assert_eq!(after_row0, before_row1,
-                "chain broken at limb {j}: digest_after[0] != digest_before[1]");
+            assert_eq!(
+                after_row0, before_row1,
+                "chain broken at limb {j}: digest_after[0] != digest_before[1]"
+            );
         }
     }
 

@@ -14,15 +14,25 @@
 //!     → RecursiveProof
 //! ```
 
+/// Debug logging for recursive prover — only prints in debug builds.
+macro_rules! recursive_log {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        eprintln!($($arg)*);
+    };
+}
+
 use num_traits::Zero;
 use stwo::core::channel::{Channel, MerkleChannel};
 use stwo::core::fields::m31::M31;
-use stwo::core::fields::qm31::{QM31, SecureField};
+use stwo::core::fields::qm31::{SecureField, QM31};
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
-use stwo::core::vcs_lifted::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
+use stwo::core::vcs_lifted::poseidon252_merkle::{
+    Poseidon252MerkleChannel, Poseidon252MerkleHasher,
+};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::{Col, Column};
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
@@ -98,7 +108,16 @@ pub fn prove_recursive(
     // Default: reconstruct felt252 from QM31 (lossy — 124 bits + sentinel).
     // Production callers should use prove_recursive_with_policy and set
     // io_commitment_felt252 on the result to the original Poseidon hash.
-    prove_recursive_with_policy(circuit, gkr_proof, output, weights, weight_super_root, io_commitment, gkr_prove_time_secs, None)
+    prove_recursive_with_policy(
+        circuit,
+        gkr_proof,
+        output,
+        weights,
+        weight_super_root,
+        io_commitment,
+        gkr_prove_time_secs,
+        None,
+    )
 }
 
 /// Generate a recursive STARK proof with explicit policy binding.
@@ -115,7 +134,7 @@ pub fn prove_recursive_with_policy(
     let t_start = std::time::Instant::now();
 
     // ── Step 1: Generate witness ─────────────────────────────────────
-    eprintln!("  [Recursive] Step 1/4: Generating verifier witness...");
+    recursive_log!("  [Recursive] Step 1/4: Generating verifier witness...");
     let witness = generate_witness_with_policy(
         circuit,
         gkr_proof,
@@ -127,7 +146,7 @@ pub fn prove_recursive_with_policy(
     )
     .map_err(|e| RecursiveError::GkrVerificationFailed(format!("{e:?}")))?;
 
-    eprintln!(
+    recursive_log!(
         "  [Recursive] Witness: {} poseidon perms, {} sumcheck rounds, {} qm31 ops",
         witness.n_poseidon_perms, witness.n_sumcheck_rounds, witness.n_qm31_ops,
     );
@@ -136,23 +155,27 @@ pub fn prove_recursive_with_policy(
     // This ensures every (input, output) pair in the witness is a valid
     // Hades permutation, providing soundness at the prover level even
     // before the Hades AIR is fully integrated into the multi-component STARK.
-    let n_hades_verified = verify_hades_perms_offline(&witness)
-        .map_err(|e| RecursiveError::GkrVerificationFailed(format!(
-            "Hades permutation check failed: {e}"
-        )))?;
-    eprintln!("  [Recursive] Verified {} Hades permutations offline", n_hades_verified);
+    let n_hades_verified = verify_hades_perms_offline(&witness).map_err(|e| {
+        RecursiveError::GkrVerificationFailed(format!("Hades permutation check failed: {e}"))
+    })?;
+    recursive_log!(
+        "  [Recursive] Verified {} Hades permutations offline",
+        n_hades_verified
+    );
 
     // Hades AIR: enabled via OBELYZK_HADES_AIR=1 (enforces full permutation constraints)
-    let hades_enabled = std::env::var("OBELYZK_HADES_AIR").map(|v| v == "1").unwrap_or(false);
+    let hades_enabled = std::env::var("OBELYZK_HADES_AIR")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     // ── Step 2: Build traces ─────────────────────────────────────────
-    eprintln!("  [Recursive] Step 2/5: Building chain execution trace...");
+    recursive_log!("  [Recursive] Step 2/5: Building chain execution trace...");
     let trace_data = build_recursive_trace(&witness);
 
     // Build Hades verification trace from HadesPerm witness ops
     let hades_perms = extract_hades_perms(&witness);
     let hades_trace = if hades_enabled {
-        eprintln!("  [Recursive] Step 2b/5: Building Hades verification trace...");
+        recursive_log!("  [Recursive] Step 2b/5: Building Hades verification trace...");
         super::hades_air::build_hades_trace(&hades_perms)
     } else {
         // Placeholder empty trace when Hades AIR is disabled
@@ -164,7 +187,7 @@ pub fn prove_recursive_with_policy(
         }
     };
 
-    eprintln!(
+    recursive_log!(
         "  [Recursive] Trace: {} rows (log_size={}), {} cols/row, {} real rows",
         1u32 << trace_data.log_size,
         trace_data.log_size,
@@ -173,7 +196,7 @@ pub fn prove_recursive_with_policy(
     );
 
     // ── Step 3: Commit traces ────────────────────────────────────────
-    eprintln!("  [Recursive] Step 3/5: Committing traces...");
+    recursive_log!("  [Recursive] Step 3/5: Committing traces...");
     // Security-hardened PCS config for recursive proofs.
     //
     // PcsConfig::default() gives only 13 bits of security
@@ -189,9 +212,15 @@ pub fn prove_recursive_with_policy(
     //   "test"       → 13 bits  (fast, for unit tests)
     //   "production" → 106 bits (default)
     let config = {
+        // In test builds only, allow env var override for fast testing.
+        // Production builds always use the hardened config.
+        #[cfg(test)]
         let level = std::env::var("OBELYZK_RECURSIVE_SECURITY")
             .unwrap_or_else(|_| "production".to_string());
+        #[cfg(not(test))]
+        let level = "production".to_string();
         match level.as_str() {
+            #[cfg(test)]
             "test" => PcsConfig::default(), // 13 bits — unit tests only
             _ => PcsConfig {
                 pow_bits: 16,
@@ -211,12 +240,18 @@ pub fn prove_recursive_with_policy(
     // Mix PcsConfig into channel BEFORE any tree commits.
     // MUST use individual mix_u64 calls to match Cairo verifier's PcsConfig::mix_into
     // (Cairo mixes 4 separate u64s; Rust's config.mix_into packs into a single QM31).
-    eprintln!("  [Recursive] Channel after default: {:?}", channel.digest());
+    recursive_log!(
+        "  [Recursive] Channel after default: {:?}",
+        channel.digest()
+    );
     channel.mix_u64(config.pow_bits as u64);
     channel.mix_u64(config.fri_config.log_blowup_factor as u64);
     channel.mix_u64(config.fri_config.n_queries as u64);
     channel.mix_u64(config.fri_config.log_last_layer_degree_bound as u64);
-    eprintln!("  [Recursive] Channel after PcsConfig: {:?}", channel.digest());
+    recursive_log!(
+        "  [Recursive] Channel after PcsConfig: {:?}",
+        channel.digest()
+    );
 
     // ── Bind public inputs to Fiat-Shamir channel ────────────────────
     // By mixing circuit_hash, io_commitment, weight_super_root, and
@@ -253,12 +288,19 @@ pub fn prove_recursive_with_policy(
         channel.mix_u64(u2);
         channel.mix_u64(u3);
     }
-    eprintln!("  [Recursive] Channel after public inputs: {:?}", channel.digest());
+    recursive_log!(
+        "  [Recursive] Channel after public inputs: {:?}",
+        channel.digest()
+    );
 
     // When Hades AIR is enabled, use the SAME domain for both components
     // to avoid STWO's SIMD mixed-size column evaluation issues.
     // Chain columns are padded to unified_log_size (zeros beyond n_real_rows).
-    let unified_log_size = if hades_enabled { chain_log_size.max(hades_log_size) } else { chain_log_size };
+    let unified_log_size = if hades_enabled {
+        chain_log_size.max(hades_log_size)
+    } else {
+        chain_log_size
+    };
     // Max degree must cover the largest component's constraint degree.
     // Chain: +1 (degree 2), Hades: +2 (degree 3 from a*b*is_active).
     let max_degree_bound = unified_log_size + 1;
@@ -293,11 +335,14 @@ pub fn prove_recursive_with_policy(
             CircleEvaluation::new(chain_domain, is_last_col),
             CircleEvaluation::new(chain_domain, is_chain_col),
         ];
-        tree_builder.extend_evals(
-            convert_evaluations::<SimdBackend, SimdBackend, M31>(simd_evals),
-        );
+        tree_builder.extend_evals(convert_evaluations::<SimdBackend, SimdBackend, M31>(
+            simd_evals,
+        ));
         tree_builder.commit(channel);
-        eprintln!("  [Recursive] Channel after preprocessed commit: {:?}", channel.digest());
+        recursive_log!(
+            "  [Recursive] Channel after preprocessed commit: {:?}",
+            channel.digest()
+        );
     }
 
     // Tree 1: All execution traces (chain + Hades in same tree, mixed sizes)
@@ -321,9 +366,9 @@ pub fn prove_recursive_with_policy(
                 CircleEvaluation::new(chain_domain, simd_col)
             })
             .collect();
-        tree_builder.extend_evals(
-            convert_evaluations::<SimdBackend, SimdBackend, M31>(chain_evals),
-        );
+        tree_builder.extend_evals(convert_evaluations::<SimdBackend, SimdBackend, M31>(
+            chain_evals,
+        ));
 
         // Hades columns: 590 columns at hades_log_size (in same tree)
         if hades_enabled {
@@ -335,32 +380,43 @@ pub fn prove_recursive_with_policy(
                     CircleEvaluation::new(hades_domain, simd_col)
                 })
                 .collect();
-            tree_builder.extend_evals(
-                convert_evaluations::<SimdBackend, SimdBackend, M31>(hades_evals),
-            );
+            tree_builder.extend_evals(convert_evaluations::<SimdBackend, SimdBackend, M31>(
+                hades_evals,
+            ));
         }
 
         tree_builder.commit(channel);
-        eprintln!("  [Recursive] Channel after trace commit: {:?} (chain: {} cols @ log{}{})",
+        recursive_log!(
+            "  [Recursive] Channel after trace commit: {:?} (chain: {} cols @ log{}{})",
             channel.digest(),
-            trace_data.execution_trace.len(), chain_log_size,
-            if hades_enabled { format!(", hades: {} cols @ log{}", hades_trace.trace.len(), hades_log_size) }
-            else { String::new() },
+            trace_data.execution_trace.len(),
+            chain_log_size,
+            if hades_enabled {
+                format!(
+                    ", hades: {} cols @ log{}",
+                    hades_trace.trace.len(),
+                    hades_log_size
+                )
+            } else {
+                String::new()
+            },
         );
     }
 
-    eprintln!("  [Recursive] Channel before prove(): {:?}", channel.digest());
+    recursive_log!(
+        "  [Recursive] Channel before prove(): {:?}",
+        channel.digest()
+    );
 
     // Print final digest limbs for Cairo comparison
     {
-        let fd = starknet_ff::FieldElement::from_hex_be(
-            &format!("0x{:064x}", channel.digest())
-        ).unwrap_or(starknet_ff::FieldElement::ZERO);
+        let fd = starknet_ff::FieldElement::from_hex_be(&format!("0x{:064x}", channel.digest()))
+            .unwrap_or(starknet_ff::FieldElement::ZERO);
         // The final digest used in the AIR comes from the WITNESS, not the channel
     }
 
     // ── Step 4: Prove ────────────────────────────────────────────────
-    eprintln!("  [Recursive] Step 4/5: Proving (STARK)...");
+    recursive_log!("  [Recursive] Step 4/5: Proving (STARK)...");
 
     // Compute initial/final digest limbs.
     // Initial = zero (fresh channel).
@@ -385,11 +441,15 @@ pub fn prove_recursive_with_policy(
     // The chain AIR proves consistency of the INSTRUMENTED transcript, not the full one.
     // Pass 1 validates the full proof; the chain proves the cryptographic core.
     if final_digest_felt != witness.final_digest {
-        eprintln!(
+        recursive_log!(
             "  [Recursive] NOTE: Pass 2 final digest differs from Pass 1 \
              ({} recorded ops vs {} total Poseidon calls). \
              Chain covers the instrumented subset.",
-            witness.ops.iter().filter(|op| matches!(op, super::types::WitnessOp::ChannelOp { .. })).count(),
+            witness
+                .ops
+                .iter()
+                .filter(|op| matches!(op, super::types::WitnessOp::ChannelOp { .. }))
+                .count(),
             witness.n_poseidon_perms,
         );
     }
@@ -397,12 +457,19 @@ pub fn prove_recursive_with_policy(
     let final_limbs = super::air::felt252_to_limbs(&final_digest_felt);
 
     // Print limbs for Cairo comparison
-    eprintln!("  [Recursive] Initial limbs: {:?}", zero_limbs.iter().map(|l| l.0).collect::<Vec<_>>());
-    eprintln!("  [Recursive] Final limbs: {:?}", final_limbs.iter().map(|l| l.0).collect::<Vec<_>>());
+    recursive_log!(
+        "  [Recursive] Initial limbs: {:?}",
+        zero_limbs.iter().map(|l| l.0).collect::<Vec<_>>()
+    );
+    recursive_log!(
+        "  [Recursive] Final limbs: {:?}",
+        final_limbs.iter().map(|l| l.0).collect::<Vec<_>>()
+    );
 
-    eprintln!(
+    recursive_log!(
         "  [Recursive] Final digest: {:?} (production: {:?}, match: {})",
-        final_digest_felt, witness.final_digest,
+        final_digest_felt,
+        witness.final_digest,
         final_digest_felt == witness.final_digest,
     );
 
@@ -416,11 +483,7 @@ pub fn prove_recursive_with_policy(
         final_digest_limbs: final_limbs,
         hades_lookup: None, // LogUp for Hades binding (TODO: draw from channel)
     };
-    let chain_component = FrameworkComponent::new(
-        &mut allocator,
-        chain_eval,
-        SecureField::zero(),
-    );
+    let chain_component = FrameworkComponent::new(&mut allocator, chain_eval, SecureField::zero());
 
     // Component 2: Hades AIR (permutation verification)
     let hades_eval = super::hades_air::HadesVerifierEval {
@@ -430,10 +493,9 @@ pub fn prove_recursive_with_policy(
     };
 
     let stark_proof = if hades_enabled {
-        let hades_component = FrameworkComponent::new(
-            &mut allocator, hades_eval, SecureField::zero(),
-        );
-        eprintln!("  [Recursive] Proving with chain + Hades components");
+        let hades_component =
+            FrameworkComponent::new(&mut allocator, hades_eval, SecureField::zero());
+        recursive_log!("  [Recursive] Proving with chain + Hades components");
         prove::<SimdBackend, Poseidon252MerkleChannel>(
             &[&chain_component, &hades_component],
             channel,
@@ -441,7 +503,7 @@ pub fn prove_recursive_with_policy(
         )
         .map_err(|e| RecursiveError::ProvingFailed(format!("{e:?}")))?
     } else {
-        eprintln!("  [Recursive] Proving with chain component only (Hades offline-verified)");
+        recursive_log!("  [Recursive] Proving with chain component only (Hades offline-verified)");
         prove::<SimdBackend, Poseidon252MerkleChannel>(
             &[&chain_component],
             channel,
@@ -451,7 +513,7 @@ pub fn prove_recursive_with_policy(
     };
 
     let recursive_prove_time = t_start.elapsed().as_secs_f64();
-    eprintln!(
+    recursive_log!(
         "  [Recursive] Done in {:.2}s (chain: {}x{}, hades: {}x{}, proof size: {} bytes)",
         recursive_prove_time,
         1u32 << chain_log_size,
@@ -461,9 +523,8 @@ pub fn prove_recursive_with_policy(
         estimate_proof_size(&stark_proof),
     );
 
-    let io_felt252 = crate::crypto::poseidon_channel::securefield_to_felt(
-        witness.public_inputs.io_commitment,
-    );
+    let io_felt252 =
+        crate::crypto::poseidon_channel::securefield_to_felt(witness.public_inputs.io_commitment);
     Ok(RecursiveProof {
         stark_proof: stark_proof,
         public_inputs: witness.public_inputs,
@@ -491,7 +552,10 @@ pub fn prove_recursive_with_policy(
 /// constrains the actual Hades permutation computation.
 pub fn extract_hades_perms(
     witness: &super::types::GkrVerifierWitness,
-) -> Vec<([starknet_ff::FieldElement; 3], [starknet_ff::FieldElement; 3])> {
+) -> Vec<(
+    [starknet_ff::FieldElement; 3],
+    [starknet_ff::FieldElement; 3],
+)> {
     witness
         .ops
         .iter()
@@ -589,7 +653,10 @@ mod tests {
         let gkr = proof.gkr_proof.as_ref().expect("should have GKR proof");
         let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
 
-        let zero = QM31(CM31(M31::from(0), M31::from(0)), CM31(M31::from(0), M31::from(0)));
+        let zero = QM31(
+            CM31(M31::from(0), M31::from(0)),
+            CM31(M31::from(0), M31::from(0)),
+        );
 
         let result = prove_recursive(
             &circuit,
@@ -604,7 +671,7 @@ mod tests {
         let recursive_proof = result.expect("recursive proving should succeed");
         assert!(recursive_proof.metadata.n_poseidon_perms > 0);
         assert!(recursive_proof.metadata.recursive_prove_time_secs > 0.0);
-        eprintln!(
+        recursive_log!(
             "Recursive proof: {:.3}s, {} poseidon perms, log_size={}",
             recursive_proof.metadata.recursive_prove_time_secs,
             recursive_proof.metadata.n_poseidon_perms,

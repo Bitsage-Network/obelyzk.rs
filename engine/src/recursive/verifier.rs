@@ -9,7 +9,9 @@ use stwo::core::channel::{Channel, MerkleChannel};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
-use stwo::core::vcs_lifted::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
+use stwo::core::vcs_lifted::poseidon252_merkle::{
+    Poseidon252MerkleChannel, Poseidon252MerkleHasher,
+};
 use stwo::core::verifier::verify as stwo_verify;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
@@ -35,9 +37,13 @@ pub fn verify_recursive(
     // PcsConfig must match what the prover used. The Cairo verifier reads
     // it from the proof body. For Rust pre-flight, match the prover's config.
     let pcs_config = {
+        #[cfg(test)]
         let level = std::env::var("OBELYZK_RECURSIVE_SECURITY")
             .unwrap_or_else(|_| "production".to_string());
+        #[cfg(not(test))]
+        let level = "production".to_string();
         match level.as_str() {
+            #[cfg(test)]
             "test" => PcsConfig::default(),
             _ => PcsConfig {
                 pow_bits: 16,
@@ -80,9 +86,8 @@ pub fn verify_recursive(
 
     // Also bind the felt252 io_commitment (4 × u64, matching prover)
     {
-        let io_felt = crate::crypto::poseidon_channel::securefield_to_felt(
-            public_inputs.io_commitment,
-        );
+        let io_felt =
+            crate::crypto::poseidon_channel::securefield_to_felt(public_inputs.io_commitment);
         let bytes = io_felt.to_bytes_be();
         let u0 = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
         let u1 = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
@@ -94,7 +99,8 @@ pub fn verify_recursive(
         channel.mix_u64(u3);
     }
 
-    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(pcs_config);
+    let mut commitment_scheme =
+        CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(pcs_config);
 
     // Replay commitments (Tree 0 = preprocessed, Tree 1 = execution)
     if stark_proof.commitments.len() < 2 {
@@ -117,7 +123,9 @@ pub fn verify_recursive(
         &mut commitment_scheme,
         stark_proof.clone(),
     )
-    .map_err(|e| RecursiveError::ProvingFailed(format!("recursive STARK verification failed: {e:?}")))
+    .map_err(|e| {
+        RecursiveError::ProvingFailed(format!("recursive STARK verification failed: {e:?}"))
+    })
 }
 
 #[cfg(test)]
@@ -155,11 +163,19 @@ mod tests {
         let gkr = proof.gkr_proof.as_ref().expect("should have GKR proof");
         let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
 
-        let zero = QM31(CM31(M31::from(0), M31::from(0)), CM31(M31::from(0), M31::from(0)));
+        let zero = QM31(
+            CM31(M31::from(0), M31::from(0)),
+            CM31(M31::from(0), M31::from(0)),
+        );
 
         // Generate witness + build trace + prove
         let witness = crate::recursive::generate_witness(
-            &circuit, gkr, &proof.execution.output, Some(&weights), zero, zero,
+            &circuit,
+            gkr,
+            &proof.execution.output,
+            Some(&weights),
+            zero,
+            zero,
         )
         .expect("witness generation should succeed");
 
@@ -168,13 +184,20 @@ mod tests {
 
         // Prove recursive STARK
         let recursive_result = crate::recursive::prove_recursive(
-            &circuit, gkr, &proof.execution.output, &weights, zero, zero, 0.0,
+            &circuit,
+            gkr,
+            &proof.execution.output,
+            &weights,
+            zero,
+            zero,
+            0.0,
         );
 
         let recursive_proof = recursive_result.expect("recursive proving should succeed");
         eprintln!(
             "Recursive proof produced (log_size={}, {} poseidon perms, {:.3}s)",
-            recursive_proof.log_size, witness.n_poseidon_perms,
+            recursive_proof.log_size,
+            witness.n_poseidon_perms,
             recursive_proof.metadata.recursive_prove_time_secs,
         );
 
@@ -185,7 +208,11 @@ mod tests {
             recursive_proof.log_size,
             recursive_proof.final_digest,
         );
-        assert!(verify_result.is_ok(), "recursive verification should succeed: {:?}", verify_result.err());
+        assert!(
+            verify_result.is_ok(),
+            "recursive verification should succeed: {:?}",
+            verify_result.err()
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -200,11 +227,17 @@ mod tests {
         let graph = builder.build();
 
         let mut input = M31Matrix::new(1, 4);
-        for j in 0..4 { input.set(0, j, M31::from((j + 1) as u32)); }
+        for j in 0..4 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
 
         let mut weights = GraphWeights::new();
         let mut w = M31Matrix::new(4, 2);
-        for i in 0..4 { for j in 0..2 { w.set(i, j, M31::from((i * 2 + j + 1) as u32)); } }
+        for i in 0..4 {
+            for j in 0..2 {
+                w.set(i, j, M31::from((i * 2 + j + 1) as u32));
+            }
+        }
         weights.add_weight(0, w);
 
         let proof = crate::aggregation::prove_model_pure_gkr(&graph, &input, &weights)
@@ -212,10 +245,20 @@ mod tests {
         let gkr = proof.gkr_proof.as_ref().expect("should have GKR proof");
         let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).expect("circuit compile");
 
-        let zero = QM31(CM31(M31::from(0), M31::from(0)), CM31(M31::from(0), M31::from(0)));
+        let zero = QM31(
+            CM31(M31::from(0), M31::from(0)),
+            CM31(M31::from(0), M31::from(0)),
+        );
         crate::recursive::prove_recursive(
-            &circuit, gkr, &proof.execution.output, &weights, zero, zero, 0.0,
-        ).expect("recursive proving should succeed")
+            &circuit,
+            gkr,
+            &proof.execution.output,
+            &weights,
+            zero,
+            zero,
+            0.0,
+        )
+        .expect("recursive proving should succeed")
     }
 
     #[test]
@@ -226,16 +269,27 @@ mod tests {
         let rp = adversarial_proof();
 
         // Valid proof passes
-        let ok = verify_recursive(&rp.stark_proof, &rp.public_inputs, rp.log_size, rp.final_digest);
+        let ok = verify_recursive(
+            &rp.stark_proof,
+            &rp.public_inputs,
+            rp.log_size,
+            rp.final_digest,
+        );
         assert!(ok.is_ok(), "valid proof must verify");
 
         // Tampered io_commitment → MUST fail
         let tampered = RecursivePublicInputs {
-            io_commitment: QM31(CM31(M31::from(999), M31::from(888)), CM31(M31::from(777), M31::from(666))),
+            io_commitment: QM31(
+                CM31(M31::from(999), M31::from(888)),
+                CM31(M31::from(777), M31::from(666)),
+            ),
             ..rp.public_inputs
         };
         let err = verify_recursive(&rp.stark_proof, &tampered, rp.log_size, rp.final_digest);
-        assert!(err.is_err(), "SECURITY: tampered io_commitment MUST be rejected");
+        assert!(
+            err.is_err(),
+            "SECURITY: tampered io_commitment MUST be rejected"
+        );
         eprintln!("[adversarial] io_commitment tampering rejected ✓");
     }
 
@@ -258,11 +312,17 @@ mod tests {
         let rp = adversarial_proof();
 
         let tampered = RecursivePublicInputs {
-            weight_super_root: QM31(CM31(M31::from(42), M31::from(0)), CM31(M31::from(0), M31::from(0))),
+            weight_super_root: QM31(
+                CM31(M31::from(42), M31::from(0)),
+                CM31(M31::from(0), M31::from(0)),
+            ),
             ..rp.public_inputs
         };
         let err = verify_recursive(&rp.stark_proof, &tampered, rp.log_size, rp.final_digest);
-        assert!(err.is_err(), "SECURITY: tampered weight_super_root MUST be rejected");
+        assert!(
+            err.is_err(),
+            "SECURITY: tampered weight_super_root MUST be rejected"
+        );
         eprintln!("[adversarial] weight_super_root tampering rejected ✓");
     }
 
@@ -271,11 +331,17 @@ mod tests {
         let rp = adversarial_proof();
 
         let tampered = RecursivePublicInputs {
-            circuit_hash: QM31(CM31(M31::from(111), M31::from(222)), CM31(M31::from(333), M31::from(444))),
+            circuit_hash: QM31(
+                CM31(M31::from(111), M31::from(222)),
+                CM31(M31::from(333), M31::from(444)),
+            ),
             ..rp.public_inputs
         };
         let err = verify_recursive(&rp.stark_proof, &tampered, rp.log_size, rp.final_digest);
-        assert!(err.is_err(), "SECURITY: tampered circuit_hash MUST be rejected");
+        assert!(
+            err.is_err(),
+            "SECURITY: tampered circuit_hash MUST be rejected"
+        );
         eprintln!("[adversarial] circuit_hash tampering rejected ✓");
     }
 
@@ -286,17 +352,37 @@ mod tests {
         let rp = adversarial_proof();
 
         let tampered = RecursivePublicInputs {
-            circuit_hash: QM31(CM31(M31::from(1), M31::from(2)), CM31(M31::from(3), M31::from(4))),
-            io_commitment: QM31(CM31(M31::from(5), M31::from(6)), CM31(M31::from(7), M31::from(8))),
-            weight_super_root: QM31(CM31(M31::from(9), M31::from(10)), CM31(M31::from(11), M31::from(12))),
+            circuit_hash: QM31(
+                CM31(M31::from(1), M31::from(2)),
+                CM31(M31::from(3), M31::from(4)),
+            ),
+            io_commitment: QM31(
+                CM31(M31::from(5), M31::from(6)),
+                CM31(M31::from(7), M31::from(8)),
+            ),
+            weight_super_root: QM31(
+                CM31(M31::from(9), M31::from(10)),
+                CM31(M31::from(11), M31::from(12)),
+            ),
             n_layers: 337,
         };
         let err = verify_recursive(&rp.stark_proof, &tampered, rp.log_size, rp.final_digest);
-        assert!(err.is_err(), "SECURITY: fully tampered metadata MUST be rejected");
+        assert!(
+            err.is_err(),
+            "SECURITY: fully tampered metadata MUST be rejected"
+        );
 
         // Original metadata still passes
-        let ok = verify_recursive(&rp.stark_proof, &rp.public_inputs, rp.log_size, rp.final_digest);
-        assert!(ok.is_ok(), "original metadata must still verify after adversarial test");
+        let ok = verify_recursive(
+            &rp.stark_proof,
+            &rp.public_inputs,
+            rp.log_size,
+            rp.final_digest,
+        );
+        assert!(
+            ok.is_ok(),
+            "original metadata must still verify after adversarial test"
+        );
         eprintln!("[adversarial] Omar's full relabeling scenario: blocked ✓");
     }
 
@@ -310,21 +396,36 @@ mod tests {
         let graph = builder.build();
 
         let mut input = M31Matrix::new(1, 4);
-        for j in 0..4 { input.set(0, j, M31::from((j + 1) as u32)); }
+        for j in 0..4 {
+            input.set(0, j, M31::from((j + 1) as u32));
+        }
 
         let mut weights = GraphWeights::new();
         let mut w = M31Matrix::new(4, 2);
-        for i in 0..4 { for j in 0..2 { w.set(i, j, M31::from((i * 2 + j + 1) as u32)); } }
+        for i in 0..4 {
+            for j in 0..2 {
+                w.set(i, j, M31::from((i * 2 + j + 1) as u32));
+            }
+        }
         weights.add_weight(0, w);
 
         let proof = crate::aggregation::prove_model_pure_gkr(&graph, &input, &weights).unwrap();
         let gkr = proof.gkr_proof.as_ref().unwrap();
         let circuit = crate::gkr::LayeredCircuit::from_graph(&graph).unwrap();
 
-        let zero = QM31(CM31(M31::from(0), M31::from(0)), CM31(M31::from(0), M31::from(0)));
+        let zero = QM31(
+            CM31(M31::from(0), M31::from(0)),
+            CM31(M31::from(0), M31::from(0)),
+        );
         let mut witness = crate::recursive::generate_witness(
-            &circuit, gkr, &proof.execution.output, Some(&weights), zero, zero,
-        ).unwrap();
+            &circuit,
+            gkr,
+            &proof.execution.output,
+            Some(&weights),
+            zero,
+            zero,
+        )
+        .unwrap();
 
         // Honest witness passes
         let n = crate::recursive::verify_hades_perms_offline(&witness).unwrap();
@@ -338,7 +439,10 @@ mod tests {
             }
         }
         let err = crate::recursive::verify_hades_perms_offline(&witness);
-        assert!(err.is_err(), "SECURITY: tampered Hades permutation MUST be detected");
+        assert!(
+            err.is_err(),
+            "SECURITY: tampered Hades permutation MUST be detected"
+        );
         eprintln!("[adversarial] Hades witness tampering detected ✓");
     }
 }
