@@ -347,11 +347,12 @@ pub mod RecursiveVerifierContract {
             //   [8..12)  weight_super_root: QM31 (4 felts)
             //   [12]     n_layers: u32
             //   [13]     n_poseidon_perms: u32
-            //   [14]     io_commitment_felt252: felt252 (full 252-bit hash)
-            //   [15]     pass1_final_digest: felt252 (Pass 1 GKR verification digest)
-            //   [16]     final_digest: felt252 (Pass 2 chain AIR boundary)
-            //   [17]     log_size: u32
-            //   [18..)   CommitmentSchemeProof (Serde-compatible)
+            //   [14..18) seed_digest: QM31 (4 felts, channel seeding checkpoint)
+            //   [18]     io_commitment_felt252: felt252 (full 252-bit hash)
+            //   [19]     pass1_final_digest: felt252 (Pass 1 GKR verification digest)
+            //   [20]     final_digest: felt252 (Pass 2 chain AIR boundary)
+            //   [21]     log_size: u32
+            //   [22..)   CommitmentSchemeProof (Serde-compatible)
 
             let stark_proof_data_len: u32 = stark_proof_data.len();
             let mut proof_span = stark_proof_data.span();
@@ -380,6 +381,12 @@ pub mod RecursiveVerifierContract {
 
             // Parse n_poseidon_perms from proof body
             let proof_n_poseidon_perms: u32 = (*proof_span.pop_front().unwrap()).try_into().unwrap();
+
+            // Parse seed_digest: QM31 (4 M31 limbs) — channel seeding checkpoint
+            let sd0: felt252 = *proof_span.pop_front().unwrap();
+            let sd1: felt252 = *proof_span.pop_front().unwrap();
+            let sd2: felt252 = *proof_span.pop_front().unwrap();
+            let sd3: felt252 = *proof_span.pop_front().unwrap();
 
             // Full felt252 IO commitment (preserves all 252 bits)
             let proof_io_commitment_felt252: felt252 = *proof_span.pop_front().unwrap();
@@ -533,6 +540,13 @@ pub mod RecursiveVerifierContract {
             // SECURITY: n_poseidon_perms bound to channel — prevents miniaturization
             let proof_n_poseidon_perms_u64: u64 = proof_n_poseidon_perms.into();
             channel.mix_u64(proof_n_poseidon_perms_u64);
+
+            // SECURITY: seed_digest checkpoint — binds chain to model dimensions
+            let seed_digest_qm31 = QM31Trait::from_fixed_array([
+                felt252_to_m31(sd0), felt252_to_m31(sd1),
+                felt252_to_m31(sd2), felt252_to_m31(sd3),
+            ]);
+            channel.mix_felts(array![seed_digest_qm31].span());
 
             // Bind the full felt252 io_commitment into the channel.
             // This ensures the proof body's io_commitment_felt252 field
