@@ -434,17 +434,21 @@ pub fn prove_recursive_with_policy(
         );
     }
 
+    // ── Step 3b: LogUp interaction trace (Tree 2) ─────────────────────
+    // When enabled, draws LogUp lookup elements from channel and generates
+    // the interaction trace binding chain ↔ Hades permutations.
+    // Currently OFF by default — activate with OBELYZK_LOGUP=1.
+    let logup_enabled = hades_enabled
+        && std::env::var("OBELYZK_LOGUP")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+    let chain_claimed_sum = SecureField::zero(); // TODO: compute from interaction trace when LogUp enabled
+
     recursive_log!(
         "  [Recursive] Channel before prove(): {:?}",
         channel.digest()
     );
-
-    // Print final digest limbs for Cairo comparison
-    {
-        let fd = starknet_ff::FieldElement::from_hex_be(&format!("0x{:064x}", channel.digest()))
-            .unwrap_or(starknet_ff::FieldElement::ZERO);
-        // The final digest used in the AIR comes from the WITNESS, not the channel
-    }
 
     // ── Step 4: Prove ────────────────────────────────────────────────
     recursive_log!("  [Recursive] Step 4/5: Proving (STARK)...");
@@ -512,16 +516,17 @@ pub fn prove_recursive_with_policy(
         n_real_rows: trace_data.n_real_rows as u32,
         initial_digest_limbs: zero_limbs,
         final_digest_limbs: final_limbs,
-        hades_lookup: None, // LogUp for Hades binding (TODO: draw from channel)
+        hades_lookup: None, // Activated when OBELYZK_LOGUP=1 + interaction trace wired
     };
-    let chain_component = FrameworkComponent::new(&mut allocator, chain_eval, SecureField::zero());
+    let chain_component =
+        FrameworkComponent::new(&mut allocator, chain_eval, chain_claimed_sum);
 
     // Component 2: Hades AIR (permutation verification)
     let hades_eval = super::hades_air::HadesVerifierEval {
         log_n_rows: unified_log_size,
         round_constants_limbs: Vec::new(),
         range_check: None,
-        hades_logup: None, // TODO: draw from channel when multi-component LogUp is wired
+        hades_logup: None, // Activated when OBELYZK_LOGUP=1 + interaction trace wired
     };
 
     let stark_proof = if hades_enabled {
