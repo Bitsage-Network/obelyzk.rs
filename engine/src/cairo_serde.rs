@@ -3624,6 +3624,9 @@ mod recursive_serde {
         // Trace log_size (needed by verifier to reconstruct the AIR)
         serialize_u32(proof.log_size, &mut output);
 
+        // n_real_rows (number of active HadesPerm rows for accumulator correction)
+        serialize_u32(proof.n_real_rows, &mut output);
+
         // ── STARK Proof Body ─────────────────────────────────────────────
         serialize_commitment_scheme_proof_poseidon252(&proof.stark_proof.0, &mut output);
 

@@ -352,7 +352,8 @@ pub mod RecursiveVerifierContract {
             //   [19]     pass1_final_digest: felt252 (Pass 1 GKR verification digest)
             //   [20]     final_digest: felt252 (Pass 2 chain AIR boundary)
             //   [21]     log_size: u32
-            //   [22..)   CommitmentSchemeProof (Serde-compatible)
+            //   [22]     n_real_rows: u32 (active HadesPerm rows for accumulator)
+            //   [23..)   CommitmentSchemeProof (Serde-compatible)
 
             let stark_proof_data_len: u32 = stark_proof_data.len();
             let mut proof_span = stark_proof_data.span();
@@ -398,6 +399,7 @@ pub mod RecursiveVerifierContract {
 
             let final_digest: felt252 = *proof_span.pop_front().unwrap();
             let proof_log_size: u32 = (*proof_span.pop_front().unwrap()).try_into().unwrap();
+            let proof_n_real_rows: u32 = (*proof_span.pop_front().unwrap()).try_into().unwrap();
 
             // Verify proof binds to the registered model's circuit and weights.
             // Pack 4 M31 limbs into felt252: a * 2^93 + b * 2^62 + c * 2^31 + d
@@ -476,6 +478,7 @@ pub mod RecursiveVerifierContract {
 
             let air = RecursiveAir {
                 log_n_rows: proof_log_size,
+                n_real_rows: proof_n_real_rows,
                 initial_digest_limbs: initial_limbs,
                 final_digest_limbs: final_limbs,
             };
