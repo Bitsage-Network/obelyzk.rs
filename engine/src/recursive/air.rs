@@ -23,16 +23,15 @@
 //!
 //! | Columns | Count | Description |
 //! |---------|-------|-------------|
-//! | input_digest  | 9 | felt252 → 9 M31 limbs |
-//! | input_value   | 9 | felt252 → 9 M31 limbs |
-//! | input_cap     | 9 | felt252 → 9 M31 limbs |
-//! | output_digest | 9 | felt252 → 9 M31 limbs |
-//! | output_value  | 9 | felt252 → 9 M31 limbs |
-//! | output_cap    | 9 | felt252 → 9 M31 limbs |
-//! | op_type       | 1 | 0 = mix, 1 = draw |
-//! | **Total**     | **55** | |
+//! | digest_before | 9 | felt252 → 9 M31 limbs |
+//! | digest_after  | 9 | felt252 → 9 M31 limbs |
+//! | shifted_next  | 9 | next row's digest_before |
+//! | addition_dig  | 9 | intermediate addition |
+//! | carry         | 8 | carry chain |
+//! | k, is_active, acc, acc_next | 4 | selectors |
+//! | **Total**     | **48** | |
 //!
-//! For 15K Hades calls: log_size=14, ~900K cells. Compact and efficient.
+//! For 15K Hades calls: log_size=14, ~720K cells. Compact and efficient.
 
 use starknet_ff::FieldElement;
 use stwo::core::fields::m31::BaseField as M31;
@@ -70,36 +69,34 @@ pub const COLS_PER_DIGEST: usize = LIMBS_PER_FELT; // 9
 /// Columns for the full Hades state that are NOT the digest (value + capacity = 2 × 9 = 18).
 pub const COLS_EXTRA_STATE: usize = 2 * LIMBS_PER_FELT; // 18
 
-/// Total columns per row (expanded):
-///   digest_before[9] + input_value[9] + input_capacity[9]
-/// + digest_after[9]  + output_value[9] + output_capacity[9]
-/// + shifted_next_before[9] + op_type[1]
-/// + addition_digest[9]    (intermediate addition between consecutive HadesPerms)
-/// + addition_carry[8]     (carry chain for modular limb addition)
-/// + addition_k[1]         (modular reduction quotient: 0 or 1)
-/// + is_active[1] + is_active_next[1] + active_count[1] + active_count_next[1]
-/// + is_chain_gate[1] + is_boundary_gate[1] + is_active_prev[1] = 89
+/// Total columns per row (slim layout — 48 columns):
+///   [0..9)    digest_before[9]
+///   [9..18)   digest_after[9]
+///   [18..27)  shifted_next_before[9]
+///   [27..36)  addition_digest[9]
+///   [36..44)  addition_carry[8]
+///   [44]      addition_k
+///   [45]      is_active
+///   [46]      active_count
+///   [47]      active_count_next
 ///
 /// Each row = one Hades permutation (not one ChannelOp). Multi-Hades ChannelOps
 /// (mix_poly_coeffs: 2 Hades calls) produce 2 rows. The addition_digest column
 /// holds the intermediate value added to element 0 between consecutive perms
 /// within the same ChannelOp.
 ///
-/// Chain constraint: is_chain_gate * (digest_after + addition_digest - shifted_next_before) = 0
+/// Chain constraint: is_chain × (digest_after + addition_digest - shifted_next_before) = 0
 ///
 /// SECURITY: Execution-trace selectors with UNCONDITIONAL amortized accumulator
 /// constraint block the all-zeros-selector attack.
-pub const COLS_PER_ROW: usize = COLS_PER_STATE   // input full state: 27
-    + COLS_PER_STATE // output full state: 27
+pub const COLS_PER_ROW: usize = COLS_PER_DIGEST  // digest_before: 9
+    + COLS_PER_DIGEST // digest_after: 9
     + COLS_PER_DIGEST // shifted_next_before: 9
-    + 1  // op_type
-    + COLS_PER_DIGEST // addition_digest: 9 (intermediate additions between Hades calls)
+    + COLS_PER_DIGEST // addition_digest: 9
     + 8  // addition_carry: 8 (carry chain for modular limb addition)
     + 1  // addition_k: 1 (modular reduction quotient, 0 or 1)
-    + 7; // [82] is_active, [83] is_active_next, [84] active_count,
-         // [85] active_count_next, [86] is_chain_gate, [87] is_boundary_gate,
-         // [88] is_active_prev
-         // Total: 27 + 27 + 9 + 1 = 64
+    + 3; // [45] is_active, [46] active_count, [47] active_count_next
+         // Total: 9 + 9 + 9 + 9 + 8 + 1 + 3 = 48
 
 // ═══════════════════════════════════════════════════════════════════════
 // Felt252 ↔ M31 limb decomposition
@@ -261,27 +258,18 @@ impl FrameworkEval for RecursiveVerifierEval {
             id: "is_chain".into(),
         });
 
-        // ── Read execution trace columns ─────────────────────────────
-        // Full input state: digest_before[9] + input_value[9] + input_capacity[9]
+        // ── Read execution trace columns (slim 48-column layout) ─────
+        // digest_before[9]
         let digest_before: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
-        let input_value: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
-        let input_capacity: [E::F; LIMBS_PER_FELT] =
-            std::array::from_fn(|_| eval.next_trace_mask());
 
-        // Full output state: digest_after[9] + output_value[9] + output_capacity[9]
+        // digest_after[9]
         let digest_after: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
-        let output_value: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
-        let output_capacity: [E::F; LIMBS_PER_FELT] =
-            std::array::from_fn(|_| eval.next_trace_mask());
 
-        // shifted_next_before: 9 M31 limbs (digest_before of the NEXT row)
+        // shifted_next_before[9]: digest_before of the NEXT row
         let shifted_next_before: [E::F; LIMBS_PER_FELT] =
             std::array::from_fn(|_| eval.next_trace_mask());
 
-        // op_type: 0 = mix, 1 = draw, 2 = mix_poly_coeffs
-        let _op_type = eval.next_trace_mask();
-
-        // addition_digest: intermediate value added to digest between consecutive
+        // addition_digest[9]: intermediate value added to digest between consecutive
         // Hades permutations within the same ChannelOp (e.g., felt2 in mix_poly_coeffs).
         // Zero for single-perm ops.
         let addition_digest: [E::F; LIMBS_PER_FELT] = std::array::from_fn(|_| eval.next_trace_mask());
@@ -293,14 +281,9 @@ impl FrameworkEval for RecursiveVerifierEval {
         let addition_k = eval.next_trace_mask();
 
         // ── Execution-trace selectors ────────────────────────────────
-        // Read but used only for the amortized accumulator (unconditional constraint).
         let is_active = eval.next_trace_mask();
-        let _is_active_next = eval.next_trace_mask();
         let active_count = eval.next_trace_mask();
         let active_count_next = eval.next_trace_mask();
-        let _is_chain_gate = eval.next_trace_mask();
-        let _is_boundary_gate = eval.next_trace_mask();
-        let _is_active_prev = eval.next_trace_mask();
 
         // ══════════════════════════════════════════════════════════════
         // UNCONDITIONAL CONSTRAINTS (no selector gating)
@@ -449,23 +432,16 @@ struct ChainRow {
 /// Each row stores the actual felt252 Hades input/output from the GKR
 /// verifier's Fiat-Shamir transcript, decomposed into M31 limbs.
 ///
-/// Expanded layout (69 columns):
-///   [0..9)    digest_before     (input state[0])
-///   [9..18)   input_value       (input state[1])
-///   [18..27)  input_capacity    (input state[2])
-///   [27..36)  digest_after      (output state[0])
-///   [36..45)  output_value      (output state[1])
-///   [45..54)  output_capacity   (output state[2])
-///   [54..63)  shifted_next_before (next row's digest_before)
-///   [63]      op_type
-///   [64..73)  addition_digest   (intermediate addition between consecutive HadesPerms)
-///   [73]      is_active         (1 for real rows, 0 for padding)
-///   [74]      is_active_next    (shifted: is_active[i+1])
-///   [75]      active_count      (amortized accumulator)
-///   [76]      active_count_next (shifted: active_count[i+1])
-///   [77]      is_chain_gate     (precomputed: is_active * is_active_next)
-///   [78]      is_boundary_gate  (precomputed: is_active * (1 - is_active_next))
-///   [79]      is_active_prev    (shifted: is_active[i-1])
+/// Slim layout (48 columns):
+///   [0..9)    digest_before
+///   [9..18)   digest_after
+///   [18..27)  shifted_next_before
+///   [27..36)  addition_digest
+///   [36..44)  addition_carry
+///   [44]      addition_k
+///   [45]      is_active
+///   [46]      active_count
+///   [47]      active_count_next
 pub fn build_recursive_trace(witness: &super::types::GkrVerifierWitness) -> RecursiveTraceData {
     use super::types::WitnessOp;
 
@@ -522,121 +498,77 @@ pub fn build_recursive_trace(witness: &super::types::GkrVerifierWitness) -> Recu
         "n_padded ({n_padded_rows}) must be > n_real ({n_real_rows}) for boundary constraints"
     );
 
-    // Build trace columns (69 columns)
+    // Build trace columns (48 columns — slim layout)
     let mut execution_trace: Vec<Vec<M31>> = Vec::with_capacity(COLS_PER_ROW);
     for _ in 0..COLS_PER_ROW {
         execution_trace.push(vec![M31::from_u32_unchecked(0); n_padded_rows]);
     }
 
-    let zero_limbs = felt252_to_limbs(&FieldElement::ZERO);
+    // Column offsets for the slim 48-column layout
+    let col_digest_before = 0;       // [0..9)
+    let col_digest_after = 9;        // [9..18)
+    let col_shifted = 18;            // [18..27)
+    let col_addition = 27;           // [27..36)
+    let col_carry = 36;              // [36..44)
+    let col_k = 44;                  // [44]
+    let col_is_active = 45;          // [45]
+    let col_active_count = 46;       // [46]
+    let col_active_count_next = 47;  // [47]
 
     // Populate trace
     for row_idx in 0..n_padded_rows {
-        let (input_limbs, output_limbs) = if row_idx < n_ops {
-            let r = &rows[row_idx];
-            (
-                hades_state_to_limbs(&r.full_input),
-                hades_state_to_limbs(&r.full_output),
-            )
-        } else {
-            (
-                [M31::from_u32_unchecked(0); COLS_PER_STATE],
-                [M31::from_u32_unchecked(0); COLS_PER_STATE],
-            )
-        };
-
-        // Write full input state (27 columns: digest_before + input_value + input_capacity)
-        for j in 0..COLS_PER_STATE {
-            execution_trace[j][row_idx] = input_limbs[j];
-        }
-        // Write full output state (27 columns: digest_after + output_value + output_capacity)
-        for j in 0..COLS_PER_STATE {
-            execution_trace[COLS_PER_STATE + j][row_idx] = output_limbs[j];
-        }
-        // op_type
-        execution_trace[2 * COLS_PER_STATE + LIMBS_PER_FELT][row_idx] = M31::from_u32_unchecked(0);
-
-        // addition_digest: 9 limbs + carry chain
-        let addition_col_start = 2 * COLS_PER_STATE + LIMBS_PER_FELT + 1;
-        let carry_col_start = addition_col_start + LIMBS_PER_FELT; // after addition_digest
-        let k_col = carry_col_start + 8; // after carries
         if row_idx < n_ops {
-            let add_limbs = felt252_to_limbs(&rows[row_idx].addition_digest);
+            let r = &rows[row_idx];
+            // digest_before: only input state[0] (9 limbs)
+            let input_digest_limbs = felt252_to_limbs(&r.full_input[0]);
             for j in 0..LIMBS_PER_FELT {
-                execution_trace[addition_col_start + j][row_idx] = add_limbs[j];
+                execution_trace[col_digest_before + j][row_idx] = input_digest_limbs[j];
             }
-
-            // Carry witnesses computed in second pass (need next row's data first)
+            // digest_after: only output state[0] (9 limbs)
+            let output_digest_limbs = felt252_to_limbs(&r.full_output[0]);
+            for j in 0..LIMBS_PER_FELT {
+                execution_trace[col_digest_after + j][row_idx] = output_digest_limbs[j];
+            }
+            // addition_digest: 9 limbs
+            let add_limbs = felt252_to_limbs(&r.addition_digest);
+            for j in 0..LIMBS_PER_FELT {
+                execution_trace[col_addition + j][row_idx] = add_limbs[j];
+            }
         }
+        // Padding rows remain zero (initialized above)
     }
 
     // Second pass: shifted_next_before[row_i] = digest_before[row_{(i+1) mod N}]
     // Circle domain wrap-around: last row shifts to first row's digest.
-    let shifted_start = 2 * COLS_PER_STATE; // after input + output states
     for row_idx in 0..n_padded_rows {
         let next_idx = (row_idx + 1) % n_padded_rows;
         for j in 0..LIMBS_PER_FELT {
-            execution_trace[shifted_start + j][row_idx] = execution_trace[j][next_idx];
+            execution_trace[col_shifted + j][row_idx] = execution_trace[col_digest_before + j][next_idx];
         }
     }
 
     // Third pass: compute carry-chain witnesses for modular addition
     {
-        let addition_col = 2 * COLS_PER_STATE + LIMBS_PER_FELT + 1;
-        let carry_col = addition_col + LIMBS_PER_FELT;
-        let k_col_idx = carry_col + 8;
         for row_idx in 0..n_real_rows.saturating_sub(1) {
             let da_limbs: [M31; LIMBS_PER_FELT] =
-                std::array::from_fn(|j| execution_trace[COLS_PER_STATE + j][row_idx]);
+                std::array::from_fn(|j| execution_trace[col_digest_after + j][row_idx]);
             let add_limbs: [M31; LIMBS_PER_FELT] =
-                std::array::from_fn(|j| execution_trace[addition_col + j][row_idx]);
+                std::array::from_fn(|j| execution_trace[col_addition + j][row_idx]);
             let next_before_limbs: [M31; LIMBS_PER_FELT] =
-                std::array::from_fn(|j| execution_trace[j][row_idx + 1]);
+                std::array::from_fn(|j| execution_trace[col_digest_before + j][row_idx + 1]);
             let (carries, k) =
                 compute_addition_carry_chain(&da_limbs, &add_limbs, &next_before_limbs);
             for j in 0..8 {
-                execution_trace[carry_col + j][row_idx] = carries[j];
+                execution_trace[col_carry + j][row_idx] = carries[j];
             }
-            execution_trace[k_col_idx][row_idx] = k;
+            execution_trace[col_k][row_idx] = k;
         }
     }
 
-    // Carry columns (73..81) populated by third pass above.
-
-    // ── Execution-trace selectors (columns 82..88) ──────────────────
-    // These replace preprocessed is_last/is_chain with unconditional
-    // constraints that prevent the all-zeros-selector attack.
-    let col_is_active = 2 * COLS_PER_STATE + LIMBS_PER_FELT + 1 + LIMBS_PER_FELT + 8 + 1; // column 82
-    let col_is_active_next = col_is_active + 1;     // 65
-    let col_active_count = col_is_active + 2;       // 66
-    let col_active_count_next = col_is_active + 3;  // 67
-    let col_is_chain_gate = col_is_active + 4;      // 68
-    let col_is_boundary_gate = col_is_active + 5;   // 69
-    let col_is_active_prev = col_is_active + 6;     // 70
-
+    // ── Execution-trace selectors (columns 45..47) ──────────────────
     // is_active: 1 for real rows, 0 for padding
     for i in 0..n_real_rows.min(n_padded_rows) {
         execution_trace[col_is_active][i] = M31::from_u32_unchecked(1);
-    }
-
-    // is_active_next[i] = is_active[(i+1) mod N]
-    for i in 0..n_padded_rows {
-        let next = (i + 1) % n_padded_rows;
-        execution_trace[col_is_active_next][i] = execution_trace[col_is_active][next];
-    }
-
-    // is_active_prev[i] = is_active[(i-1) mod N]
-    for i in 0..n_padded_rows {
-        let prev = if i == 0 { n_padded_rows - 1 } else { i - 1 };
-        execution_trace[col_is_active_prev][i] = execution_trace[col_is_active][prev];
-    }
-
-    // Helper gate columns (precomputed products for degree-2 constraints)
-    for i in 0..n_padded_rows {
-        let a = execution_trace[col_is_active][i];
-        let a_next = execution_trace[col_is_active_next][i];
-        execution_trace[col_is_chain_gate][i] = a * a_next;
-        execution_trace[col_is_boundary_gate][i] = a - a * a_next;
     }
 
     // active_count: amortized accumulator
@@ -720,8 +652,8 @@ mod tests {
         assert_eq!(LIMBS_PER_FELT, 9);
         assert_eq!(COLS_PER_DIGEST, 9);
         assert_eq!(COLS_PER_STATE, 27);
-        // 27 + 27 + 9 + 1 + 9 (addition) + 8 (carry) + 1 (k) + 7 (selectors) = 89
-        assert_eq!(COLS_PER_ROW, 89);
+        // 9 + 9 + 9 + 9 (addition) + 8 (carry) + 1 (k) + 3 (selectors) = 48
+        assert_eq!(COLS_PER_ROW, 48);
     }
 
     #[test]

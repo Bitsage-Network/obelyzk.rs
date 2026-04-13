@@ -231,9 +231,9 @@ pub fn prove_recursive_with_policy(
             "test" => PcsConfig::default(), // 13 bits — unit tests only
             _ => PcsConfig {
                 pow_bits: 20,
-                // 120 bits: pow(20) + blowup(5)*queries(20) = 20+100 = 120
+                // 160 bits: pow(20) + blowup(5)*queries(28) = 20+140 = 160
                 // log_last_layer_degree_bound=0 required by Cairo FRI verifier
-                fri_config: stwo::core::fri::FriConfig::new(0, 5, 20),
+                fri_config: stwo::core::fri::FriConfig::new(0, 5, 28),
             },
         }
     };
@@ -407,44 +407,28 @@ pub fn prove_recursive_with_policy(
         if unified_log_size > chain_log_size {
             let unified_n = 1usize << unified_log_size;
             let n_real = trace_data.n_real_rows;
-            let col_is_active = 2 * super::air::COLS_PER_STATE + super::air::LIMBS_PER_FELT + 1
-                + super::air::LIMBS_PER_FELT + 8 + 1;
-            let col_ac = col_is_active + 2;
-            let col_ac_next = col_is_active + 3;
+            // Slim 48-column layout offsets
+            let col_is_active = 45;
+            let col_ac = 46;
+            let col_ac_next = 47;
+            let col_shifted = 18;
+            let col_digest_before = 0;
+            let col_digest_after = 9;
+            let col_addition = 27;
+            let col_carry = 36;
+            let col_k = 44;
 
             // Pad execution columns to unified size first
             for col in trace_data.execution_trace.iter_mut() {
                 col.resize(unified_n, M31::from_u32_unchecked(0));
             }
 
-            // Recompute is_active_next with wrap-around for unified domain
-            let col_ia_next = col_is_active + 1;
-            for i in 0..unified_n {
-                let next = (i + 1) % unified_n;
-                trace_data.execution_trace[col_ia_next][i] = trace_data.execution_trace[col_is_active][next];
-            }
-            // Recompute is_active_prev
-            let col_ia_prev = col_is_active + 6;
-            for i in 0..unified_n {
-                let prev = if i == 0 { unified_n - 1 } else { i - 1 };
-                trace_data.execution_trace[col_ia_prev][i] = trace_data.execution_trace[col_is_active][prev];
-            }
-            // Recompute is_chain_gate and is_boundary_gate
-            let col_cg = col_is_active + 4;
-            let col_bg = col_is_active + 5;
-            for i in 0..unified_n {
-                let a = trace_data.execution_trace[col_is_active][i];
-                let a_next = trace_data.execution_trace[col_ia_next][i];
-                trace_data.execution_trace[col_cg][i] = a * a_next;
-                trace_data.execution_trace[col_bg][i] = a - a * a_next;
-            }
             // Recompute shifted_next_before with wrap-around for unified domain
-            let shifted_start = 2 * super::air::COLS_PER_STATE;
             for i in 0..unified_n {
                 let next = (i + 1) % unified_n;
                 for j in 0..super::air::LIMBS_PER_FELT {
-                    trace_data.execution_trace[shifted_start + j][i] =
-                        trace_data.execution_trace[j][next];
+                    trace_data.execution_trace[col_shifted + j][i] =
+                        trace_data.execution_trace[col_digest_before + j][next];
                 }
             }
 
@@ -465,22 +449,19 @@ pub fn prove_recursive_with_policy(
             }
 
             // Recompute carry chain for unified domain (only chain rows need carries)
-            let addition_col = 2 * super::air::COLS_PER_STATE + super::air::LIMBS_PER_FELT + 1;
-            let carry_col = addition_col + super::air::LIMBS_PER_FELT;
-            let k_col_idx = carry_col + 8;
             for row_idx in 0..n_real.saturating_sub(1) {
                 let da_limbs: [M31; super::air::LIMBS_PER_FELT] =
-                    std::array::from_fn(|j| trace_data.execution_trace[super::air::COLS_PER_STATE + j][row_idx]);
+                    std::array::from_fn(|j| trace_data.execution_trace[col_digest_after + j][row_idx]);
                 let add_limbs: [M31; super::air::LIMBS_PER_FELT] =
-                    std::array::from_fn(|j| trace_data.execution_trace[addition_col + j][row_idx]);
+                    std::array::from_fn(|j| trace_data.execution_trace[col_addition + j][row_idx]);
                 let next_before_limbs: [M31; super::air::LIMBS_PER_FELT] =
-                    std::array::from_fn(|j| trace_data.execution_trace[j][row_idx + 1]);
+                    std::array::from_fn(|j| trace_data.execution_trace[col_digest_before + j][row_idx + 1]);
                 let (carries, k) =
                     super::air::compute_addition_carry_chain(&da_limbs, &add_limbs, &next_before_limbs);
                 for j in 0..8 {
-                    trace_data.execution_trace[carry_col + j][row_idx] = carries[j];
+                    trace_data.execution_trace[col_carry + j][row_idx] = carries[j];
                 }
-                trace_data.execution_trace[k_col_idx][row_idx] = k;
+                trace_data.execution_trace[col_k][row_idx] = k;
             }
 
             recursive_log!(
@@ -489,7 +470,7 @@ pub fn prove_recursive_with_policy(
             );
         }
 
-        // Chain columns: 89 columns, padded to unified_log_size
+        // Chain columns: 48 columns, padded to unified_log_size
         let chain_evals: Vec<CircleEvaluation<SimdBackend, M31, _>> = trace_data
             .execution_trace
             .iter()
@@ -577,11 +558,12 @@ pub fn prove_recursive_with_policy(
                     if row < trace_data.n_real_rows {
                         nums[lane] = SecureField::one();
                         // Key: (digest_before[9], digest_after[9])
+                        // Slim layout: digest_before at [0..9), digest_after at [9..18)
                         let key_vals: Vec<M31> = (0..super::air::LIMBS_PER_FELT)
                             .map(|j| trace_data.execution_trace[j][row])
                             .chain(
                                 (0..super::air::LIMBS_PER_FELT)
-                                    .map(|j| trace_data.execution_trace[super::air::COLS_PER_STATE + j][row]),
+                                    .map(|j| trace_data.execution_trace[9 + j][row]),
                             )
                             .collect();
                         let denom: SecureField = relation.combine(&key_vals);
@@ -711,23 +693,29 @@ pub fn prove_recursive_with_policy(
         hades_logup: None, // TODO: activate with Hades interaction trace
     };
 
-    // Verify chain constraints before proving
+    // Verify chain constraints before proving (slim 48-column offsets)
     {
         let n_real = trace_data.n_real_rows;
         let n_padded = 1usize << unified_log_size;
-        let addition_col = 2 * super::air::COLS_PER_STATE + super::air::LIMBS_PER_FELT + 1;
-        let carry_col = addition_col + super::air::LIMBS_PER_FELT;
-        let k_col_idx = carry_col + 8;
-        let shifted = 2 * super::air::COLS_PER_STATE;
+        // Slim layout offsets
+        let col_digest_after = 9;
+        let col_shifted = 18;
+        let col_addition = 27;
+        let col_carry = 36;
+        let col_k_idx = 44;
+        let col_is_active_offset = 45;
+        let col_ac = 46;
+        let col_ac_next = 47;
+
         let mut chain_failures = 0usize;
         for i in 0..n_real.saturating_sub(1) {
             for j in 0..super::air::LIMBS_PER_FELT {
-                let da = trace_data.execution_trace[super::air::COLS_PER_STATE + j][i].0 as i64;
-                let add = trace_data.execution_trace[addition_col + j][i].0 as i64;
-                let carry_in = if j == 0 { 0i64 } else { trace_data.execution_trace[carry_col + j - 1][i].0 as i64 };
-                let snb = trace_data.execution_trace[shifted + j][i].0 as i64;
-                let k = trace_data.execution_trace[k_col_idx][i].0 as i64;
-                let carry_out = if j < 8 { trace_data.execution_trace[carry_col + j][i].0 as i64 } else { 0 };
+                let da = trace_data.execution_trace[col_digest_after + j][i].0 as i64;
+                let add = trace_data.execution_trace[col_addition + j][i].0 as i64;
+                let carry_in = if j == 0 { 0i64 } else { trace_data.execution_trace[col_carry + j - 1][i].0 as i64 };
+                let snb = trace_data.execution_trace[col_shifted + j][i].0 as i64;
+                let k = trace_data.execution_trace[col_k_idx][i].0 as i64;
+                let carry_out = if j < 8 { trace_data.execution_trace[col_carry + j][i].0 as i64 } else { 0 };
                 let p_j = super::air::P_LIMBS_28[j] as i64;
                 let residual = da + add + carry_in - snb - k * p_j - carry_out * (1i64 << 28);
                 if residual != 0 {
@@ -756,7 +744,7 @@ pub fn prove_recursive_with_policy(
         if n_real > 0 {
             let final_limbs_ref = super::air::felt252_to_limbs(&final_digest_felt);
             for j in 0..super::air::LIMBS_PER_FELT {
-                let da = trace_data.execution_trace[super::air::COLS_PER_STATE + j][n_real - 1];
+                let da = trace_data.execution_trace[col_digest_after + j][n_real - 1];
                 if da != final_limbs_ref[j] {
                     eprintln!("[boundary-check] FINAL FAIL: row {} limb {j}: got {:?}, expected {:?}", n_real - 1, da, final_limbs_ref[j]);
                 }
@@ -764,9 +752,6 @@ pub fn prove_recursive_with_policy(
         }
 
         // Check accumulator: verify correction term
-        let col_is_active_offset = 2 * super::air::COLS_PER_STATE + super::air::LIMBS_PER_FELT + 1 + super::air::LIMBS_PER_FELT + 8 + 1;
-        let col_ac = col_is_active_offset + 2;
-        let col_ac_next = col_is_active_offset + 3;
         let n_m31 = M31::from(n_padded as u32);
         let n_inv_m31 = n_m31.inverse();
         let correction_m31 = M31::from(n_real as u32) * n_inv_m31;
@@ -774,8 +759,7 @@ pub fn prove_recursive_with_policy(
         for i in 0..n_padded {
             let ac = trace_data.execution_trace[col_ac][i];
             let ac_next = trace_data.execution_trace[col_ac_next][i];
-            let is_act_col = col_is_active_offset;
-            let is_act = trace_data.execution_trace[is_act_col][i];
+            let is_act = trace_data.execution_trace[col_is_active_offset][i];
             let residual = ac_next - ac - is_act + correction_m31;
             if residual != M31::from_u32_unchecked(0) {
                 if accum_failures < 3 {

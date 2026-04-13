@@ -50,7 +50,7 @@ pub fn verify_recursive(
             "test" => PcsConfig::default(),
             _ => PcsConfig {
                 pow_bits: 20,
-                fri_config: stwo::core::fri::FriConfig::new(0, 5, 20),
+                fri_config: stwo::core::fri::FriConfig::new(0, 5, 28),
             },
         }
     };
@@ -418,10 +418,10 @@ mod tests {
         let is_first = prep[0][0];
         let is_last = prep[1][0];
         let is_chain = prep[2][0];
-        let is_active = trace[82][0];
-        let ac = trace[84][0];
-        let ac_next = trace[85][0];
-        let add_k = trace[81][0];
+        let is_active = trace[45][0];
+        let ac = trace[46][0];
+        let ac_next = trace[47][0];
+        let add_k = trace[44][0];
 
         let n = 1u32 << rp.log_size;
         let n_inv = M31::from(n).inverse();
@@ -440,25 +440,25 @@ mod tests {
         // C4: final boundary ×9
         let final_limbs = super::super::air::felt252_to_limbs(&rp.final_digest);
         for j in 0..9usize {
-            cairo = cairo * random_coeff + denom_inv * is_last * (trace[27 + j][0] - SecureField::from(final_limbs[j]));
+            cairo = cairo * random_coeff + denom_inv * is_last * (trace[9 + j][0] - SecureField::from(final_limbs[j]));
         }
         // C5k: k boolean
         cairo = cairo * random_coeff + denom_inv * is_chain * add_k * (add_k - one);
         // C5c: carry booleans ×8
         for j in 0..8usize {
-            let cj = trace[73 + j][0];
+            let cj = trace[36 + j][0];
             cairo = cairo * random_coeff + denom_inv * is_chain * cj * (cj - one);
         }
         // C5: carry chain ×9
         let p_28: [u32; 9] = [1, 0, 0, 0, 0, 0, 16777216, 1, 134217728];
         let two28 = SecureField::from(M31::from(1u32 << 28));
         for j in 0..9usize {
-            let da = trace[27 + j][0];
-            let add = trace[64 + j][0];
-            let snb = trace[54 + j][0];
+            let da = trace[9 + j][0];
+            let add = trace[27 + j][0];
+            let snb = trace[18 + j][0];
             let pj = SecureField::from(M31::from(p_28[j]));
-            let cin = if j == 0 { zero_sf } else { trace[73 + j - 1][0] };
-            let cout = if j < 8 { trace[73 + j][0] * two28 } else { zero_sf };
+            let cin = if j == 0 { zero_sf } else { trace[36 + j - 1][0] };
+            let cout = if j < 8 { trace[36 + j][0] * two28 } else { zero_sf };
             cairo = cairo * random_coeff + denom_inv * is_chain * (da + add + cin - snb - add_k * pj - cout);
         }
 

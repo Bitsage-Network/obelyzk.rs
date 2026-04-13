@@ -511,8 +511,8 @@ pub mod RecursiveVerifierContract {
             loop { if i >= 3 { break; } preprocessed_sizes.append(proof_log_size); i += 1; };
             let mut trace_sizes: Array<u32> = array![];
             i = 0;
-            // Expanded trace: 89 columns (64 data + 9 addition + 8 carry + 1 k + 7 selectors)
-            loop { if i >= 89 { break; } trace_sizes.append(proof_log_size); i += 1; };
+            // Slim trace: 48 columns (9+9+9+9 data + 8 carry + 1 k + 3 selectors)
+            loop { if i >= 48 { break; } trace_sizes.append(proof_log_size); i += 1; };
 
             let mut channel = Default::default();
             pcs_config.mix_into(ref channel);

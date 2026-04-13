@@ -2,25 +2,16 @@
 ///
 /// Verifies that a chain of Poseidon channel operations was executed correctly.
 ///
-/// Expanded trace layout (89 columns per row):
-///   [0..9)    digest_before     (input state[0])
-///   [9..18)   input_value       (input state[1])
-///   [18..27)  input_capacity    (input state[2])
-///   [27..36)  digest_after      (output state[0])
-///   [36..45)  output_value      (output state[1])
-///   [45..54)  output_capacity   (output state[2])
-///   [54..63)  shifted_next_before (next row's digest_before)
-///   [63]      op_type
-///   [64..73)  addition_digest   (intermediate addition between consecutive HadesPerms)
-///   [73..81)  addition_carry    (carry chain for modular limb addition)
-///   [81]      addition_k        (modular reduction quotient, 0 or 1)
-///   [82]      is_active         (1 for real rows, 0 for padding)
-///   [83]      is_active_next    (shifted: is_active[i+1])
-///   [84]      active_count      (amortized accumulator)
-///   [85]      active_count_next (shifted: active_count[i+1])
-///   [86]      is_chain_gate     (precomputed: is_active * is_active_next)
-///   [87]      is_boundary_gate  (precomputed: is_active * (1 - is_active_next))
-///   [88]      is_active_prev    (shifted: is_active[i-1])
+/// Slim trace layout (48 columns per row):
+///   [0..9)    digest_before
+///   [9..18)   digest_after
+///   [18..27)  shifted_next_before
+///   [27..36)  addition_digest
+///   [36..44)  addition_carry
+///   [44]      addition_k
+///   [45]      is_active
+///   [46]      active_count
+///   [47]      active_count_next
 ///
 /// Plus 3 preprocessed selector columns (is_first, is_last, is_chain).
 ///
@@ -47,7 +38,7 @@ use stwo_verifier_core::{TreeSpan, ColumnSpan};
 pub const LIMBS_PER_FELT: u32 = 9;
 
 /// Total trace columns.
-const TRACE_COLS: u32 = 89;
+const TRACE_COLS: u32 = 48;
 
 /// Columns per full Hades state (3 felt252 × 9 limbs).
 const COLS_PER_STATE: u32 = 27;
@@ -101,26 +92,21 @@ impl RecursiveAirImpl of Air<RecursiveAir> {
         let zero: QM31 = QM31Zero::zero();
 
         // Column extraction helpers
+        // Slim 48-column layout:
         // digest_before [0..9)
-        // digest_after [27..36)
-        // shifted_next_before [54..63)
-        // addition_digest [64..73)
-        // addition_carry [73..81)
-        // addition_k [81]
-        // is_active [82]
-        // is_active_next [83]
-        // active_count [84]
-        // active_count_next [85]
-        // is_chain_gate [86]
-        // is_boundary_gate [87]
+        // digest_after [9..18)
+        // shifted_next_before [18..27)
+        // addition_digest [27..36)
+        // addition_carry [36..44)
+        // addition_k [44]
+        // is_active [45]
+        // active_count [46]
+        // active_count_next [47]
 
-        let is_active = extract_single_val(trace_vals, 82);
-        let is_active_next = extract_single_val(trace_vals, 83);
-        let active_count = extract_single_val(trace_vals, 84);
-        let active_count_next = extract_single_val(trace_vals, 85);
-        let is_chain_gate = extract_single_val(trace_vals, 86);
-        let is_boundary_gate = extract_single_val(trace_vals, 87);
-        let addition_k = extract_single_val(trace_vals, 81);
+        let is_active = extract_single_val(trace_vals, 45);
+        let active_count = extract_single_val(trace_vals, 46);
+        let active_count_next = extract_single_val(trace_vals, 47);
+        let addition_k = extract_single_val(trace_vals, 44);
 
         // Vanishing polynomial inverse
         let constraint_domain = CanonicCosetImpl::new(*self.log_n_rows);
@@ -166,7 +152,7 @@ impl RecursiveAirImpl of Air<RecursiveAir> {
         j = 0;
         loop {
             if j >= LIMBS_PER_FELT { break; }
-            let da = extract_single_val(trace_vals, COLS_PER_STATE + j);
+            let da = extract_single_val(trace_vals, 9 + j); // digest_after
             let fin = *self.final_digest_limbs.at(j);
             quotients.append(domain_vanishing_eval_inv * is_last * (da - fin));
             j += 1;
@@ -185,7 +171,7 @@ impl RecursiveAirImpl of Air<RecursiveAir> {
         j = 0;
         loop {
             if j >= 8 { break; }
-            let carry_j = extract_single_val(trace_vals, 73 + j);
+            let carry_j = extract_single_val(trace_vals, 36 + j); // addition_carry
             quotients.append(
                 domain_vanishing_eval_inv * is_chain * carry_j * (carry_j - one)
             );
@@ -202,19 +188,19 @@ impl RecursiveAirImpl of Air<RecursiveAir> {
         j = 0;
         loop {
             if j >= LIMBS_PER_FELT { break; }
-            let da = extract_single_val(trace_vals, COLS_PER_STATE + j); // digest_after
-            let add = extract_single_val(trace_vals, 64 + j); // addition_digest
-            let snb = extract_single_val(trace_vals, 2 * COLS_PER_STATE + j); // shifted_next_before
+            let da = extract_single_val(trace_vals, 9 + j); // digest_after
+            let add = extract_single_val(trace_vals, 27 + j); // addition_digest
+            let snb = extract_single_val(trace_vals, 18 + j); // shifted_next_before
             let p_j: QM31 = m31_to_qm31(m31(*p_limbs.at(j)));
 
             let carry_in: QM31 = if j == 0 {
                 zero
             } else {
-                extract_single_val(trace_vals, 73 + j - 1)
+                extract_single_val(trace_vals, 36 + j - 1) // addition_carry
             };
 
             let carry_out_term: QM31 = if j < 8 {
-                extract_single_val(trace_vals, 73 + j) * two_pow_28
+                extract_single_val(trace_vals, 36 + j) * two_pow_28 // addition_carry
             } else {
                 zero
             };
