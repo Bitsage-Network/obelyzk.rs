@@ -54,10 +54,7 @@ pub impl InteractionClaimImpl of InteractionClaimTrait {
 pub struct Component {
     pub claim: Claim,
     pub interaction_claim: InteractionClaim,
-    pub memory_address_to_id_lookup_elements: crate::MemoryAddressToIdElements,
-    pub memory_id_to_big_lookup_elements: crate::MemoryIdToBigElements,
-    pub verify_bitwise_xor_9_lookup_elements: crate::VerifyBitwiseXor_9Elements,
-    pub verify_bitwise_xor_8_lookup_elements: crate::VerifyBitwiseXor_8Elements,
+    pub common_lookup_elements: CommonLookupElements,
 }
 
 pub impl NewComponentImpl of NewComponent<Component> {
@@ -67,15 +64,12 @@ pub impl NewComponentImpl of NewComponent<Component> {
     fn new(
         claim: @Claim,
         interaction_claim: @InteractionClaim,
-        interaction_elements: @CairoInteractionElements,
+        common_lookup_elements: @CommonLookupElements,
     ) -> Component {
         Component {
             claim: *claim,
             interaction_claim: *interaction_claim,
-            memory_address_to_id_lookup_elements: interaction_elements.memory_address_to_id.clone(),
-            memory_id_to_big_lookup_elements: interaction_elements.memory_id_to_value.clone(),
-            verify_bitwise_xor_9_lookup_elements: interaction_elements.verify_bitwise_xor_9.clone(),
-            verify_bitwise_xor_8_lookup_elements: interaction_elements.verify_bitwise_xor_8.clone(),
+            common_lookup_elements: common_lookup_elements.clone(),
         }
     }
 }
@@ -88,11 +82,8 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         ref trace_mask_values: ColumnSpan<Span<QM31>>,
         ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
         random_coeff: QM31,
-        point: CirclePoint<QM31>,
     ) {
         let log_size = *(self.claim.log_size);
-        let trace_domain = CanonicCosetImpl::new(log_size);
-        let domain_vanishing_eval_inv = trace_domain.eval_vanishing(point).inverse();
         let claimed_sum = *self.interaction_claim.claimed_sum;
         let column_size = m31(pow2(log_size));
         let bitwise_builtin_segment_start: QM31 = (TryInto::<
@@ -101,43 +92,81 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             .unwrap())
             .into();
         let mut memory_address_to_id_sum_0: QM31 = Zero::zero();
+        let mut numerator_0: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_1: QM31 = Zero::zero();
+        let mut numerator_1: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_2: QM31 = Zero::zero();
+        let mut numerator_2: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_3: QM31 = Zero::zero();
+        let mut numerator_3: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_4: QM31 = Zero::zero();
+        let mut numerator_4: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_5: QM31 = Zero::zero();
+        let mut numerator_5: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_6: QM31 = Zero::zero();
+        let mut numerator_6: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_7: QM31 = Zero::zero();
+        let mut numerator_7: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_8: QM31 = Zero::zero();
+        let mut numerator_8: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_9: QM31 = Zero::zero();
+        let mut numerator_9: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_10: QM31 = Zero::zero();
+        let mut numerator_10: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_11: QM31 = Zero::zero();
+        let mut numerator_11: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_12: QM31 = Zero::zero();
+        let mut numerator_12: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_13: QM31 = Zero::zero();
+        let mut numerator_13: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_14: QM31 = Zero::zero();
+        let mut numerator_14: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_15: QM31 = Zero::zero();
+        let mut numerator_15: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_16: QM31 = Zero::zero();
+        let mut numerator_16: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_17: QM31 = Zero::zero();
+        let mut numerator_17: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_18: QM31 = Zero::zero();
+        let mut numerator_18: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_19: QM31 = Zero::zero();
+        let mut numerator_19: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_20: QM31 = Zero::zero();
+        let mut numerator_20: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_21: QM31 = Zero::zero();
+        let mut numerator_21: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_22: QM31 = Zero::zero();
+        let mut numerator_22: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_23: QM31 = Zero::zero();
+        let mut numerator_23: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_24: QM31 = Zero::zero();
+        let mut numerator_24: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_25: QM31 = Zero::zero();
+        let mut numerator_25: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_26: QM31 = Zero::zero();
+        let mut numerator_26: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_27: QM31 = Zero::zero();
+        let mut numerator_27: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_28: QM31 = Zero::zero();
+        let mut numerator_28: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_29: QM31 = Zero::zero();
+        let mut numerator_29: QM31 = Zero::zero();
         let mut verify_bitwise_xor_9_sum_30: QM31 = Zero::zero();
+        let mut numerator_30: QM31 = Zero::zero();
         let mut verify_bitwise_xor_8_sum_31: QM31 = Zero::zero();
+        let mut numerator_31: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_32: QM31 = Zero::zero();
+        let mut numerator_32: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_33: QM31 = Zero::zero();
+        let mut numerator_33: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_34: QM31 = Zero::zero();
+        let mut numerator_34: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_35: QM31 = Zero::zero();
+        let mut numerator_35: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_36: QM31 = Zero::zero();
+        let mut numerator_36: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_37: QM31 = Zero::zero();
+        let mut numerator_37: QM31 = Zero::zero();
         let seq = preprocessed_mask_values
             .get_and_mark_used(seq_column_idx(*(self.claim.log_size)));
 
@@ -359,12 +388,12 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             op0_limb_25_col26,
             op0_limb_26_col27,
             op0_limb_27_col28,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_0,
+            ref numerator_0,
             ref memory_id_to_big_sum_1,
+            ref numerator_1,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_positive_num_bits_252_evaluate(
@@ -399,21 +428,21 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             op1_limb_25_col55,
             op1_limb_26_col56,
             op1_limb_27_col57,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_2,
+            ref numerator_2,
             ref memory_id_to_big_sum_3,
+            ref numerator_3,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_0_col1, op1_limb_0_col30],
             xor_col58,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_4,
+            ref numerator_4,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_12: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -421,10 +450,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_1_col2, op1_limb_1_col31],
             xor_col59,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_5,
+            ref numerator_5,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_15: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -432,10 +461,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_2_col3, op1_limb_2_col32],
             xor_col60,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_6,
+            ref numerator_6,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_18: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -443,10 +472,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_3_col4, op1_limb_3_col33],
             xor_col61,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_7,
+            ref numerator_7,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_21: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -454,10 +483,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_4_col5, op1_limb_4_col34],
             xor_col62,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_8,
+            ref numerator_8,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_24: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -465,10 +494,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_5_col6, op1_limb_5_col35],
             xor_col63,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_9,
+            ref numerator_9,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_27: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -476,10 +505,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_6_col7, op1_limb_6_col36],
             xor_col64,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_10,
+            ref numerator_10,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_30: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -487,10 +516,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_7_col8, op1_limb_7_col37],
             xor_col65,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_11,
+            ref numerator_11,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_33: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -498,10 +527,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_8_col9, op1_limb_8_col38],
             xor_col66,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_12,
+            ref numerator_12,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_36: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -509,10 +538,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_9_col10, op1_limb_9_col39],
             xor_col67,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_13,
+            ref numerator_13,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_39: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -520,10 +549,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_10_col11, op1_limb_10_col40],
             xor_col68,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_14,
+            ref numerator_14,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_42: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -531,10 +560,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_11_col12, op1_limb_11_col41],
             xor_col69,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_15,
+            ref numerator_15,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_45: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -542,10 +571,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_12_col13, op1_limb_12_col42],
             xor_col70,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_16,
+            ref numerator_16,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_48: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -553,10 +582,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_13_col14, op1_limb_13_col43],
             xor_col71,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_17,
+            ref numerator_17,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_51: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -564,10 +593,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_14_col15, op1_limb_14_col44],
             xor_col72,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_18,
+            ref numerator_18,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_54: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -575,10 +604,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_15_col16, op1_limb_15_col45],
             xor_col73,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_19,
+            ref numerator_19,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_57: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -586,10 +615,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_16_col17, op1_limb_16_col46],
             xor_col74,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_20,
+            ref numerator_20,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_60: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -597,10 +626,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_17_col18, op1_limb_17_col47],
             xor_col75,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_21,
+            ref numerator_21,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_63: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -608,10 +637,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_18_col19, op1_limb_18_col48],
             xor_col76,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_22,
+            ref numerator_22,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_66: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -619,10 +648,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_19_col20, op1_limb_19_col49],
             xor_col77,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_23,
+            ref numerator_23,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_69: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -630,10 +659,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_20_col21, op1_limb_20_col50],
             xor_col78,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_24,
+            ref numerator_24,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_72: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -641,10 +670,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_21_col22, op1_limb_21_col51],
             xor_col79,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_25,
+            ref numerator_25,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_75: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -652,10 +681,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_22_col23, op1_limb_22_col52],
             xor_col80,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_26,
+            ref numerator_26,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_78: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -663,10 +692,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_23_col24, op1_limb_23_col53],
             xor_col81,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_27,
+            ref numerator_27,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_81: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -674,10 +703,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_24_col25, op1_limb_24_col54],
             xor_col82,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_28,
+            ref numerator_28,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_84: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -685,10 +714,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_25_col26, op1_limb_25_col55],
             xor_col83,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_29,
+            ref numerator_29,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_87: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -696,10 +725,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_9_evaluate(
             [op0_limb_26_col27, op1_limb_26_col56],
             xor_col84,
-            self.verify_bitwise_xor_9_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_9_sum_30,
+            ref numerator_30,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_90: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -707,10 +736,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         bitwise_xor_num_bits_8_evaluate(
             [op0_limb_27_col28, op1_limb_27_col57],
             xor_col85,
-            self.verify_bitwise_xor_8_lookup_elements,
+            self.common_lookup_elements,
             ref verify_bitwise_xor_8_sum_31,
+            ref numerator_31,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         let and_tmp_efb2a_93: QM31 = (qm31_const::<1073741824, 0, 0, 0>()
@@ -728,12 +757,12 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
                 and_tmp_efb2a_84, and_tmp_efb2a_87, and_tmp_efb2a_90, and_tmp_efb2a_93,
             ],
             and_id_col86,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_32,
+            ref numerator_32,
             ref memory_id_to_big_sum_33,
+            ref numerator_33,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         mem_verify_evaluate(
@@ -746,12 +775,12 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
                 xor_col79, xor_col80, xor_col81, xor_col82, xor_col83, xor_col84, xor_col85,
             ],
             xor_id_col87,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_34,
+            ref numerator_34,
             ref memory_id_to_big_sum_35,
+            ref numerator_35,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         mem_verify_evaluate(
@@ -774,20 +803,57 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
                 (and_tmp_efb2a_90 + xor_col84), (and_tmp_efb2a_93 + xor_col85),
             ],
             or_id_col88,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_36,
+            ref numerator_36,
             ref memory_id_to_big_sum_37,
+            ref numerator_37,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
 
         lookup_constraints(
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
             claimed_sum,
+            numerator_0,
+            numerator_1,
+            numerator_2,
+            numerator_3,
+            numerator_4,
+            numerator_5,
+            numerator_6,
+            numerator_7,
+            numerator_8,
+            numerator_9,
+            numerator_10,
+            numerator_11,
+            numerator_12,
+            numerator_13,
+            numerator_14,
+            numerator_15,
+            numerator_16,
+            numerator_17,
+            numerator_18,
+            numerator_19,
+            numerator_20,
+            numerator_21,
+            numerator_22,
+            numerator_23,
+            numerator_24,
+            numerator_25,
+            numerator_26,
+            numerator_27,
+            numerator_28,
+            numerator_29,
+            numerator_30,
+            numerator_31,
+            numerator_32,
+            numerator_33,
+            numerator_34,
+            numerator_35,
+            numerator_36,
+            numerator_37,
             column_size,
             ref interaction_trace_mask_values,
             memory_address_to_id_sum_0,
@@ -835,9 +901,46 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
 
 fn lookup_constraints(
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
     claimed_sum: QM31,
+    numerator_0: QM31,
+    numerator_1: QM31,
+    numerator_2: QM31,
+    numerator_3: QM31,
+    numerator_4: QM31,
+    numerator_5: QM31,
+    numerator_6: QM31,
+    numerator_7: QM31,
+    numerator_8: QM31,
+    numerator_9: QM31,
+    numerator_10: QM31,
+    numerator_11: QM31,
+    numerator_12: QM31,
+    numerator_13: QM31,
+    numerator_14: QM31,
+    numerator_15: QM31,
+    numerator_16: QM31,
+    numerator_17: QM31,
+    numerator_18: QM31,
+    numerator_19: QM31,
+    numerator_20: QM31,
+    numerator_21: QM31,
+    numerator_22: QM31,
+    numerator_23: QM31,
+    numerator_24: QM31,
+    numerator_25: QM31,
+    numerator_26: QM31,
+    numerator_27: QM31,
+    numerator_28: QM31,
+    numerator_29: QM31,
+    numerator_30: QM31,
+    numerator_31: QM31,
+    numerator_32: QM31,
+    numerator_33: QM31,
+    numerator_34: QM31,
+    numerator_35: QM31,
+    numerator_36: QM31,
+    numerator_37: QM31,
     column_size: M31,
     ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
     memory_address_to_id_sum_0: QM31,
@@ -1050,9 +1153,8 @@ fn lookup_constraints(
     ))
         * memory_address_to_id_sum_0
         * memory_id_to_big_sum_1)
-        - memory_address_to_id_sum_0
-        - memory_id_to_big_sum_1)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_0 * numerator_1)
+        - (memory_id_to_big_sum_1 * numerator_0));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1061,9 +1163,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col0, trace_2_col1, trace_2_col2, trace_2_col3]))
         * memory_address_to_id_sum_2
         * memory_id_to_big_sum_3)
-        - memory_address_to_id_sum_2
-        - memory_id_to_big_sum_3)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_2 * numerator_3)
+        - (memory_id_to_big_sum_3 * numerator_2));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1072,9 +1173,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col4, trace_2_col5, trace_2_col6, trace_2_col7]))
         * verify_bitwise_xor_9_sum_4
         * verify_bitwise_xor_9_sum_5)
-        - verify_bitwise_xor_9_sum_4
-        - verify_bitwise_xor_9_sum_5)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_4 * numerator_5)
+        - (verify_bitwise_xor_9_sum_5 * numerator_4));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1083,9 +1183,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col8, trace_2_col9, trace_2_col10, trace_2_col11]))
         * verify_bitwise_xor_9_sum_6
         * verify_bitwise_xor_9_sum_7)
-        - verify_bitwise_xor_9_sum_6
-        - verify_bitwise_xor_9_sum_7)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_6 * numerator_7)
+        - (verify_bitwise_xor_9_sum_7 * numerator_6));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1096,9 +1195,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_8
         * verify_bitwise_xor_9_sum_9)
-        - verify_bitwise_xor_9_sum_8
-        - verify_bitwise_xor_9_sum_9)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_8 * numerator_9)
+        - (verify_bitwise_xor_9_sum_9 * numerator_8));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1109,9 +1207,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_10
         * verify_bitwise_xor_9_sum_11)
-        - verify_bitwise_xor_9_sum_10
-        - verify_bitwise_xor_9_sum_11)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_10 * numerator_11)
+        - (verify_bitwise_xor_9_sum_11 * numerator_10));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1122,9 +1219,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_12
         * verify_bitwise_xor_9_sum_13)
-        - verify_bitwise_xor_9_sum_12
-        - verify_bitwise_xor_9_sum_13)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_12 * numerator_13)
+        - (verify_bitwise_xor_9_sum_13 * numerator_12));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1135,9 +1231,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_14
         * verify_bitwise_xor_9_sum_15)
-        - verify_bitwise_xor_9_sum_14
-        - verify_bitwise_xor_9_sum_15)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_14 * numerator_15)
+        - (verify_bitwise_xor_9_sum_15 * numerator_14));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1148,9 +1243,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_16
         * verify_bitwise_xor_9_sum_17)
-        - verify_bitwise_xor_9_sum_16
-        - verify_bitwise_xor_9_sum_17)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_16 * numerator_17)
+        - (verify_bitwise_xor_9_sum_17 * numerator_16));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1161,9 +1255,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_18
         * verify_bitwise_xor_9_sum_19)
-        - verify_bitwise_xor_9_sum_18
-        - verify_bitwise_xor_9_sum_19)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_18 * numerator_19)
+        - (verify_bitwise_xor_9_sum_19 * numerator_18));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1174,9 +1267,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_20
         * verify_bitwise_xor_9_sum_21)
-        - verify_bitwise_xor_9_sum_20
-        - verify_bitwise_xor_9_sum_21)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_20 * numerator_21)
+        - (verify_bitwise_xor_9_sum_21 * numerator_20));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1187,9 +1279,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_22
         * verify_bitwise_xor_9_sum_23)
-        - verify_bitwise_xor_9_sum_22
-        - verify_bitwise_xor_9_sum_23)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_22 * numerator_23)
+        - (verify_bitwise_xor_9_sum_23 * numerator_22));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1200,9 +1291,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_24
         * verify_bitwise_xor_9_sum_25)
-        - verify_bitwise_xor_9_sum_24
-        - verify_bitwise_xor_9_sum_25)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_24 * numerator_25)
+        - (verify_bitwise_xor_9_sum_25 * numerator_24));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1213,9 +1303,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_26
         * verify_bitwise_xor_9_sum_27)
-        - verify_bitwise_xor_9_sum_26
-        - verify_bitwise_xor_9_sum_27)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_26 * numerator_27)
+        - (verify_bitwise_xor_9_sum_27 * numerator_26));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1226,9 +1315,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_28
         * verify_bitwise_xor_9_sum_29)
-        - verify_bitwise_xor_9_sum_28
-        - verify_bitwise_xor_9_sum_29)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_28 * numerator_29)
+        - (verify_bitwise_xor_9_sum_29 * numerator_28));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1239,9 +1327,8 @@ fn lookup_constraints(
         ))
         * verify_bitwise_xor_9_sum_30
         * verify_bitwise_xor_8_sum_31)
-        - verify_bitwise_xor_9_sum_30
-        - verify_bitwise_xor_8_sum_31)
-        * domain_vanishing_eval_inv;
+        - (verify_bitwise_xor_9_sum_30 * numerator_31)
+        - (verify_bitwise_xor_8_sum_31 * numerator_30));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1252,9 +1339,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_32
         * memory_id_to_big_sum_33)
-        - memory_address_to_id_sum_32
-        - memory_id_to_big_sum_33)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_32 * numerator_33)
+        - (memory_id_to_big_sum_33 * numerator_32));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1265,9 +1351,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_34
         * memory_id_to_big_sum_35)
-        - memory_address_to_id_sum_34
-        - memory_id_to_big_sum_35)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_34 * numerator_35)
+        - (memory_id_to_big_sum_35 * numerator_34));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1280,9 +1365,8 @@ fn lookup_constraints(
         + (claimed_sum * (column_size.inverse().into())))
         * memory_address_to_id_sum_36
         * memory_id_to_big_sum_37)
-        - memory_address_to_id_sum_36
-        - memory_id_to_big_sum_37)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_36 * numerator_37)
+        - (memory_id_to_big_sum_37 * numerator_36));
     sum = sum * random_coeff + constraint_quotient;
 }
 #[cfg(and(test, feature: "qm31_opcode"))]
@@ -1290,17 +1374,16 @@ mod tests {
     use core::array::ArrayImpl;
     use core::num::traits::Zero;
     #[allow(unused_imports)]
-    use stwo_cairo_air::preprocessed_columns::{NUM_PREPROCESSED_COLUMNS, seq_column_idx};
+    use stwo_cairo_air::preprocessed_columns::*;
     #[allow(unused_imports)]
     use stwo_constraint_framework::{
-        LookupElements, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
+        LookupElementsTrait, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
     };
-    use stwo_verifier_core::circle::CirclePoint;
     use stwo_verifier_core::fields::qm31::{QM31, QM31Impl, QM31Trait, qm31_const};
     use crate::cairo_component::*;
     use crate::components::sample_evaluations::*;
     #[allow(unused_imports)]
-    use crate::test_utils::{make_interaction_trace, make_lookup_elements, preprocessed_mask_add};
+    use crate::test_utils::{make_interaction_trace, preprocessed_mask_add};
     use crate::utils::*;
     use super::{Claim, Component, InteractionClaim};
 
@@ -1311,28 +1394,12 @@ mod tests {
             interaction_claim: InteractionClaim {
                 claimed_sum: qm31_const::<1398335417, 314974026, 1722107152, 821933968>(),
             },
-            memory_address_to_id_lookup_elements: make_lookup_elements(
-                qm31_const::<1842771211, 1960835386, 1582137647, 1333140033>(),
-                qm31_const::<1360491305, 950648792, 556642685, 2096522554>(),
-            ),
-            memory_id_to_big_lookup_elements: make_lookup_elements(
-                qm31_const::<844624398, 1166453613, 1247584074, 330174372>(),
-                qm31_const::<1844105245, 1400976933, 1126903288, 1155460729>(),
-            ),
-            verify_bitwise_xor_8_lookup_elements: make_lookup_elements(
-                qm31_const::<390097169, 1715941348, 958959293, 1227669969>(),
-                qm31_const::<105167513, 476596518, 1027059816, 1879697407>(),
-            ),
-            verify_bitwise_xor_9_lookup_elements: make_lookup_elements(
-                qm31_const::<974507519, 776396310, 1562918127, 1227662988>(),
-                qm31_const::<1834779873, 2002531844, 159681682, 1478723240>(),
+            common_lookup_elements: LookupElementsTrait::from_z_alpha(
+                qm31_const::<445623802, 202571636, 1360224996, 131355117>(),
+                qm31_const::<476823935, 939223384, 62486082, 122423602>(),
             ),
         };
         let mut sum: QM31 = Zero::zero();
-        let point = CirclePoint {
-            x: qm31_const::<461666434, 38651694, 1083586041, 510305943>(),
-            y: qm31_const::<817798294, 862569777, 2091320744, 1178484122>(),
-        };
 
         let mut preprocessed_trace = PreprocessedMaskValues { values: Default::default() };
         let mut preprocessed_trace = preprocessed_mask_add(
@@ -1464,7 +1531,6 @@ mod tests {
                 ref trace_columns,
                 ref interaction_columns,
                 qm31_const::<474642921, 876336632, 1911695779, 974600512>(),
-                point,
             );
         preprocessed_trace.validate_usage();
         assert_eq!(sum, QM31Trait::from_fixed_array(BITWISE_BUILTIN_SAMPLE_EVAL_RESULT))

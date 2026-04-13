@@ -24,22 +24,22 @@ pub fn read_positive_num_bits_144_evaluate(
     value_limb_13_col14: QM31,
     value_limb_14_col15: QM31,
     value_limb_15_col16: QM31,
-    memory_address_to_id_lookup_elements: @crate::MemoryAddressToIdElements,
-    memory_id_to_big_lookup_elements: @crate::MemoryIdToBigElements,
+    common_lookup_elements: @CommonLookupElements,
     ref memory_address_to_id_sum_0: QM31,
+    ref numerator_0: QM31,
     ref memory_id_to_big_sum_1: QM31,
+    ref numerator_1: QM31,
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
 ) -> [QM31; 0] {
     let read_positive_num_bits_144_input = input;
     read_id_evaluate(
         read_positive_num_bits_144_input,
         id_col0,
-        memory_address_to_id_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_0,
+        ref numerator_0,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_known_id_num_bits_144_evaluate(
@@ -60,10 +60,10 @@ pub fn read_positive_num_bits_144_evaluate(
         value_limb_13_col14,
         value_limb_14_col15,
         value_limb_15_col16,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_id_to_big_sum_1,
+        ref numerator_1,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
 

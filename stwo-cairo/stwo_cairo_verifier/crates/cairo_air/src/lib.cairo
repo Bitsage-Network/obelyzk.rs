@@ -3,6 +3,10 @@ use components::memory_address_to_id::{
 };
 use components::memory_id_to_big::InteractionClaimImpl as MemoryIdToBigInteractionClaimImpl;
 use stwo_verifier_core::Hash;
+#[cfg(not(feature: "poseidon252_verifier"))]
+use stwo_verifier_core::vcs::blake2s_hasher::hash_small_vals;
+#[cfg(feature: "poseidon252_verifier")]
+use stwo_verifier_core::vcs::poseidon_hasher::hash_small_vals;
 use stwo_verifier_utils::{PublicMemoryEntries, PublicMemoryEntriesTrait, PublicMemoryEntry};
 
 #[cfg(feature: "poseidon252_verifier")]
@@ -23,22 +27,29 @@ mod blake2s_verifier_uses {
 use blake2s_verifier_uses::*;
 use core::box::BoxImpl;
 use core::dict::{Felt252Dict, Felt252DictEntryTrait, Felt252DictTrait, SquashedFelt252DictTrait};
+use core::iter::{Extend, Iterator};
 use core::num::traits::Zero;
 use core::num::traits::one::One;
-use stwo_constraint_framework::{LookupElements, LookupElementsImpl, PreprocessedMaskValuesImpl};
+use core::traits::TryInto;
+use stwo_constraint_framework::{
+    CommonLookupElements, LookupElementsImpl, PreprocessedMaskValuesImpl,
+};
 use stwo_verifier_core::channel::{Channel, ChannelImpl, ChannelTrait};
 use stwo_verifier_core::fields::Invertible;
 #[cfg(not(feature: "qm31_opcode"))]
 use stwo_verifier_core::fields::m31::{AddM31Trait, MulByM31Trait};
-use stwo_verifier_core::fields::m31::{M31, P_U32};
+use stwo_verifier_core::fields::m31::{M31, M31Trait, P_U32};
+use stwo_verifier_core::fields::qm31::QM31;
 #[cfg(not(feature: "qm31_opcode"))]
 use stwo_verifier_core::fields::qm31::{PackedUnreducedQM31, PackedUnreducedQM31Trait};
-use stwo_verifier_core::fields::qm31::{QM31, qm31_const};
 use stwo_verifier_core::pcs::PcsConfigTrait;
 use stwo_verifier_core::pcs::verifier::{CommitmentSchemeVerifierImpl, get_trace_lde_log_size};
-use stwo_verifier_core::utils::{ArrayImpl, OptionImpl, pow2};
+use stwo_verifier_core::utils::{ArrayImpl, OptionImpl, pack_into_qm31s, pow2};
 use stwo_verifier_core::verifier::{StarkProof, verify};
 use stwo_verifier_utils::{MemorySection, PubMemoryValue, construct_f252};
+use crate::components::memory_address_to_id::*;
+use crate::components::memory_id_to_big::*;
+use crate::utils::split;
 #[cairofmt::skip]
 mod hash_imports {
     // Program hash function
@@ -56,6 +67,10 @@ mod hash_imports {
 }
 use hash_imports::*;
 
+pub mod claims;
+use claims::{
+    CairoClaim, CairoClaimImpl, CairoInteractionClaim, CairoInteractionClaimImpl, lookup_sum,
+};
 pub mod cairo_air;
 use cairo_air::*;
 
@@ -90,26 +105,13 @@ pub const POSEIDON_MEMORY_CELLS: usize = 6;
 // This is for both the 128 and 96 bit range checks.
 pub const RANGE_CHECK_MEMORY_CELLS: usize = 1;
 
-pub mod pedersen;
-use pedersen::PedersenContextInteractionClaimImpl;
-
-pub mod poseidon;
-use poseidon::PoseidonContextInteractionClaimImpl;
-
 pub mod blake;
-use blake::BlakeContextInteractionClaimImpl;
-
 pub mod builtins;
-use builtins::{BuiltinsClaim, BuiltinsInteractionClaimImpl};
-
 pub mod opcodes;
-use opcodes::OpcodeInteractionClaimImpl;
-
-pub mod range_checks;
-use range_checks::RangeChecksInteractionClaimImpl;
-pub use range_checks::range_check_elements::*;
-
+pub mod pedersen;
+pub mod poseidon;
 pub mod preprocessed_columns;
+pub mod range_checks;
 use preprocessed_columns::preprocessed_root;
 
 pub mod claim;
@@ -134,8 +136,8 @@ pub struct CairoProof {
     pub interaction_pow: u64,
     pub interaction_claim: CairoInteractionClaim,
     pub stark_proof: StarkProof,
-    /// Optional salt used in the channel initialization.
-    pub channel_salt: Option<u64>,
+    /// Salt used in the channel initialization.
+    pub channel_salt: u32,
 }
 
 /// The output of a verification.
@@ -194,9 +196,10 @@ pub fn verify_cairo(proof: CairoProof) {
     verify_claim(@claim);
 
     let mut channel: Channel = Default::default();
-    if let Some(salt) = channel_salt {
-        channel.mix_u64(salt);
-    }
+    // Mix channel salt. Note that we first reduce it modulo `M31::P`, then cast it as QM31.
+    let channel_salt_as_felt: QM31 = M31Trait::reduce_u32(channel_salt).into();
+    channel.mix_felts([channel_salt_as_felt].span());
+
     pcs_config.mix_into(ref channel);
     let mut commitment_scheme = CommitmentSchemeVerifierImpl::new();
 
@@ -235,9 +238,9 @@ pub fn verify_cairo(proof: CairoProof) {
     );
     channel.mix_u64(interaction_pow);
 
-    let interaction_elements = CairoInteractionElementsImpl::draw(ref channel);
+    let common_lookup_elements = LookupElementsImpl::draw(ref channel);
     assert!(
-        lookup_sum(@claim, @interaction_elements, @interaction_claim).is_zero(),
+        lookup_sum(@claim, @common_lookup_elements, @interaction_claim).is_zero(),
         "{}",
         CairoVerificationError::InvalidLogupSum,
     );
@@ -256,63 +259,17 @@ pub fn verify_cairo(proof: CairoProof) {
     // The maximal constraint degree is 2, so the degree bound for the cairo air is the degree bound
     // of the trace plus 1.
     let cairo_air_log_degree_bound = trace_log_size + 1;
-    let cairo_air = CairoAirNewImpl::new(
-        @claim, @interaction_elements, @interaction_claim, cairo_air_log_degree_bound,
-    );
+    let cairo_air = CairoAirNewImpl::new(@claim, @common_lookup_elements, @interaction_claim);
+
     verify(
-        cairo_air,
-        ref channel,
         stark_proof,
-        commitment_scheme,
-        SECURITY_BITS,
+        cairo_air,
+        cairo_air_log_degree_bound,
         composition_commitment,
+        commitment_scheme,
+        ref channel,
+        SECURITY_BITS,
     );
-}
-
-
-pub fn lookup_sum(
-    claim: @CairoClaim,
-    elements: @CairoInteractionElements,
-    interaction_claim: @CairoInteractionClaim,
-) -> QM31 {
-    let mut sum = claim.public_data.logup_sum(elements);
-    // If the table is padded, take the sum of the non-padded values.
-    // Otherwise, the claimed_sum is the total_sum.
-    // TODO(Ohad): hide this logic behind `InteractionClaim`, and only sum here.
-
-    // TODO(Andrew): double check this is correct order.
-    let CairoInteractionClaim {
-        opcodes,
-        verify_instruction,
-        blake_context,
-        builtins,
-        pedersen_context,
-        poseidon_context,
-        memory_address_to_id,
-        memory_id_to_value,
-        range_checks,
-        verify_bitwise_xor_4,
-        verify_bitwise_xor_7,
-        verify_bitwise_xor_8,
-        verify_bitwise_xor_8_b,
-        verify_bitwise_xor_9,
-    } = interaction_claim;
-
-    sum += opcodes.sum();
-    sum += *verify_instruction.claimed_sum;
-    sum += blake_context.sum();
-    sum += builtins.sum();
-    sum += pedersen_context.sum();
-    sum += poseidon_context.sum();
-    sum += *memory_address_to_id.claimed_sum;
-    sum += memory_id_to_value.sum();
-    sum += range_checks.sum();
-    sum += *verify_bitwise_xor_4.claimed_sum;
-    sum += *verify_bitwise_xor_7.claimed_sum;
-    sum += *verify_bitwise_xor_8.claimed_sum;
-    sum += *verify_bitwise_xor_8_b.claimed_sum;
-    sum += *verify_bitwise_xor_9.claimed_sum;
-    sum
 }
 
 /// Verifies the claim of the Cairo proof.
@@ -331,7 +288,18 @@ fn verify_claim(claim: @CairoClaim) {
         },
     } = claim.public_data;
 
-    verify_builtins(claim.builtins, public_segments);
+    verify_builtins(
+        claim.range_check_builtin,
+        claim.range_check96_builtin,
+        claim.bitwise_builtin,
+        claim.add_mod_builtin,
+        claim.mul_mod_builtin,
+        claim.pedersen_builtin,
+        claim.pedersen_builtin_narrow_windows,
+        claim.poseidon_builtin,
+        claim.ec_op_builtin,
+        public_segments,
+    );
     verify_program(*program, public_segments);
 
     let initial_pc: u32 = (*initial_pc).into();
@@ -349,19 +317,28 @@ fn verify_claim(claim: @CairoClaim) {
     assert!(initial_ap <= final_ap);
 
     // Sanity check: ensure that the maximum address in the address_to_id component fits within a
-    // 27-bit address space (i.e., is less than 2**27).
-    // Higher addresses are not supported by components that assume 27-bit addresses.
-    assert!(*claim.memory_address_to_id.log_size <= 27_u32 - LOG_MEMORY_ADDRESS_TO_ID_SPLIT);
+    // 29-bit address space (i.e., is less than 2**29).
+    // Higher addresses are not supported by components that assume 29-bit addresses.
+    assert!(
+        (*claim.memory_address_to_id).unwrap().log_size <= 29_u32 - LOG_MEMORY_ADDRESS_TO_ID_SPLIT,
+    );
 
     // Count the number of uses of each relation.
     let mut relation_uses: RelationUsesDict = Default::default();
     claim.accumulate_relation_uses(ref relation_uses);
 
-    // Make sure ap does not overflow P:
-    // Check that the number of uses of the Opcodes relation is leq than 2^29. This bounds the
-    // number of steps of the program by 2^29. An add_ap use can increase ap *to* at most 2^27-1,
-    // and every other step can increase ap by at most 2. Therefore the most ap can increase to with
-    // n_steps steps is 2^27-1 + 2 * (n_steps-1). This is less than P if n_steps <= 2^29.
+    // Check that the number of uses of the Opcodes relation <= 2^29. This bounds the number of
+    // steps of the program by 2^29. The bound on the number of steps allows us to bound the
+    // registers by P-(2^29-1)-1 at the start of each opcode, and show that ap/fp/pc + rel_imm does
+    // not overflow P as follows:
+    // The register pc - bounded by verify_instraction.
+    // The register ap - add_ap_opcode or generic_opcode can set ap to at most 2^29-1, call_opcode
+    // can increase ap by 2 (but starts with ap < 2^29 because [ap] = fp), and every other step can
+    // increase ap by at most 1. Therefore, after (n_steps - 1) > 1 steps, ap can be at most
+    // 2^29-1 + (n_steps-2).
+    // The register fp - call_opcode and generic_opcode can set fp to ap + 2, where ap is either a
+    // valid address, or range checked, and hence < 2^29. ret_opcode and generic_opcode can set fp
+    // to a valid address, which is again < 2^29.
     let opcodes_uses = relation_uses.get('Opcodes');
     assert!(opcodes_uses <= pow2(29).into());
 
@@ -383,7 +360,22 @@ fn verify_claim(claim: @CairoClaim) {
 /// verified by the builtins AIR.
 /// The builtins keccak, ec_op, and ecdsa, are not supported, and therefore it's checked that their
 /// segments are empty.
-fn verify_builtins(builtins_claim: @BuiltinsClaim, segment_ranges: @PublicSegmentRanges) {
+fn verify_builtins(
+    range_check_128_builtin: @Option<crate::components::range_check_builtin::Claim>,
+    range_check_96_builtin: @Option<crate::components::range_check96_builtin::Claim>,
+    bitwise_builtin: @Option<crate::components::bitwise_builtin::Claim>,
+    add_mod_builtin: @Option<crate::components::add_mod_builtin::Claim>,
+    mul_mod_builtin: @Option<crate::components::mul_mod_builtin::Claim>,
+    pedersen_builtin: @Option<crate::components::pedersen_builtin::Claim>,
+    pedersen_builtin_narrow_windows: @Option<
+        crate::components::pedersen_builtin_narrow_windows::Claim,
+    >,
+    poseidon_builtin: @Option<crate::components::poseidon_builtin::Claim>,
+    ec_op_builtin: @Option<crate::components::ec_op_builtin::Claim>,
+    segment_ranges: @PublicSegmentRanges,
+) {
+    assert!(pedersen_builtin_narrow_windows.is_none());
+
     let PublicSegmentRanges {
         ec_op: ec_op_segment_range,
         ecdsa: ecdsa_segment_range,
@@ -399,7 +391,6 @@ fn verify_builtins(builtins_claim: @BuiltinsClaim, segment_ranges: @PublicSegmen
     } = segment_ranges;
 
     // Check that non-supported builtins aren't used.
-    assert!(ec_op_segment_range.start_ptr.value == ec_op_segment_range.stop_ptr.value);
     assert!(ecdsa_segment_range.start_ptr.value == ecdsa_segment_range.stop_ptr.value);
     assert!(keccak_segment_range.start_ptr.value == keccak_segment_range.stop_ptr.value);
 
@@ -408,15 +399,6 @@ fn verify_builtins(builtins_claim: @BuiltinsClaim, segment_ranges: @PublicSegmen
     assert!(output_segment_range.start_ptr.value <= output_segment_range.stop_ptr.value);
 
     // All other supported builtins.
-    let BuiltinsClaim {
-        range_check_128_builtin,
-        range_check_96_builtin,
-        bitwise_builtin,
-        add_mod_builtin,
-        mul_mod_builtin,
-        pedersen_builtin,
-        poseidon_builtin,
-    } = builtins_claim;
     check_builtin(
         range_check_128_builtin
             .map(
@@ -502,6 +484,18 @@ fn verify_builtins(builtins_claim: @BuiltinsClaim, segment_ranges: @PublicSegmen
             ),
         *poseidon_segment_range,
         POSEIDON_MEMORY_CELLS,
+    );
+    check_builtin(
+        ec_op_builtin
+            .map(
+                |
+                    claim,
+                | BuiltinClaim {
+                    segment_start: claim.ec_op_builtin_segment_start, log_size: claim.log_size,
+                },
+            ),
+        *ec_op_segment_range,
+        EC_OP_MEMORY_CELLS,
     );
 }
 
@@ -655,7 +649,7 @@ impl PublicSegmentRangesImpl of PublicSegmentRangesTrait {
     }
 }
 
-#[derive(Serde, Drop)]
+#[derive(Copy, Serde, Drop)]
 pub struct PublicMemory {
     pub program: MemorySection,
     pub public_segments: PublicSegmentRanges,
@@ -746,7 +740,7 @@ pub impl PublicMemoryImpl of PublicMemoryTrait {
 mod combine;
 
 
-#[derive(Drop, Serde)]
+#[derive(Clone, Drop, Serde)]
 pub struct PublicData {
     pub public_memory: PublicMemory,
     pub initial_state: CasmState,
@@ -755,7 +749,7 @@ pub struct PublicData {
 
 #[generate_trait]
 impl PublicDataImpl of PublicDataTrait {
-    fn logup_sum(self: @PublicData, lookup_elements: @CairoInteractionElements) -> QM31 {
+    fn logup_sum(self: @PublicData, common_lookup_elements: @crate::CommonLookupElements) -> QM31 {
         let mut sum = Zero::zero();
 
         let public_memory_entries = self
@@ -765,44 +759,195 @@ impl PublicDataImpl of PublicDataTrait {
                 initial_ap: (*self.initial_state.ap).into(),
                 final_ap: (*self.final_state.ap).into(),
             );
-        sum += sum_public_memory_entries(public_memory_entries, lookup_elements);
+        sum += sum_public_memory_entries(public_memory_entries, common_lookup_elements);
 
         // Yield initial state and use the final.
         let CasmState { pc, ap, fp } = *self.final_state;
-        sum += lookup_elements.opcodes.combine([pc, ap, fp]).inverse();
+        sum += common_lookup_elements.combine([OPCODES_RELATION_ID, pc, ap, fp].span()).inverse();
         let CasmState { pc, ap, fp } = *self.initial_state;
-        sum -= lookup_elements.opcodes.combine([pc, ap, fp]).inverse();
+        sum -= common_lookup_elements.combine([OPCODES_RELATION_ID, pc, ap, fp].span()).inverse();
 
         sum
     }
 
     fn mix_into(self: @PublicData, ref channel: Channel) {
-        self.public_memory.mix_into(ref channel);
-        self.initial_state.mix_into(ref channel);
-        self.final_state.mix_into(ref channel);
+        let (public_claim, output_claim, program_claim) = self.pack_into_u32s();
+        channel.mix_felts(pack_into_qm31s(public_claim));
+        let empty_array: Array<felt252> = array![];
+        let output_hash = hash_small_vals(empty_array, output_claim);
+        channel.mix_commitment(output_hash);
+        let empty_array: Array<felt252> = array![];
+        let program_hash = hash_small_vals(empty_array, program_claim);
+        channel.mix_commitment(program_hash);
+    }
+
+    /// Converts public data to [u32], where each u32 is at most 2^31 - 1.
+    /// Returns the output and program values separately.
+    fn pack_into_u32s(self: @PublicData) -> (Span<u32>, Span<u32>, Span<u32>) {
+        let PublicData {
+            initial_state: CasmState {
+                pc: initial_pc, ap: initial_ap, fp: initial_fp,
+                }, final_state: CasmState {
+                pc: final_pc, ap: final_ap, fp: final_fp,
+                }, public_memory: PublicMemory {
+                public_segments, output, safe_call_ids, program,
+            },
+        } = self;
+
+        let mut public_claim = array![];
+        public_claim.append((*initial_pc).into());
+        public_claim.append((*initial_ap).into());
+        public_claim.append((*initial_fp).into());
+        public_claim.append((*final_pc).into());
+        public_claim.append((*final_ap).into());
+        public_claim.append((*final_fp).into());
+        let PublicSegmentRanges {
+            output: output_ranges,
+            pedersen,
+            range_check_128,
+            ecdsa,
+            bitwise,
+            ec_op,
+            keccak,
+            poseidon,
+            range_check_96,
+            add_mod,
+            mul_mod,
+        } = public_segments;
+        public_claim
+            .extend(
+                array![
+                    *output_ranges.start_ptr.id, *output_ranges.start_ptr.value,
+                    *output_ranges.stop_ptr.id, *output_ranges.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *pedersen.start_ptr.id, *pedersen.start_ptr.value, *pedersen.stop_ptr.id,
+                    *pedersen.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *range_check_128.start_ptr.id, *range_check_128.start_ptr.value,
+                    *range_check_128.stop_ptr.id, *range_check_128.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *ecdsa.start_ptr.id, *ecdsa.start_ptr.value, *ecdsa.stop_ptr.id,
+                    *ecdsa.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *bitwise.start_ptr.id, *bitwise.start_ptr.value, *bitwise.stop_ptr.id,
+                    *bitwise.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *ec_op.start_ptr.id, *ec_op.start_ptr.value, *ec_op.stop_ptr.id,
+                    *ec_op.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *keccak.start_ptr.id, *keccak.start_ptr.value, *keccak.stop_ptr.id,
+                    *keccak.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *poseidon.start_ptr.id, *poseidon.start_ptr.value, *poseidon.stop_ptr.id,
+                    *poseidon.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *range_check_96.start_ptr.id, *range_check_96.start_ptr.value,
+                    *range_check_96.stop_ptr.id, *range_check_96.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *add_mod.start_ptr.id, *add_mod.start_ptr.value, *add_mod.stop_ptr.id,
+                    *add_mod.stop_ptr.value,
+                ],
+            );
+        public_claim
+            .extend(
+                array![
+                    *mul_mod.start_ptr.id, *mul_mod.start_ptr.value, *mul_mod.stop_ptr.id,
+                    *mul_mod.stop_ptr.value,
+                ],
+            );
+        let arr: Array<u32> = safe_call_ids.into_iter().map(|x| *x).collect();
+        public_claim.extend(arr);
+        for (id, _) in output {
+            public_claim.append(*id);
+        }
+        for (id, _) in program {
+            public_claim.append(*id);
+        }
+
+        // Collect output values.
+        let mut output_claim = array![];
+        for (_, value) in output {
+            let fixed_arr: [u32; 8] = *value;
+            let new_value: [u32; N_M31_IN_FELT252] = split(fixed_arr);
+            let arr: Array<u32> = new_value.span().into_iter().map(|x| *x).collect();
+            output_claim.extend(arr);
+        }
+
+        // Collect program values.
+        let mut program_claim = array![];
+        for (_, value) in program {
+            let fixed_arr: [u32; 8] = *value;
+            let new_value: [u32; N_M31_IN_FELT252] = split(fixed_arr);
+            let arr: Array<u32> = new_value.span().into_iter().map(|x| *x).collect();
+            program_claim.extend(arr);
+        }
+
+        (public_claim.span(), output_claim.span(), program_claim.span())
     }
 }
 
 #[cfg(feature: "qm31_opcode")]
 fn sum_public_memory_entries(
-    pub_memory_entries: PublicMemoryEntries, lookup_elements: @CairoInteractionElements,
+    pub_memory_entries: PublicMemoryEntries, common_lookup_elements: @crate::CommonLookupElements,
 ) -> QM31 {
     let mut sum = Zero::zero();
-    let id_to_value_alpha = *lookup_elements.memory_id_to_value.alpha;
-    let id_to_value_z = *lookup_elements.memory_id_to_value.z;
-    let addr_to_id_alpha = *lookup_elements.memory_address_to_id.alpha;
-    let addr_to_id_z = *lookup_elements.memory_address_to_id.z;
+    let common_z = *common_lookup_elements.z;
+    let common_alpha = *common_lookup_elements.alpha_powers[1];
+    let common_alpha2 = *common_lookup_elements.alpha_powers[2];
 
     for PublicMemoryEntry { address, id, value } in pub_memory_entries {
         let addr_m31: M31 = address.try_into().unwrap();
         let addr_qm31 = addr_m31.into();
         let id_m31: M31 = id.try_into().unwrap();
         let id_qm31 = id_m31.into();
-        let addr_to_id = (addr_qm31 + id_qm31 * addr_to_id_alpha - addr_to_id_z).inverse();
+        let addr_to_id = (MEMORY_ADDRESS_TO_ID_RELATION_ID.into()
+            + addr_qm31 * common_alpha
+            + id_qm31 * common_alpha2
+            - common_z)
+            .inverse();
 
         // Use handwritten implementation of combine_id_to_value to improve performance.
-        let mut combine_sum = combine::combine_felt252(value, id_to_value_alpha);
-        combine_sum = combine_sum + id_m31.into() - id_to_value_z;
+        let mut combine_sum = combine::combine_felt252(value, common_alpha);
+        combine_sum = combine_sum * common_alpha
+            + id_m31.into() * common_alpha
+            + MEMORY_ID_TO_VALUE_RELATION_ID.into()
+            - common_z;
         let id_to_value = combine_sum.inverse();
 
         sum += addr_to_id + id_to_value;
@@ -815,42 +960,47 @@ fn sum_public_memory_entries(
 // An alternative implementation that uses batch inverse, for the case that we don't have an opcode
 // for it.
 fn sum_public_memory_entries(
-    pub_memory_entries: PublicMemoryEntries, lookup_elements: @CairoInteractionElements,
+    pub_memory_entries: PublicMemoryEntries, common_lookup_elements: @CommonLookupElements,
 ) -> QM31 {
     // Gather values to be inverted and summed.
     let mut values: Array<QM31> = array![];
 
-    let mut alpha_powers = lookup_elements.memory_id_to_value.alpha_powers.span();
-    // Remove the first element, which is 1.
+    let mut alpha_powers = common_lookup_elements.alpha_powers.span();
+    // Remove the first two elements (1 and alpha), so combine_felt252 below computes
+    // sum_{i} value[i] * alpha**(i+2) as required for the id_to_value relation.
     let _ = alpha_powers.pop_front();
-    let packed_alpha_powers: Array<PackedUnreducedQM31> = alpha_powers
+    let _ = alpha_powers.pop_front();
+    let mut packed_alpha_powers: Span<PackedUnreducedQM31> = alpha_powers
         .into_iter()
         .map(|alpha| -> PackedUnreducedQM31 {
             (*alpha).into()
         })
-        .collect();
+        .collect::<Array<_>>()
+        .span();
     let id_to_value_alpha_powers: Box<[PackedUnreducedQM31; 28]> = *(packed_alpha_powers
-        .span()
-        .try_into()
+        .multi_pop_front()
         .unwrap());
 
-    let addr_to_id_alpha: PackedUnreducedQM31 = (*lookup_elements.memory_address_to_id.alpha)
+    let common_alpha: PackedUnreducedQM31 = (*common_lookup_elements.alpha).into();
+    let common_alpha2: PackedUnreducedQM31 = (*common_lookup_elements.alpha
+        * *common_lookup_elements.alpha)
         .into();
-    let minus_id_to_value_z: PackedUnreducedQM31 = PackedUnreducedQM31Trait::large_zero()
-        - (*lookup_elements.memory_id_to_value.z).into();
-    let minus_addr_to_id_z: PackedUnreducedQM31 = PackedUnreducedQM31Trait::large_zero()
-        - (*lookup_elements.memory_address_to_id.z).into();
+    let minus_common_z: PackedUnreducedQM31 = PackedUnreducedQM31Trait::large_zero()
+        - (*common_lookup_elements.z).into();
 
     for PublicMemoryEntry { address, id, value } in pub_memory_entries {
         let addr_m31: M31 = address.try_into().unwrap();
         let id_m31: M31 = id.try_into().unwrap();
-        let addr_to_id: PackedUnreducedQM31 = minus_addr_to_id_z
-            + addr_to_id_alpha.mul_m31(id_m31).add_m31(addr_m31);
+        let addr_to_id: PackedUnreducedQM31 = (minus_common_z
+            + common_alpha2.mul_m31(id_m31)
+            + common_alpha.mul_m31(addr_m31))
+            .add_m31(MEMORY_ADDRESS_TO_ID_RELATION_ID);
         values.append(addr_to_id.reduce());
 
         // Use handwritten implementation of combine_id_to_value to improve performance.
         let combined_limbs = combine::combine_felt252(value, id_to_value_alpha_powers);
-        let id_to_value = minus_id_to_value_z + combined_limbs.add_m31(id_m31);
+        let id_to_value = (minus_common_z + combined_limbs + common_alpha.mul_m31(id_m31))
+            .add_m31(MEMORY_ID_TO_VALUE_RELATION_ID);
         values.append(id_to_value.reduce());
     }
 
@@ -906,4 +1056,3 @@ impl CairoVerificationErrorDisplay of core::fmt::Display<CairoVerificationError>
         }
     }
 }
-

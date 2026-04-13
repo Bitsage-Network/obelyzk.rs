@@ -50,8 +50,7 @@ pub impl InteractionClaimImpl of InteractionClaimTrait {
 pub struct Component {
     pub claim: Claim,
     pub interaction_claim: InteractionClaim,
-    pub memory_address_to_id_lookup_elements: crate::MemoryAddressToIdElements,
-    pub poseidon_aggregator_lookup_elements: crate::PoseidonAggregatorElements,
+    pub common_lookup_elements: CommonLookupElements,
 }
 
 pub impl NewComponentImpl of NewComponent<Component> {
@@ -61,13 +60,12 @@ pub impl NewComponentImpl of NewComponent<Component> {
     fn new(
         claim: @Claim,
         interaction_claim: @InteractionClaim,
-        interaction_elements: @CairoInteractionElements,
+        common_lookup_elements: @CommonLookupElements,
     ) -> Component {
         Component {
             claim: *claim,
             interaction_claim: *interaction_claim,
-            memory_address_to_id_lookup_elements: interaction_elements.memory_address_to_id.clone(),
-            poseidon_aggregator_lookup_elements: interaction_elements.poseidon_aggregator.clone(),
+            common_lookup_elements: common_lookup_elements.clone(),
         }
     }
 }
@@ -80,11 +78,8 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         ref trace_mask_values: ColumnSpan<Span<QM31>>,
         ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
         random_coeff: QM31,
-        point: CirclePoint<QM31>,
     ) {
         let log_size = *(self.claim.log_size);
-        let trace_domain = CanonicCosetImpl::new(log_size);
-        let domain_vanishing_eval_inv = trace_domain.eval_vanishing(point).inverse();
         let claimed_sum = *self.interaction_claim.claimed_sum;
         let column_size = m31(pow2(log_size));
         let poseidon_builtin_segment_start: QM31 = (TryInto::<
@@ -93,12 +88,19 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             .unwrap())
             .into();
         let mut memory_address_to_id_sum_0: QM31 = Zero::zero();
+        let mut numerator_0: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_1: QM31 = Zero::zero();
+        let mut numerator_1: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_2: QM31 = Zero::zero();
+        let mut numerator_2: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_3: QM31 = Zero::zero();
+        let mut numerator_3: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_4: QM31 = Zero::zero();
+        let mut numerator_4: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_5: QM31 = Zero::zero();
+        let mut numerator_5: QM31 = Zero::zero();
         let mut poseidon_aggregator_sum_6: QM31 = Zero::zero();
+        let mut numerator_6: QM31 = Zero::zero();
         let seq = preprocessed_mask_values
             .get_and_mark_used(seq_column_idx(*(self.claim.log_size)));
 
@@ -134,72 +136,81 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         read_id_evaluate(
             instance_addr_tmp_51986_0,
             input_state_0_id_col0,
-            self.memory_address_to_id_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_0,
+            ref numerator_0,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_id_evaluate(
             (instance_addr_tmp_51986_0 + qm31_const::<1, 0, 0, 0>()),
             input_state_1_id_col1,
-            self.memory_address_to_id_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_1,
+            ref numerator_1,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_id_evaluate(
             (instance_addr_tmp_51986_0 + qm31_const::<2, 0, 0, 0>()),
             input_state_2_id_col2,
-            self.memory_address_to_id_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_2,
+            ref numerator_2,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_id_evaluate(
             (instance_addr_tmp_51986_0 + qm31_const::<3, 0, 0, 0>()),
             output_state_0_id_col3,
-            self.memory_address_to_id_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_3,
+            ref numerator_3,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_id_evaluate(
             (instance_addr_tmp_51986_0 + qm31_const::<4, 0, 0, 0>()),
             output_state_1_id_col4,
-            self.memory_address_to_id_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_4,
+            ref numerator_4,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_id_evaluate(
             (instance_addr_tmp_51986_0 + qm31_const::<5, 0, 0, 0>()),
             output_state_2_id_col5,
-            self.memory_address_to_id_lookup_elements,
+            self.common_lookup_elements,
             ref memory_address_to_id_sum_5,
+            ref numerator_5,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
 
         poseidon_aggregator_sum_6 = self
-            .poseidon_aggregator_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_state_0_id_col0, input_state_1_id_col1, input_state_2_id_col2,
-                    output_state_0_id_col3, output_state_1_id_col4, output_state_2_id_col5,
-                ],
+                    qm31_const::<1551892206, 0, 0, 0>(), input_state_0_id_col0,
+                    input_state_1_id_col1, input_state_2_id_col2, output_state_0_id_col3,
+                    output_state_1_id_col4, output_state_2_id_col5,
+                ]
+                    .span(),
             );
+        numerator_6 = qm31_const::<1, 0, 0, 0>();
 
         lookup_constraints(
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
             claimed_sum,
+            numerator_0,
+            numerator_1,
+            numerator_2,
+            numerator_3,
+            numerator_4,
+            numerator_5,
+            numerator_6,
             column_size,
             ref interaction_trace_mask_values,
             memory_address_to_id_sum_0,
@@ -216,9 +227,15 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
 
 fn lookup_constraints(
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
     claimed_sum: QM31,
+    numerator_0: QM31,
+    numerator_1: QM31,
+    numerator_2: QM31,
+    numerator_3: QM31,
+    numerator_4: QM31,
+    numerator_5: QM31,
+    numerator_6: QM31,
     column_size: M31,
     ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
     memory_address_to_id_sum_0: QM31,
@@ -280,9 +297,8 @@ fn lookup_constraints(
     ))
         * memory_address_to_id_sum_0
         * memory_address_to_id_sum_1)
-        - memory_address_to_id_sum_0
-        - memory_address_to_id_sum_1)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_0 * numerator_1)
+        - (memory_address_to_id_sum_1 * numerator_0));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -291,9 +307,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col0, trace_2_col1, trace_2_col2, trace_2_col3]))
         * memory_address_to_id_sum_2
         * memory_address_to_id_sum_3)
-        - memory_address_to_id_sum_2
-        - memory_address_to_id_sum_3)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_2 * numerator_3)
+        - (memory_address_to_id_sum_3 * numerator_2));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -302,9 +317,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col4, trace_2_col5, trace_2_col6, trace_2_col7]))
         * memory_address_to_id_sum_4
         * memory_address_to_id_sum_5)
-        - memory_address_to_id_sum_4
-        - memory_address_to_id_sum_5)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_4 * numerator_5)
+        - (memory_address_to_id_sum_5 * numerator_4));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -316,8 +330,7 @@ fn lookup_constraints(
         )
         + (claimed_sum * (column_size.inverse().into())))
         * poseidon_aggregator_sum_6)
-        - qm31_const::<1, 0, 0, 0>())
-        * domain_vanishing_eval_inv;
+        - numerator_6);
     sum = sum * random_coeff + constraint_quotient;
 }
 #[cfg(and(test, feature: "qm31_opcode"))]
@@ -325,17 +338,16 @@ mod tests {
     use core::array::ArrayImpl;
     use core::num::traits::Zero;
     #[allow(unused_imports)]
-    use stwo_cairo_air::preprocessed_columns::{NUM_PREPROCESSED_COLUMNS, seq_column_idx};
+    use stwo_cairo_air::preprocessed_columns::*;
     #[allow(unused_imports)]
     use stwo_constraint_framework::{
-        LookupElements, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
+        LookupElementsTrait, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
     };
-    use stwo_verifier_core::circle::CirclePoint;
     use stwo_verifier_core::fields::qm31::{QM31, QM31Impl, QM31Trait, qm31_const};
     use crate::cairo_component::*;
     use crate::components::sample_evaluations::*;
     #[allow(unused_imports)]
-    use crate::test_utils::{make_interaction_trace, make_lookup_elements, preprocessed_mask_add};
+    use crate::test_utils::{make_interaction_trace, preprocessed_mask_add};
     use crate::utils::*;
     use super::{Claim, Component, InteractionClaim};
 
@@ -346,20 +358,12 @@ mod tests {
             interaction_claim: InteractionClaim {
                 claimed_sum: qm31_const::<1398335417, 314974026, 1722107152, 821933968>(),
             },
-            memory_address_to_id_lookup_elements: make_lookup_elements(
-                qm31_const::<1842771211, 1960835386, 1582137647, 1333140033>(),
-                qm31_const::<1360491305, 950648792, 556642685, 2096522554>(),
-            ),
-            poseidon_aggregator_lookup_elements: make_lookup_elements(
-                qm31_const::<1205297475, 1632365367, 724373964, 1122759762>(),
-                qm31_const::<1682536330, 1446762744, 501541604, 1778350693>(),
+            common_lookup_elements: LookupElementsTrait::from_z_alpha(
+                qm31_const::<445623802, 202571636, 1360224996, 131355117>(),
+                qm31_const::<476823935, 939223384, 62486082, 122423602>(),
             ),
         };
         let mut sum: QM31 = Zero::zero();
-        let point = CirclePoint {
-            x: qm31_const::<461666434, 38651694, 1083586041, 510305943>(),
-            y: qm31_const::<817798294, 862569777, 2091320744, 1178484122>(),
-        };
 
         let mut preprocessed_trace = PreprocessedMaskValues { values: Default::default() };
         let mut preprocessed_trace = preprocessed_mask_add(
@@ -393,7 +397,6 @@ mod tests {
                 ref trace_columns,
                 ref interaction_columns,
                 qm31_const::<474642921, 876336632, 1911695779, 974600512>(),
-                point,
             );
         preprocessed_trace.validate_usage();
         assert_eq!(sum, QM31Trait::from_fixed_array(POSEIDON_BUILTIN_SAMPLE_EVAL_RESULT))

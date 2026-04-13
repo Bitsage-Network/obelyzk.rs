@@ -3,7 +3,7 @@
 use crate::prelude::*;
 
 pub const N_TRACE_COLUMNS: usize = 1;
-const LOG_SIZE: u32 = 4;
+pub const LOG_SIZE: u32 = 4;
 
 #[derive(Drop, Serde, Copy)]
 pub struct Claim {}
@@ -39,7 +39,7 @@ pub impl InteractionClaimImpl of InteractionClaimTrait {
 pub struct Component {
     pub claim: Claim,
     pub interaction_claim: InteractionClaim,
-    pub blake_round_sigma_lookup_elements: crate::BlakeRoundSigmaElements,
+    pub common_lookup_elements: CommonLookupElements,
 }
 
 pub impl NewComponentImpl of NewComponent<Component> {
@@ -49,12 +49,12 @@ pub impl NewComponentImpl of NewComponent<Component> {
     fn new(
         claim: @Claim,
         interaction_claim: @InteractionClaim,
-        interaction_elements: @CairoInteractionElements,
+        common_lookup_elements: @CommonLookupElements,
     ) -> Component {
         Component {
             claim: *claim,
             interaction_claim: *interaction_claim,
-            blake_round_sigma_lookup_elements: interaction_elements.blake_round_sigma.clone(),
+            common_lookup_elements: common_lookup_elements.clone(),
         }
     }
 }
@@ -67,14 +67,12 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         ref trace_mask_values: ColumnSpan<Span<QM31>>,
         ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
         random_coeff: QM31,
-        point: CirclePoint<QM31>,
     ) {
         let log_size = LOG_SIZE;
-        let trace_domain = CanonicCosetImpl::new(log_size);
-        let domain_vanishing_eval_inv = trace_domain.eval_vanishing(point).inverse();
         let claimed_sum = *self.interaction_claim.claimed_sum;
         let column_size = m31(pow2(log_size));
         let mut blake_round_sigma_sum_0: QM31 = Zero::zero();
+        let mut numerator_0: QM31 = Zero::zero();
         let seq_4 = preprocessed_mask_values.get_and_mark_used(SEQ_4_IDX);
         let blake_sigma_0 = preprocessed_mask_values.get_and_mark_used(BLAKE_SIGMA_0_IDX);
         let blake_sigma_1 = preprocessed_mask_values.get_and_mark_used(BLAKE_SIGMA_1_IDX);
@@ -93,28 +91,30 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         let blake_sigma_14 = preprocessed_mask_values.get_and_mark_used(BLAKE_SIGMA_14_IDX);
         let blake_sigma_15 = preprocessed_mask_values.get_and_mark_used(BLAKE_SIGMA_15_IDX);
 
-        let [enabler]: [Span<QM31>; 1] = (*trace_mask_values.multi_pop_front().unwrap()).unbox();
-        let [enabler]: [QM31; 1] = (*enabler.try_into().unwrap()).unbox();
+        let [multiplicity_0_col0]: [Span<QM31>; 1] = (*trace_mask_values.multi_pop_front().unwrap())
+            .unbox();
+        let [multiplicity_0_col0]: [QM31; 1] = (*multiplicity_0_col0.try_into().unwrap()).unbox();
 
         core::internal::revoke_ap_tracking();
 
         blake_round_sigma_sum_0 = self
-            .blake_round_sigma_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    seq_4, blake_sigma_0, blake_sigma_1, blake_sigma_2, blake_sigma_3,
-                    blake_sigma_4, blake_sigma_5, blake_sigma_6, blake_sigma_7, blake_sigma_8,
-                    blake_sigma_9, blake_sigma_10, blake_sigma_11, blake_sigma_12, blake_sigma_13,
-                    blake_sigma_14, blake_sigma_15,
-                ],
+                    qm31_const::<1805967942, 0, 0, 0>(), seq_4, blake_sigma_0, blake_sigma_1,
+                    blake_sigma_2, blake_sigma_3, blake_sigma_4, blake_sigma_5, blake_sigma_6,
+                    blake_sigma_7, blake_sigma_8, blake_sigma_9, blake_sigma_10, blake_sigma_11,
+                    blake_sigma_12, blake_sigma_13, blake_sigma_14, blake_sigma_15,
+                ]
+                    .span(),
             );
+        numerator_0 = multiplicity_0_col0;
 
         lookup_constraints(
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
             claimed_sum,
-            enabler,
+            numerator_0,
             column_size,
             ref interaction_trace_mask_values,
             blake_round_sigma_sum_0,
@@ -125,10 +125,9 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
 
 fn lookup_constraints(
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
     claimed_sum: QM31,
-    enabler: QM31,
+    numerator_0: QM31,
     column_size: M31,
     ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
     blake_round_sigma_sum_0: QM31,
@@ -154,7 +153,147 @@ fn lookup_constraints(
         )
         + (claimed_sum * (column_size.inverse().into())))
         * blake_round_sigma_sum_0)
-        + enabler)
-        * domain_vanishing_eval_inv;
+        + numerator_0);
     sum = sum * random_coeff + constraint_quotient;
+}
+#[cfg(and(test, feature: "qm31_opcode"))]
+mod tests {
+    use core::array::ArrayImpl;
+    use core::num::traits::Zero;
+    #[allow(unused_imports)]
+    use stwo_cairo_air::preprocessed_columns::*;
+    #[allow(unused_imports)]
+    use stwo_constraint_framework::{
+        LookupElementsTrait, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
+    };
+    use stwo_verifier_core::fields::qm31::{QM31, QM31Impl, QM31Trait, qm31_const};
+    use crate::cairo_component::*;
+    use crate::components::sample_evaluations::*;
+    #[allow(unused_imports)]
+    use crate::test_utils::{make_interaction_trace, preprocessed_mask_add};
+    use crate::utils::*;
+    use super::{Claim, Component, InteractionClaim};
+
+    #[test]
+    fn test_evaluation_result() {
+        let component = Component {
+            claim: Claim {},
+            interaction_claim: InteractionClaim {
+                claimed_sum: qm31_const::<1398335417, 314974026, 1722107152, 821933968>(),
+            },
+            common_lookup_elements: LookupElementsTrait::from_z_alpha(
+                qm31_const::<445623802, 202571636, 1360224996, 131355117>(),
+                qm31_const::<476823935, 939223384, 62486082, 122423602>(),
+            ),
+        };
+        let mut sum: QM31 = Zero::zero();
+
+        let mut preprocessed_trace = PreprocessedMaskValues { values: Default::default() };
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            SEQ_4_IDX,
+            qm31_const::<763482793, 402222854, 1759975343, 865942395>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_0_IDX,
+            qm31_const::<1541575468, 910566768, 1277642954, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_1_IDX,
+            qm31_const::<1474466289, 776349040, 1210534090, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_2_IDX,
+            qm31_const::<1407357110, 642131312, 1143425226, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_3_IDX,
+            qm31_const::<1340247931, 507913584, 1076316362, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_4_IDX,
+            qm31_const::<1810012184, 1447437680, 1546078410, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_5_IDX,
+            qm31_const::<1742903005, 1313219952, 1478969546, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_6_IDX,
+            qm31_const::<1675793826, 1179002224, 1411860682, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_7_IDX,
+            qm31_const::<1608684647, 1044784496, 1344751818, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_8_IDX,
+            qm31_const::<2078448900, 1984308592, 1814513866, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_9_IDX,
+            qm31_const::<2011339721, 1850090864, 1747405002, 337722398>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_10_IDX,
+            qm31_const::<112615900, 18292853, 1092454797, 265412759>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_11_IDX,
+            qm31_const::<179725079, 152510581, 1159563661, 265412759>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_12_IDX,
+            qm31_const::<2125881189, 1897341043, 958237068, 265412759>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_13_IDX,
+            qm31_const::<45506721, 2031558772, 1025345932, 265412759>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_14_IDX,
+            qm31_const::<1991662831, 1628905587, 824019340, 265412759>(),
+        );
+        let mut preprocessed_trace = preprocessed_mask_add(
+            preprocessed_trace,
+            BLAKE_SIGMA_15_IDX,
+            qm31_const::<2058772010, 1763123315, 891128204, 265412759>(),
+        );
+
+        let mut trace_columns = [
+            [qm31_const::<1659099300, 905558730, 651199673, 1375009625>()].span(),
+        ]
+            .span();
+        let interaction_values = array![
+            qm31_const::<1005168032, 79980996, 1847888101, 1941984119>(),
+        ];
+        let mut interaction_columns = make_interaction_trace(
+            interaction_values, qm31_const::<1115374022, 1127856551, 489657863, 643630026>(),
+        );
+        component
+            .evaluate_constraints_at_point(
+                ref sum,
+                ref preprocessed_trace,
+                ref trace_columns,
+                ref interaction_columns,
+                qm31_const::<474642921, 876336632, 1911695779, 974600512>(),
+            );
+        preprocessed_trace.validate_usage();
+        assert_eq!(sum, QM31Trait::from_fixed_array(BLAKE_ROUND_SIGMA_SAMPLE_EVAL_RESULT))
+    }
 }

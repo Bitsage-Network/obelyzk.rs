@@ -48,14 +48,7 @@ pub impl InteractionClaimImpl of InteractionClaimTrait {
 pub struct Component {
     pub claim: Claim,
     pub interaction_claim: InteractionClaim,
-    pub range_check_9_9_lookup_elements: crate::RangeCheck_9_9Elements,
-    pub range_check_18_lookup_elements: crate::RangeCheck_18Elements,
-    pub range_check_9_9_b_lookup_elements: crate::RangeCheck_9_9_BElements,
-    pub range_check_18_b_lookup_elements: crate::RangeCheck_18_BElements,
-    pub range_check_9_9_c_lookup_elements: crate::RangeCheck_9_9_CElements,
-    pub range_check_9_9_d_lookup_elements: crate::RangeCheck_9_9_DElements,
-    pub range_check_9_9_e_lookup_elements: crate::RangeCheck_9_9_EElements,
-    pub range_check_252_width_27_lookup_elements: crate::RangeCheck252Width27Elements,
+    pub common_lookup_elements: CommonLookupElements,
 }
 
 pub impl NewComponentImpl of NewComponent<Component> {
@@ -65,21 +58,12 @@ pub impl NewComponentImpl of NewComponent<Component> {
     fn new(
         claim: @Claim,
         interaction_claim: @InteractionClaim,
-        interaction_elements: @CairoInteractionElements,
+        common_lookup_elements: @CommonLookupElements,
     ) -> Component {
         Component {
             claim: *claim,
             interaction_claim: *interaction_claim,
-            range_check_9_9_lookup_elements: interaction_elements.range_checks.rc_9_9.clone(),
-            range_check_18_lookup_elements: interaction_elements.range_checks.rc_18.clone(),
-            range_check_9_9_b_lookup_elements: interaction_elements.range_checks.rc_9_9_b.clone(),
-            range_check_18_b_lookup_elements: interaction_elements.range_checks.rc_18_b.clone(),
-            range_check_9_9_c_lookup_elements: interaction_elements.range_checks.rc_9_9_c.clone(),
-            range_check_9_9_d_lookup_elements: interaction_elements.range_checks.rc_9_9_d.clone(),
-            range_check_9_9_e_lookup_elements: interaction_elements.range_checks.rc_9_9_e.clone(),
-            range_check_252_width_27_lookup_elements: interaction_elements
-                .range_check_252_width_27
-                .clone(),
+            common_lookup_elements: common_lookup_elements.clone(),
         }
     }
 }
@@ -92,28 +76,40 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         ref trace_mask_values: ColumnSpan<Span<QM31>>,
         ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
         random_coeff: QM31,
-        point: CirclePoint<QM31>,
     ) {
         let log_size = *(self.claim.log_size);
-        let trace_domain = CanonicCosetImpl::new(log_size);
-        let domain_vanishing_eval_inv = trace_domain.eval_vanishing(point).inverse();
         let claimed_sum = *self.interaction_claim.claimed_sum;
         let column_size = m31(pow2(log_size));
         let mut range_check_9_9_sum_0: QM31 = Zero::zero();
+        let mut numerator_0: QM31 = Zero::zero();
         let mut range_check_18_sum_1: QM31 = Zero::zero();
+        let mut numerator_1: QM31 = Zero::zero();
         let mut range_check_18_sum_2: QM31 = Zero::zero();
+        let mut numerator_2: QM31 = Zero::zero();
         let mut range_check_9_9_b_sum_3: QM31 = Zero::zero();
+        let mut numerator_3: QM31 = Zero::zero();
         let mut range_check_18_b_sum_4: QM31 = Zero::zero();
+        let mut numerator_4: QM31 = Zero::zero();
         let mut range_check_18_sum_5: QM31 = Zero::zero();
+        let mut numerator_5: QM31 = Zero::zero();
         let mut range_check_9_9_c_sum_6: QM31 = Zero::zero();
+        let mut numerator_6: QM31 = Zero::zero();
         let mut range_check_18_sum_7: QM31 = Zero::zero();
+        let mut numerator_7: QM31 = Zero::zero();
         let mut range_check_18_sum_8: QM31 = Zero::zero();
+        let mut numerator_8: QM31 = Zero::zero();
         let mut range_check_9_9_d_sum_9: QM31 = Zero::zero();
+        let mut numerator_9: QM31 = Zero::zero();
         let mut range_check_18_b_sum_10: QM31 = Zero::zero();
+        let mut numerator_10: QM31 = Zero::zero();
         let mut range_check_18_sum_11: QM31 = Zero::zero();
+        let mut numerator_11: QM31 = Zero::zero();
         let mut range_check_9_9_e_sum_12: QM31 = Zero::zero();
+        let mut numerator_12: QM31 = Zero::zero();
         let mut range_check_18_sum_13: QM31 = Zero::zero();
+        let mut numerator_13: QM31 = Zero::zero();
         let mut range_check_252_width_27_sum_14: QM31 = Zero::zero();
+        let mut numerator_14: QM31 = Zero::zero();
 
         let [
             input_limb_0_col0,
@@ -135,7 +131,7 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             limb_6_high_part_col16,
             limb_7_low_part_col17,
             limb_8_high_part_col18,
-            enabler,
+            enabler_col19,
         ]: [Span<QM31>; 20] =
             (*trace_mask_values
             .multi_pop_front()
@@ -169,103 +165,193 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             .unbox();
         let [limb_8_high_part_col18]: [QM31; 1] = (*limb_8_high_part_col18.try_into().unwrap())
             .unbox();
-        let [enabler]: [QM31; 1] = (*enabler.try_into().unwrap()).unbox();
+        let [enabler_col19]: [QM31; 1] = (*enabler_col19.try_into().unwrap()).unbox();
 
         core::internal::revoke_ap_tracking();
 
-        let constraint_quotient = (enabler * enabler - enabler) * domain_vanishing_eval_inv;
-        sum = sum * random_coeff + constraint_quotient;
-
         range_check_9_9_sum_0 = self
-            .range_check_9_9_lookup_elements
-            .combine_qm31([limb_0_high_part_col10, limb_1_low_part_col11]);
+            .common_lookup_elements
+            .combine_qm31(
+                [qm31_const::<517791011, 0, 0, 0>(), limb_0_high_part_col10, limb_1_low_part_col11]
+                    .span(),
+            );
+        numerator_0 = qm31_const::<1, 0, 0, 0>();
 
         range_check_18_sum_1 = self
-            .range_check_18_lookup_elements
-            .combine_qm31(
-                [(input_limb_0_col0 - (limb_0_high_part_col10 * qm31_const::<262144, 0, 0, 0>()))],
-            );
-
-        range_check_18_sum_2 = self
-            .range_check_18_lookup_elements
-            .combine_qm31(
-                [((input_limb_1_col1 - limb_1_low_part_col11) * qm31_const::<4194304, 0, 0, 0>())],
-            );
-
-        range_check_9_9_b_sum_3 = self
-            .range_check_9_9_b_lookup_elements
-            .combine_qm31([limb_2_high_part_col12, limb_3_low_part_col13]);
-
-        range_check_18_b_sum_4 = self
-            .range_check_18_b_lookup_elements
-            .combine_qm31(
-                [(input_limb_2_col2 - (limb_2_high_part_col12 * qm31_const::<262144, 0, 0, 0>()))],
-            );
-
-        range_check_18_sum_5 = self
-            .range_check_18_lookup_elements
-            .combine_qm31(
-                [((input_limb_3_col3 - limb_3_low_part_col13) * qm31_const::<4194304, 0, 0, 0>())],
-            );
-
-        range_check_9_9_c_sum_6 = self
-            .range_check_9_9_c_lookup_elements
-            .combine_qm31([limb_4_high_part_col14, limb_5_low_part_col15]);
-
-        range_check_18_sum_7 = self
-            .range_check_18_lookup_elements
-            .combine_qm31(
-                [(input_limb_4_col4 - (limb_4_high_part_col14 * qm31_const::<262144, 0, 0, 0>()))],
-            );
-
-        range_check_18_sum_8 = self
-            .range_check_18_lookup_elements
-            .combine_qm31(
-                [((input_limb_5_col5 - limb_5_low_part_col15) * qm31_const::<4194304, 0, 0, 0>())],
-            );
-
-        range_check_9_9_d_sum_9 = self
-            .range_check_9_9_d_lookup_elements
-            .combine_qm31([limb_6_high_part_col16, limb_7_low_part_col17]);
-
-        range_check_18_b_sum_10 = self
-            .range_check_18_b_lookup_elements
-            .combine_qm31(
-                [(input_limb_6_col6 - (limb_6_high_part_col16 * qm31_const::<262144, 0, 0, 0>()))],
-            );
-
-        range_check_18_sum_11 = self
-            .range_check_18_lookup_elements
-            .combine_qm31(
-                [((input_limb_7_col7 - limb_7_low_part_col17) * qm31_const::<4194304, 0, 0, 0>())],
-            );
-
-        range_check_9_9_e_sum_12 = self
-            .range_check_9_9_e_lookup_elements
-            .combine_qm31([limb_8_high_part_col18, input_limb_9_col9]);
-
-        range_check_18_sum_13 = self
-            .range_check_18_lookup_elements
-            .combine_qm31(
-                [(input_limb_8_col8 - (limb_8_high_part_col18 * qm31_const::<262144, 0, 0, 0>()))],
-            );
-
-        range_check_252_width_27_sum_14 = self
-            .range_check_252_width_27_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_0_col0, input_limb_1_col1, input_limb_2_col2, input_limb_3_col3,
-                    input_limb_4_col4, input_limb_5_col5, input_limb_6_col6, input_limb_7_col7,
-                    input_limb_8_col8, input_limb_9_col9,
-                ],
+                    qm31_const::<1109051422, 0, 0, 0>(),
+                    (input_limb_0_col0
+                        - (limb_0_high_part_col10 * qm31_const::<262144, 0, 0, 0>())),
+                ]
+                    .span(),
             );
+        numerator_1 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_18_sum_2 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1109051422, 0, 0, 0>(),
+                    ((input_limb_1_col1 - limb_1_low_part_col11)
+                        * qm31_const::<4194304, 0, 0, 0>()),
+                ]
+                    .span(),
+            );
+        numerator_2 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_9_9_b_sum_3 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [qm31_const::<1897792095, 0, 0, 0>(), limb_2_high_part_col12, limb_3_low_part_col13]
+                    .span(),
+            );
+        numerator_3 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_18_b_sum_4 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1424798916, 0, 0, 0>(),
+                    (input_limb_2_col2
+                        - (limb_2_high_part_col12 * qm31_const::<262144, 0, 0, 0>())),
+                ]
+                    .span(),
+            );
+        numerator_4 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_18_sum_5 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1109051422, 0, 0, 0>(),
+                    ((input_limb_3_col3 - limb_3_low_part_col13)
+                        * qm31_const::<4194304, 0, 0, 0>()),
+                ]
+                    .span(),
+            );
+        numerator_5 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_9_9_c_sum_6 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [qm31_const::<1881014476, 0, 0, 0>(), limb_4_high_part_col14, limb_5_low_part_col15]
+                    .span(),
+            );
+        numerator_6 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_18_sum_7 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1109051422, 0, 0, 0>(),
+                    (input_limb_4_col4
+                        - (limb_4_high_part_col14 * qm31_const::<262144, 0, 0, 0>())),
+                ]
+                    .span(),
+            );
+        numerator_7 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_18_sum_8 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1109051422, 0, 0, 0>(),
+                    ((input_limb_5_col5 - limb_5_low_part_col15)
+                        * qm31_const::<4194304, 0, 0, 0>()),
+                ]
+                    .span(),
+            );
+        numerator_8 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_9_9_d_sum_9 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [qm31_const::<1864236857, 0, 0, 0>(), limb_6_high_part_col16, limb_7_low_part_col17]
+                    .span(),
+            );
+        numerator_9 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_18_b_sum_10 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1424798916, 0, 0, 0>(),
+                    (input_limb_6_col6
+                        - (limb_6_high_part_col16 * qm31_const::<262144, 0, 0, 0>())),
+                ]
+                    .span(),
+            );
+        numerator_10 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_18_sum_11 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1109051422, 0, 0, 0>(),
+                    ((input_limb_7_col7 - limb_7_low_part_col17)
+                        * qm31_const::<4194304, 0, 0, 0>()),
+                ]
+                    .span(),
+            );
+        numerator_11 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_9_9_e_sum_12 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [qm31_const::<1847459238, 0, 0, 0>(), limb_8_high_part_col18, input_limb_9_col9]
+                    .span(),
+            );
+        numerator_12 = qm31_const::<1, 0, 0, 0>();
+
+        range_check_18_sum_13 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1109051422, 0, 0, 0>(),
+                    (input_limb_8_col8
+                        - (limb_8_high_part_col18 * qm31_const::<262144, 0, 0, 0>())),
+                ]
+                    .span(),
+            );
+        numerator_13 = qm31_const::<1, 0, 0, 0>();
+
+        // Constraint - Enabler is a bit
+        let constraint_quotient = (((enabler_col19 * enabler_col19) - enabler_col19));
+        sum = sum * random_coeff + constraint_quotient;
+
+        range_check_252_width_27_sum_14 = self
+            .common_lookup_elements
+            .combine_qm31(
+                [
+                    qm31_const::<1090315331, 0, 0, 0>(), input_limb_0_col0, input_limb_1_col1,
+                    input_limb_2_col2, input_limb_3_col3, input_limb_4_col4, input_limb_5_col5,
+                    input_limb_6_col6, input_limb_7_col7, input_limb_8_col8, input_limb_9_col9,
+                ]
+                    .span(),
+            );
+        numerator_14 = enabler_col19;
 
         lookup_constraints(
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
             claimed_sum,
-            enabler,
+            numerator_0,
+            numerator_1,
+            numerator_2,
+            numerator_3,
+            numerator_4,
+            numerator_5,
+            numerator_6,
+            numerator_7,
+            numerator_8,
+            numerator_9,
+            numerator_10,
+            numerator_11,
+            numerator_12,
+            numerator_13,
+            numerator_14,
             column_size,
             ref interaction_trace_mask_values,
             range_check_9_9_sum_0,
@@ -290,10 +376,23 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
 
 fn lookup_constraints(
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
     claimed_sum: QM31,
-    enabler: QM31,
+    numerator_0: QM31,
+    numerator_1: QM31,
+    numerator_2: QM31,
+    numerator_3: QM31,
+    numerator_4: QM31,
+    numerator_5: QM31,
+    numerator_6: QM31,
+    numerator_7: QM31,
+    numerator_8: QM31,
+    numerator_9: QM31,
+    numerator_10: QM31,
+    numerator_11: QM31,
+    numerator_12: QM31,
+    numerator_13: QM31,
+    numerator_14: QM31,
     column_size: M31,
     ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
     range_check_9_9_sum_0: QM31,
@@ -395,9 +494,8 @@ fn lookup_constraints(
     ))
         * range_check_9_9_sum_0
         * range_check_18_sum_1)
-        - range_check_9_9_sum_0
-        - range_check_18_sum_1)
-        * domain_vanishing_eval_inv;
+        - (range_check_9_9_sum_0 * numerator_1)
+        - (range_check_18_sum_1 * numerator_0));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -406,9 +504,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col0, trace_2_col1, trace_2_col2, trace_2_col3]))
         * range_check_18_sum_2
         * range_check_9_9_b_sum_3)
-        - range_check_18_sum_2
-        - range_check_9_9_b_sum_3)
-        * domain_vanishing_eval_inv;
+        - (range_check_18_sum_2 * numerator_3)
+        - (range_check_9_9_b_sum_3 * numerator_2));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -417,9 +514,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col4, trace_2_col5, trace_2_col6, trace_2_col7]))
         * range_check_18_b_sum_4
         * range_check_18_sum_5)
-        - range_check_18_b_sum_4
-        - range_check_18_sum_5)
-        * domain_vanishing_eval_inv;
+        - (range_check_18_b_sum_4 * numerator_5)
+        - (range_check_18_sum_5 * numerator_4));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -428,9 +524,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col8, trace_2_col9, trace_2_col10, trace_2_col11]))
         * range_check_9_9_c_sum_6
         * range_check_18_sum_7)
-        - range_check_9_9_c_sum_6
-        - range_check_18_sum_7)
-        * domain_vanishing_eval_inv;
+        - (range_check_9_9_c_sum_6 * numerator_7)
+        - (range_check_18_sum_7 * numerator_6));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -441,9 +536,8 @@ fn lookup_constraints(
         ))
         * range_check_18_sum_8
         * range_check_9_9_d_sum_9)
-        - range_check_18_sum_8
-        - range_check_9_9_d_sum_9)
-        * domain_vanishing_eval_inv;
+        - (range_check_18_sum_8 * numerator_9)
+        - (range_check_9_9_d_sum_9 * numerator_8));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -454,9 +548,8 @@ fn lookup_constraints(
         ))
         * range_check_18_b_sum_10
         * range_check_18_sum_11)
-        - range_check_18_b_sum_10
-        - range_check_18_sum_11)
-        * domain_vanishing_eval_inv;
+        - (range_check_18_b_sum_10 * numerator_11)
+        - (range_check_18_sum_11 * numerator_10));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -467,9 +560,8 @@ fn lookup_constraints(
         ))
         * range_check_9_9_e_sum_12
         * range_check_18_sum_13)
-        - range_check_9_9_e_sum_12
-        - range_check_18_sum_13)
-        * domain_vanishing_eval_inv;
+        - (range_check_9_9_e_sum_12 * numerator_13)
+        - (range_check_18_sum_13 * numerator_12));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -481,8 +573,7 @@ fn lookup_constraints(
         )
         + (claimed_sum * (column_size.inverse().into())))
         * range_check_252_width_27_sum_14)
-        + enabler)
-        * domain_vanishing_eval_inv;
+        + numerator_14);
     sum = sum * random_coeff + constraint_quotient;
 }
 #[cfg(and(test, feature: "qm31_opcode"))]
@@ -490,17 +581,16 @@ mod tests {
     use core::array::ArrayImpl;
     use core::num::traits::Zero;
     #[allow(unused_imports)]
-    use stwo_cairo_air::preprocessed_columns::{NUM_PREPROCESSED_COLUMNS, seq_column_idx};
+    use stwo_cairo_air::preprocessed_columns::*;
     #[allow(unused_imports)]
     use stwo_constraint_framework::{
-        LookupElements, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
+        LookupElementsTrait, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
     };
-    use stwo_verifier_core::circle::CirclePoint;
     use stwo_verifier_core::fields::qm31::{QM31, QM31Impl, QM31Trait, qm31_const};
     use crate::cairo_component::*;
     use crate::components::sample_evaluations::*;
     #[allow(unused_imports)]
-    use crate::test_utils::{make_interaction_trace, make_lookup_elements, preprocessed_mask_add};
+    use crate::test_utils::{make_interaction_trace, preprocessed_mask_add};
     use crate::utils::*;
     use super::{Claim, Component, InteractionClaim};
 
@@ -511,44 +601,12 @@ mod tests {
             interaction_claim: InteractionClaim {
                 claimed_sum: qm31_const::<1398335417, 314974026, 1722107152, 821933968>(),
             },
-            range_check_252_width_27_lookup_elements: make_lookup_elements(
-                qm31_const::<1766976110, 1642004522, 1010732433, 533565951>(),
-                qm31_const::<1621013403, 1559059729, 2135184329, 1791547987>(),
-            ),
-            range_check_18_lookup_elements: make_lookup_elements(
-                qm31_const::<245050921, 1103573213, 1520416965, 1202958302>(),
-                qm31_const::<120822322, 836122054, 943800857, 299339130>(),
-            ),
-            range_check_18_b_lookup_elements: make_lookup_elements(
-                qm31_const::<1246712024, 907747525, 1022838376, 2052084828>(),
-                qm31_const::<710233050, 213531256, 91248546, 1462652938>(),
-            ),
-            range_check_9_9_lookup_elements: make_lookup_elements(
-                qm31_const::<989827041, 1225728465, 1602128278, 85336129>(),
-                qm31_const::<1454375758, 8286589, 1713209810, 1602293816>(),
-            ),
-            range_check_9_9_b_lookup_elements: make_lookup_elements(
-                qm31_const::<676159317, 930503385, 1105489908, 1544380136>(),
-                qm31_const::<2129889251, 701815395, 1830411342, 2061777868>(),
-            ),
-            range_check_9_9_c_lookup_elements: make_lookup_elements(
-                qm31_const::<1260569667, 2138441994, 1709448741, 1544373155>(),
-                qm31_const::<1022885008, 826842007, 1709607881, 1909661957>(),
-            ),
-            range_check_9_9_d_lookup_elements: make_lookup_elements(
-                qm31_const::<1551136661, 662010924, 2044956999, 1544361134>(),
-                qm31_const::<2005146556, 852740197, 532387412, 1763320973>(),
-            ),
-            range_check_9_9_e_lookup_elements: make_lookup_elements(
-                qm31_const::<2135547011, 1869949533, 501432185, 1544354154>(),
-                qm31_const::<1771048649, 362596150, 1943805170, 690289666>(),
+            common_lookup_elements: LookupElementsTrait::from_z_alpha(
+                qm31_const::<445623802, 202571636, 1360224996, 131355117>(),
+                qm31_const::<476823935, 939223384, 62486082, 122423602>(),
             ),
         };
         let mut sum: QM31 = Zero::zero();
-        let point = CirclePoint {
-            x: qm31_const::<461666434, 38651694, 1083586041, 510305943>(),
-            y: qm31_const::<817798294, 862569777, 2091320744, 1178484122>(),
-        };
 
         let mut preprocessed_trace = PreprocessedMaskValues { values: Default::default() };
 
@@ -572,7 +630,7 @@ mod tests {
             [qm31_const::<1718117409, 376642659, 1925018455, 343880121>()].span(),
             [qm31_const::<1785226588, 510860387, 1992127319, 343880121>()].span(),
             [qm31_const::<1315462335, 1718819938, 1522365270, 343880121>()].span(),
-            [qm31_const::<179325277, 825275894, 97341591, 1357105975>()].span(),
+            [qm31_const::<1382571514, 1853037666, 1589474134, 343880121>()].span(),
         ]
             .span();
         let interaction_values = array![
@@ -595,7 +653,6 @@ mod tests {
                 ref trace_columns,
                 ref interaction_columns,
                 qm31_const::<474642921, 876336632, 1911695779, 974600512>(),
-                point,
             );
         preprocessed_trace.validate_usage();
         assert_eq!(sum, QM31Trait::from_fixed_array(RANGE_CHECK_252_WIDTH_27_SAMPLE_EVAL_RESULT))

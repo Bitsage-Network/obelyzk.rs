@@ -51,10 +51,7 @@ pub impl InteractionClaimImpl of InteractionClaimTrait {
 pub struct Component {
     pub claim: Claim,
     pub interaction_claim: InteractionClaim,
-    pub cube_252_lookup_elements: crate::Cube252Elements,
-    pub poseidon_round_keys_lookup_elements: crate::PoseidonRoundKeysElements,
-    pub range_check_3_3_3_3_3_lookup_elements: crate::RangeCheck_3_3_3_3_3Elements,
-    pub poseidon_full_round_chain_lookup_elements: crate::PoseidonFullRoundChainElements,
+    pub common_lookup_elements: CommonLookupElements,
 }
 
 pub impl NewComponentImpl of NewComponent<Component> {
@@ -64,20 +61,12 @@ pub impl NewComponentImpl of NewComponent<Component> {
     fn new(
         claim: @Claim,
         interaction_claim: @InteractionClaim,
-        interaction_elements: @CairoInteractionElements,
+        common_lookup_elements: @CommonLookupElements,
     ) -> Component {
         Component {
             claim: *claim,
             interaction_claim: *interaction_claim,
-            cube_252_lookup_elements: interaction_elements.cube_252.clone(),
-            poseidon_round_keys_lookup_elements: interaction_elements.poseidon_round_keys.clone(),
-            range_check_3_3_3_3_3_lookup_elements: interaction_elements
-                .range_checks
-                .rc_3_3_3_3_3
-                .clone(),
-            poseidon_full_round_chain_lookup_elements: interaction_elements
-                .poseidon_full_round_chain
-                .clone(),
+            common_lookup_elements: common_lookup_elements.clone(),
         }
     }
 }
@@ -90,25 +79,34 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         ref trace_mask_values: ColumnSpan<Span<QM31>>,
         ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
         random_coeff: QM31,
-        point: CirclePoint<QM31>,
     ) {
         let log_size = *(self.claim.log_size);
-        let trace_domain = CanonicCosetImpl::new(log_size);
-        let domain_vanishing_eval_inv = trace_domain.eval_vanishing(point).inverse();
         let claimed_sum = *self.interaction_claim.claimed_sum;
         let column_size = m31(pow2(log_size));
         let mut cube_252_sum_0: QM31 = Zero::zero();
+        let mut numerator_0: QM31 = Zero::zero();
         let mut cube_252_sum_1: QM31 = Zero::zero();
+        let mut numerator_1: QM31 = Zero::zero();
         let mut cube_252_sum_2: QM31 = Zero::zero();
+        let mut numerator_2: QM31 = Zero::zero();
         let mut poseidon_round_keys_sum_3: QM31 = Zero::zero();
+        let mut numerator_3: QM31 = Zero::zero();
         let mut range_check_3_3_3_3_3_sum_4: QM31 = Zero::zero();
+        let mut numerator_4: QM31 = Zero::zero();
         let mut range_check_3_3_3_3_3_sum_5: QM31 = Zero::zero();
+        let mut numerator_5: QM31 = Zero::zero();
         let mut range_check_3_3_3_3_3_sum_6: QM31 = Zero::zero();
+        let mut numerator_6: QM31 = Zero::zero();
         let mut range_check_3_3_3_3_3_sum_7: QM31 = Zero::zero();
+        let mut numerator_7: QM31 = Zero::zero();
         let mut range_check_3_3_3_3_3_sum_8: QM31 = Zero::zero();
+        let mut numerator_8: QM31 = Zero::zero();
         let mut range_check_3_3_3_3_3_sum_9: QM31 = Zero::zero();
+        let mut numerator_9: QM31 = Zero::zero();
         let mut poseidon_full_round_chain_sum_10: QM31 = Zero::zero();
+        let mut numerator_10: QM31 = Zero::zero();
         let mut poseidon_full_round_chain_sum_11: QM31 = Zero::zero();
+        let mut numerator_11: QM31 = Zero::zero();
 
         let [
             input_limb_0_col0,
@@ -236,7 +234,7 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             combination_limb_8_col122,
             combination_limb_9_col123,
             p_coef_col124,
-            enabler,
+            enabler_col125,
         ]: [Span<QM31>; 126] =
             (*trace_mask_values
             .multi_pop_front()
@@ -651,63 +649,69 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             .unwrap())
             .unbox();
         let [p_coef_col124]: [QM31; 1] = (*p_coef_col124.try_into().unwrap()).unbox();
-        let [enabler]: [QM31; 1] = (*enabler.try_into().unwrap()).unbox();
+        let [enabler_col125]: [QM31; 1] = (*enabler_col125.try_into().unwrap()).unbox();
 
         core::internal::revoke_ap_tracking();
 
-        let constraint_quotient = (enabler * enabler - enabler) * domain_vanishing_eval_inv;
-        sum = sum * random_coeff + constraint_quotient;
-
         cube_252_sum_0 = self
-            .cube_252_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_2_col2, input_limb_3_col3, input_limb_4_col4, input_limb_5_col5,
-                    input_limb_6_col6, input_limb_7_col7, input_limb_8_col8, input_limb_9_col9,
-                    input_limb_10_col10, input_limb_11_col11, cube_252_output_limb_0_col32,
-                    cube_252_output_limb_1_col33, cube_252_output_limb_2_col34,
-                    cube_252_output_limb_3_col35, cube_252_output_limb_4_col36,
-                    cube_252_output_limb_5_col37, cube_252_output_limb_6_col38,
-                    cube_252_output_limb_7_col39, cube_252_output_limb_8_col40,
-                    cube_252_output_limb_9_col41,
-                ],
+                    qm31_const::<1987997202, 0, 0, 0>(), input_limb_2_col2, input_limb_3_col3,
+                    input_limb_4_col4, input_limb_5_col5, input_limb_6_col6, input_limb_7_col7,
+                    input_limb_8_col8, input_limb_9_col9, input_limb_10_col10, input_limb_11_col11,
+                    cube_252_output_limb_0_col32, cube_252_output_limb_1_col33,
+                    cube_252_output_limb_2_col34, cube_252_output_limb_3_col35,
+                    cube_252_output_limb_4_col36, cube_252_output_limb_5_col37,
+                    cube_252_output_limb_6_col38, cube_252_output_limb_7_col39,
+                    cube_252_output_limb_8_col40, cube_252_output_limb_9_col41,
+                ]
+                    .span(),
             );
+        numerator_0 = qm31_const::<1, 0, 0, 0>();
 
         cube_252_sum_1 = self
-            .cube_252_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_12_col12, input_limb_13_col13, input_limb_14_col14,
-                    input_limb_15_col15, input_limb_16_col16, input_limb_17_col17,
-                    input_limb_18_col18, input_limb_19_col19, input_limb_20_col20,
-                    input_limb_21_col21, cube_252_output_limb_0_col42, cube_252_output_limb_1_col43,
-                    cube_252_output_limb_2_col44, cube_252_output_limb_3_col45,
-                    cube_252_output_limb_4_col46, cube_252_output_limb_5_col47,
-                    cube_252_output_limb_6_col48, cube_252_output_limb_7_col49,
-                    cube_252_output_limb_8_col50, cube_252_output_limb_9_col51,
-                ],
+                    qm31_const::<1987997202, 0, 0, 0>(), input_limb_12_col12, input_limb_13_col13,
+                    input_limb_14_col14, input_limb_15_col15, input_limb_16_col16,
+                    input_limb_17_col17, input_limb_18_col18, input_limb_19_col19,
+                    input_limb_20_col20, input_limb_21_col21, cube_252_output_limb_0_col42,
+                    cube_252_output_limb_1_col43, cube_252_output_limb_2_col44,
+                    cube_252_output_limb_3_col45, cube_252_output_limb_4_col46,
+                    cube_252_output_limb_5_col47, cube_252_output_limb_6_col48,
+                    cube_252_output_limb_7_col49, cube_252_output_limb_8_col50,
+                    cube_252_output_limb_9_col51,
+                ]
+                    .span(),
             );
+        numerator_1 = qm31_const::<1, 0, 0, 0>();
 
         cube_252_sum_2 = self
-            .cube_252_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_22_col22, input_limb_23_col23, input_limb_24_col24,
-                    input_limb_25_col25, input_limb_26_col26, input_limb_27_col27,
-                    input_limb_28_col28, input_limb_29_col29, input_limb_30_col30,
-                    input_limb_31_col31, cube_252_output_limb_0_col52, cube_252_output_limb_1_col53,
-                    cube_252_output_limb_2_col54, cube_252_output_limb_3_col55,
-                    cube_252_output_limb_4_col56, cube_252_output_limb_5_col57,
-                    cube_252_output_limb_6_col58, cube_252_output_limb_7_col59,
-                    cube_252_output_limb_8_col60, cube_252_output_limb_9_col61,
-                ],
+                    qm31_const::<1987997202, 0, 0, 0>(), input_limb_22_col22, input_limb_23_col23,
+                    input_limb_24_col24, input_limb_25_col25, input_limb_26_col26,
+                    input_limb_27_col27, input_limb_28_col28, input_limb_29_col29,
+                    input_limb_30_col30, input_limb_31_col31, cube_252_output_limb_0_col52,
+                    cube_252_output_limb_1_col53, cube_252_output_limb_2_col54,
+                    cube_252_output_limb_3_col55, cube_252_output_limb_4_col56,
+                    cube_252_output_limb_5_col57, cube_252_output_limb_6_col58,
+                    cube_252_output_limb_7_col59, cube_252_output_limb_8_col60,
+                    cube_252_output_limb_9_col61,
+                ]
+                    .span(),
             );
+        numerator_2 = qm31_const::<1, 0, 0, 0>();
 
         poseidon_round_keys_sum_3 = self
-            .poseidon_round_keys_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_1_col1, poseidon_round_keys_output_limb_0_col62,
+                    qm31_const::<1024310512, 0, 0, 0>(), input_limb_1_col1,
+                    poseidon_round_keys_output_limb_0_col62,
                     poseidon_round_keys_output_limb_1_col63,
                     poseidon_round_keys_output_limb_2_col64,
                     poseidon_round_keys_output_limb_3_col65,
@@ -737,8 +741,10 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
                     poseidon_round_keys_output_limb_27_col89,
                     poseidon_round_keys_output_limb_28_col90,
                     poseidon_round_keys_output_limb_29_col91,
-                ],
+                ]
+                    .span(),
             );
+        numerator_3 = qm31_const::<1, 0, 0, 0>();
         linear_combination_n_4_coefs_3_1_1_1_evaluate(
             [
                 cube_252_output_limb_0_col32, cube_252_output_limb_1_col33,
@@ -773,11 +779,12 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             combination_limb_8_col100,
             combination_limb_9_col101,
             p_coef_col102,
-            self.range_check_3_3_3_3_3_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_3_3_3_3_3_sum_4,
+            ref numerator_4,
             ref range_check_3_3_3_3_3_sum_5,
+            ref numerator_5,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         linear_combination_n_4_coefs_1_m1_1_1_evaluate(
@@ -814,11 +821,12 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             combination_limb_8_col111,
             combination_limb_9_col112,
             p_coef_col113,
-            self.range_check_3_3_3_3_3_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_3_3_3_3_3_sum_6,
+            ref numerator_6,
             ref range_check_3_3_3_3_3_sum_7,
+            ref numerator_7,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         linear_combination_n_4_coefs_1_1_m2_1_evaluate(
@@ -855,55 +863,76 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             combination_limb_8_col122,
             combination_limb_9_col123,
             p_coef_col124,
-            self.range_check_3_3_3_3_3_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_3_3_3_3_3_sum_8,
+            ref numerator_8,
             ref range_check_3_3_3_3_3_sum_9,
+            ref numerator_9,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
 
+        // Constraint - Enabler is a bit
+        let constraint_quotient = (((enabler_col125 * enabler_col125) - enabler_col125));
+        sum = sum * random_coeff + constraint_quotient;
+
         poseidon_full_round_chain_sum_10 = self
-            .poseidon_full_round_chain_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_0_col0, input_limb_1_col1, input_limb_2_col2, input_limb_3_col3,
-                    input_limb_4_col4, input_limb_5_col5, input_limb_6_col6, input_limb_7_col7,
-                    input_limb_8_col8, input_limb_9_col9, input_limb_10_col10, input_limb_11_col11,
-                    input_limb_12_col12, input_limb_13_col13, input_limb_14_col14,
-                    input_limb_15_col15, input_limb_16_col16, input_limb_17_col17,
-                    input_limb_18_col18, input_limb_19_col19, input_limb_20_col20,
-                    input_limb_21_col21, input_limb_22_col22, input_limb_23_col23,
-                    input_limb_24_col24, input_limb_25_col25, input_limb_26_col26,
-                    input_limb_27_col27, input_limb_28_col28, input_limb_29_col29,
-                    input_limb_30_col30, input_limb_31_col31,
-                ],
+                    qm31_const::<1480369132, 0, 0, 0>(), input_limb_0_col0, input_limb_1_col1,
+                    input_limb_2_col2, input_limb_3_col3, input_limb_4_col4, input_limb_5_col5,
+                    input_limb_6_col6, input_limb_7_col7, input_limb_8_col8, input_limb_9_col9,
+                    input_limb_10_col10, input_limb_11_col11, input_limb_12_col12,
+                    input_limb_13_col13, input_limb_14_col14, input_limb_15_col15,
+                    input_limb_16_col16, input_limb_17_col17, input_limb_18_col18,
+                    input_limb_19_col19, input_limb_20_col20, input_limb_21_col21,
+                    input_limb_22_col22, input_limb_23_col23, input_limb_24_col24,
+                    input_limb_25_col25, input_limb_26_col26, input_limb_27_col27,
+                    input_limb_28_col28, input_limb_29_col29, input_limb_30_col30,
+                    input_limb_31_col31,
+                ]
+                    .span(),
             );
+        numerator_10 = enabler_col125;
 
         poseidon_full_round_chain_sum_11 = self
-            .poseidon_full_round_chain_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_0_col0, (input_limb_1_col1 + qm31_const::<1, 0, 0, 0>()),
-                    combination_limb_0_col92, combination_limb_1_col93, combination_limb_2_col94,
-                    combination_limb_3_col95, combination_limb_4_col96, combination_limb_5_col97,
-                    combination_limb_6_col98, combination_limb_7_col99, combination_limb_8_col100,
-                    combination_limb_9_col101, combination_limb_0_col103, combination_limb_1_col104,
-                    combination_limb_2_col105, combination_limb_3_col106, combination_limb_4_col107,
-                    combination_limb_5_col108, combination_limb_6_col109, combination_limb_7_col110,
-                    combination_limb_8_col111, combination_limb_9_col112, combination_limb_0_col114,
-                    combination_limb_1_col115, combination_limb_2_col116, combination_limb_3_col117,
-                    combination_limb_4_col118, combination_limb_5_col119, combination_limb_6_col120,
-                    combination_limb_7_col121, combination_limb_8_col122, combination_limb_9_col123,
-                ],
+                    qm31_const::<1480369132, 0, 0, 0>(), input_limb_0_col0,
+                    (input_limb_1_col1 + qm31_const::<1, 0, 0, 0>()), combination_limb_0_col92,
+                    combination_limb_1_col93, combination_limb_2_col94, combination_limb_3_col95,
+                    combination_limb_4_col96, combination_limb_5_col97, combination_limb_6_col98,
+                    combination_limb_7_col99, combination_limb_8_col100, combination_limb_9_col101,
+                    combination_limb_0_col103, combination_limb_1_col104, combination_limb_2_col105,
+                    combination_limb_3_col106, combination_limb_4_col107, combination_limb_5_col108,
+                    combination_limb_6_col109, combination_limb_7_col110, combination_limb_8_col111,
+                    combination_limb_9_col112, combination_limb_0_col114, combination_limb_1_col115,
+                    combination_limb_2_col116, combination_limb_3_col117, combination_limb_4_col118,
+                    combination_limb_5_col119, combination_limb_6_col120, combination_limb_7_col121,
+                    combination_limb_8_col122, combination_limb_9_col123,
+                ]
+                    .span(),
             );
+        numerator_11 = enabler_col125;
 
         lookup_constraints(
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
             claimed_sum,
-            enabler,
+            numerator_0,
+            numerator_1,
+            numerator_2,
+            numerator_3,
+            numerator_4,
+            numerator_5,
+            numerator_6,
+            numerator_7,
+            numerator_8,
+            numerator_9,
+            numerator_10,
+            numerator_11,
             column_size,
             ref interaction_trace_mask_values,
             cube_252_sum_0,
@@ -925,10 +954,20 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
 
 fn lookup_constraints(
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
     claimed_sum: QM31,
-    enabler: QM31,
+    numerator_0: QM31,
+    numerator_1: QM31,
+    numerator_2: QM31,
+    numerator_3: QM31,
+    numerator_4: QM31,
+    numerator_5: QM31,
+    numerator_6: QM31,
+    numerator_7: QM31,
+    numerator_8: QM31,
+    numerator_9: QM31,
+    numerator_10: QM31,
+    numerator_11: QM31,
     column_size: M31,
     ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
     cube_252_sum_0: QM31,
@@ -1011,9 +1050,8 @@ fn lookup_constraints(
     ))
         * cube_252_sum_0
         * cube_252_sum_1)
-        - cube_252_sum_0
-        - cube_252_sum_1)
-        * domain_vanishing_eval_inv;
+        - (cube_252_sum_0 * numerator_1)
+        - (cube_252_sum_1 * numerator_0));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1022,9 +1060,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col0, trace_2_col1, trace_2_col2, trace_2_col3]))
         * cube_252_sum_2
         * poseidon_round_keys_sum_3)
-        - cube_252_sum_2
-        - poseidon_round_keys_sum_3)
-        * domain_vanishing_eval_inv;
+        - (cube_252_sum_2 * numerator_3)
+        - (poseidon_round_keys_sum_3 * numerator_2));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1033,9 +1070,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col4, trace_2_col5, trace_2_col6, trace_2_col7]))
         * range_check_3_3_3_3_3_sum_4
         * range_check_3_3_3_3_3_sum_5)
-        - range_check_3_3_3_3_3_sum_4
-        - range_check_3_3_3_3_3_sum_5)
-        * domain_vanishing_eval_inv;
+        - (range_check_3_3_3_3_3_sum_4 * numerator_5)
+        - (range_check_3_3_3_3_3_sum_5 * numerator_4));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1044,9 +1080,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col8, trace_2_col9, trace_2_col10, trace_2_col11]))
         * range_check_3_3_3_3_3_sum_6
         * range_check_3_3_3_3_3_sum_7)
-        - range_check_3_3_3_3_3_sum_6
-        - range_check_3_3_3_3_3_sum_7)
-        * domain_vanishing_eval_inv;
+        - (range_check_3_3_3_3_3_sum_6 * numerator_7)
+        - (range_check_3_3_3_3_3_sum_7 * numerator_6));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1057,9 +1092,8 @@ fn lookup_constraints(
         ))
         * range_check_3_3_3_3_3_sum_8
         * range_check_3_3_3_3_3_sum_9)
-        - range_check_3_3_3_3_3_sum_8
-        - range_check_3_3_3_3_3_sum_9)
-        * domain_vanishing_eval_inv;
+        - (range_check_3_3_3_3_3_sum_8 * numerator_9)
+        - (range_check_3_3_3_3_3_sum_9 * numerator_8));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1072,9 +1106,8 @@ fn lookup_constraints(
         + (claimed_sum * (column_size.inverse().into())))
         * poseidon_full_round_chain_sum_10
         * poseidon_full_round_chain_sum_11)
-        + (poseidon_full_round_chain_sum_10 * enabler)
-        - (poseidon_full_round_chain_sum_11 * enabler))
-        * domain_vanishing_eval_inv;
+        + (poseidon_full_round_chain_sum_10 * numerator_11)
+        - (poseidon_full_round_chain_sum_11 * numerator_10));
     sum = sum * random_coeff + constraint_quotient;
 }
 #[cfg(and(test, feature: "qm31_opcode"))]
@@ -1082,17 +1115,16 @@ mod tests {
     use core::array::ArrayImpl;
     use core::num::traits::Zero;
     #[allow(unused_imports)]
-    use stwo_cairo_air::preprocessed_columns::{NUM_PREPROCESSED_COLUMNS, seq_column_idx};
+    use stwo_cairo_air::preprocessed_columns::*;
     #[allow(unused_imports)]
     use stwo_constraint_framework::{
-        LookupElements, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
+        LookupElementsTrait, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
     };
-    use stwo_verifier_core::circle::CirclePoint;
     use stwo_verifier_core::fields::qm31::{QM31, QM31Impl, QM31Trait, qm31_const};
     use crate::cairo_component::*;
     use crate::components::sample_evaluations::*;
     #[allow(unused_imports)]
-    use crate::test_utils::{make_interaction_trace, make_lookup_elements, preprocessed_mask_add};
+    use crate::test_utils::{make_interaction_trace, preprocessed_mask_add};
     use crate::utils::*;
     use super::{Claim, Component, InteractionClaim};
 
@@ -1103,28 +1135,12 @@ mod tests {
             interaction_claim: InteractionClaim {
                 claimed_sum: qm31_const::<1398335417, 314974026, 1722107152, 821933968>(),
             },
-            cube_252_lookup_elements: make_lookup_elements(
-                qm31_const::<1939233655, 1619044840, 261113095, 1630075268>(),
-                qm31_const::<755723700, 1754586089, 2095994220, 802306310>(),
-            ),
-            poseidon_full_round_chain_lookup_elements: make_lookup_elements(
-                qm31_const::<1798946566, 1261761511, 1965396494, 909844132>(),
-                qm31_const::<1128133586, 1523205859, 844911885, 1669479084>(),
-            ),
-            poseidon_round_keys_lookup_elements: make_lookup_elements(
-                qm31_const::<329128371, 1217552021, 2111282469, 775625911>(),
-                qm31_const::<225442684, 1397510358, 1436331847, 1340164402>(),
-            ),
-            range_check_3_3_3_3_3_lookup_elements: make_lookup_elements(
-                qm31_const::<1556236254, 464721654, 752948676, 101024730>(),
-                qm31_const::<1064120346, 1019909923, 1735446893, 2115040738>(),
+            common_lookup_elements: LookupElementsTrait::from_z_alpha(
+                qm31_const::<445623802, 202571636, 1360224996, 131355117>(),
+                qm31_const::<476823935, 939223384, 62486082, 122423602>(),
             ),
         };
         let mut sum: QM31 = Zero::zero();
-        let point = CirclePoint {
-            x: qm31_const::<461666434, 38651694, 1083586041, 510305943>(),
-            y: qm31_const::<817798294, 862569777, 2091320744, 1178484122>(),
-        };
 
         let mut preprocessed_trace = PreprocessedMaskValues { values: Default::default() };
 
@@ -1254,7 +1270,7 @@ mod tests {
             [qm31_const::<2011895446, 1878571631, 1869722519, 502514213>()].span(),
             [qm31_const::<2079004625, 2012789359, 1936831383, 502514213>()].span(),
             [qm31_const::<267066873, 536394353, 124892057, 502514214>()].span(),
-            [qm31_const::<179325277, 825275894, 97341591, 1357105975>()].span(),
+            [qm31_const::<334176052, 670612081, 192000921, 502514214>()].span(),
         ]
             .span();
         let interaction_values = array![
@@ -1275,7 +1291,6 @@ mod tests {
                 ref trace_columns,
                 ref interaction_columns,
                 qm31_const::<474642921, 876336632, 1911695779, 974600512>(),
-                point,
             );
         preprocessed_trace.validate_usage();
         assert_eq!(sum, QM31Trait::from_fixed_array(POSEIDON_FULL_ROUND_CHAIN_SAMPLE_EVAL_RESULT))
