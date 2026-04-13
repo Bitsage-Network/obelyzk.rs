@@ -106,9 +106,9 @@ impl Relocator {
                 BuiltinName::mul_mod => res.mul_mod_builtin = segment,
                 BuiltinName::output => res.output = segment,
                 BuiltinName::ec_op => res.ec_op_builtin = segment,
-                BuiltinName::ecdsa | BuiltinName::keccak => {
-                    panic!("Builtin {builtin_name} is not supported in Stwo")
-                }
+                // ECDSA and Keccak are allocated by the VM but not proven by Stwo.
+                // The verifier checks they have empty segments (start_ptr == stop_ptr).
+                BuiltinName::ecdsa | BuiltinName::keccak => {}
                 // Not builtins.
                 BuiltinName::segment_arena => {}
             };
