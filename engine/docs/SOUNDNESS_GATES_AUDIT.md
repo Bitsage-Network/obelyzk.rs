@@ -63,3 +63,27 @@ The GKR prover uses 5 environment variable "gates" that weaken proof components 
 2. **DONE**: Remove `STWO_ALLOW_MISSING_NORM_PROOF=1` from deployment scripts — verified safe on A10G
 3. **Phase 3**: Test and close piecewise + LogUp activation gates together
 4. **Phase 4**: Test batch token gate
+
+---
+
+## Recursive STARK Security (April 12, 2026)
+
+The upgraded recursive STARK (v2) provides additional soundness protection independent
+of the GKR soundness gates above. The v2 system uses an 89-column chain AIR with
+38 constraints and 120-bit cryptographic security (PcsConfig: pow_bits=20, log_blowup=5,
+n_queries=20, log_last_layer_deg=0).
+
+The recursive layer is protected by 8 independent security layers:
+
+1. **Fiat-Shamir channel binding** -- prevents transcript manipulation
+2. **Amortized accumulator** -- unconditional constraint, blocks all-zeros-selector
+3. **n_poseidon_perms on-chain validation** -- prevents trace miniaturization
+4. **seed_digest checkpoint** -- binds chain to model dimensions
+5. **pass1_final_digest binding** -- proves full GKR verification ran
+6. **Carry-chain modular addition** -- HadesPerm-level chain integrity
+7. **LogUp chain-to-Hades binding** -- cross-component verification
+8. **Offline Hades verification** -- prover-side permutation checks
+
+First verified on Sepolia:
+[`0x055c2bf89f43d9b65580862e0b81e6b47842b9dda3b862c134f35b61b0ae620f`](https://sepolia.starkscan.co/tx/0x055c2bf89f43d9b65580862e0b81e6b47842b9dda3b862c134f35b61b0ae620f)
+(Contract: `0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`)

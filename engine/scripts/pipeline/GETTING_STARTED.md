@@ -4,10 +4,13 @@ Prove that an ML model ran correctly with a cryptographic proof, verified on Sta
 
 **Live proofs on Starknet Sepolia:**
 
-| Model | Params | TX | Felts | GKR | STARK |
-|-------|--------|-----|-------|-----|-------|
-| **Qwen2.5-14B** | 14B | [`0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) | 946 | 46s | 1.2s |
-| **GLM-4-9B** | 9B | [`0x542960...4dd1e`](https://sepolia.starkscan.co/tx/0x542960d703a62d4beaacf0d9094ea92dc86bf326cd917c533039f4dd1eb4a30) | 929 | 201s | 1.1s |
+| Model | Params | TX | Felts | Security | GKR | STARK |
+|-------|--------|----|-------|----------|-----|-------|
+| **SmolLM2-135M** (v2 AIR) | 135M | [`0x055c2b...620f`](https://sepolia.starkscan.co/tx/0x055c2bf89f43d9b65580862e0b81e6b47842b9dda3b862c134f35b61b0ae620f) | ~4,824 | 120-bit | 102s | 3.55s |
+| **Qwen2.5-14B** | 14B | [`0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) | 946 | Standard | 46s | 1.2s |
+| **GLM-4-9B** | 9B | [`0x542960...4dd1e`](https://sepolia.starkscan.co/tx/0x542960d703a62d4beaacf0d9094ea92dc86bf326cd917c533039f4dd1eb4a30) | 929 | Standard | 201s | 1.1s |
+
+The latest verification uses an upgraded 89-column chain AIR with 38 constraints, including an amortized accumulator and carry-chain modular addition, verified at contract [`0x0121d1...8c005`](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005).
 
 ## Quick Overview
 
@@ -19,9 +22,10 @@ Input text → Tokenize → Forward pass (GPU) → GKR proof (GPU) → Recursive
 | Component | Description |
 |-----------|-------------|
 | **GKR Sumcheck** | Layer-by-layer interactive proof over M31/QM31 fields (192 matmuls, 337 layers) |
-| **Recursive STARK** | Compresses GKR proof (~46K felts) into ~950 felts via STWO Circle STARK |
-| **On-chain Verifier** | Cairo contract replays Fiat-Shamir transcript, checks FRI + Merkle proofs |
-| **Weight Binding** | Poseidon Merkle roots bind each weight matrix — swap detection is instant |
+| **Recursive STARK** | Compresses GKR proof (~46K felts) into ~4,824 felts via 89-column chain AIR (38 constraints) + Hades AIR (1225 columns) |
+| **On-chain Verifier** | Cairo contract with 38 constraints matching Rust exactly, full FRI + Merkle + PoW verification |
+| **Weight Binding** | Poseidon Merkle roots bind each weight matrix -- swap detection is instant |
+| **Security** | 120-bit cryptographic security (pow_bits=20, log_blowup=5, n_queries=20), 8 independent security layers |
 
 ---
 
@@ -342,7 +346,8 @@ const provider = new RpcProvider({
   nodeUrl: "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/demo",
 });
 
-const CONTRACT = "0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7";
+// v2 contract (upgraded, 89-column chain AIR, 120-bit security)
+const CONTRACT = "0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005";
 
 // Check if a specific proof was verified
 const verified = await provider.callContract({
@@ -398,7 +403,9 @@ echo "What is 2+2?" | \
 
 ## 8. Contract Reference
 
-**Verifier contract**: [`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7)
+**Verifier contract (v2, upgraded)**: [`0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005)
+
+**Verifier contract (v1)**: [`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7)
 
 | Entrypoint | Type | Description |
 |------------|------|-------------|
@@ -575,15 +582,16 @@ Works on Linux (CUDA GPU) and macOS (CPU). Model auto-downloads if not present.
 
 ## 13. Verified Proofs on Sepolia
 
-| TX | Model | Params | Felts | GKR | STARK |
-|----|-------|--------|-------|-----|-------|
-| [`0x5ce1b41...`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) | Qwen2.5-14B | 14B | 946 | 46s | 1.2s |
-| [`0x542960d...`](https://sepolia.starkscan.co/tx/0x542960d703a62d4beaacf0d9094ea92dc86bf326cd917c533039f4dd1eb4a30) | GLM-4-9B | 9B | 929 | 201s | 1.1s |
-| [`0x16c9fa1...`](https://sepolia.starkscan.co/tx/0x16c9fa1a9da0a388125e4d27e11b8eff6dd663f911b38e0f799d12e4cf15feb) | GLM-4-9B | 9B | 970 | — | — |
-| [`0x67a7b92...`](https://sepolia.starkscan.co/tx/0x67a7b9259d874aa40d593ac55fa47f3c4db6836f20893db718334d56ac0f0d9) | Qwen2.5-14B | 14B | 927 | — | — |
-| [`0x38a156d...`](https://sepolia.starkscan.co/tx/0x38a156d972cdc111f40bca7dedf056f42031088daf434d3849a1352da713317) | Qwen2.5-14B | 14B | 1,007 | — | — |
+| TX | Model | Params | Felts | AIR | Security | GKR | STARK |
+|----|-------|--------|-------|-----|----------|-----|-------|
+| [`0x055c2bf...`](https://sepolia.starkscan.co/tx/0x055c2bf89f43d9b65580862e0b81e6b47842b9dda3b862c134f35b61b0ae620f) | SmolLM2-135M | 135M | ~4,824 | v2 (89-col/38-cst) | 120-bit | 102s | 3.55s |
+| [`0x5ce1b41...`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) | Qwen2.5-14B | 14B | 946 | v1 (28-col/27-cst) | Standard | 46s | 1.2s |
+| [`0x542960d...`](https://sepolia.starkscan.co/tx/0x542960d703a62d4beaacf0d9094ea92dc86bf326cd917c533039f4dd1eb4a30) | GLM-4-9B | 9B | 929 | v1 (28-col/27-cst) | Standard | 201s | 1.1s |
+| [`0x16c9fa1...`](https://sepolia.starkscan.co/tx/0x16c9fa1a9da0a388125e4d27e11b8eff6dd663f911b38e0f799d12e4cf15feb) | GLM-4-9B | 9B | 970 | v1 | Standard | -- | -- |
+| [`0x67a7b92...`](https://sepolia.starkscan.co/tx/0x67a7b9259d874aa40d593ac55fa47f3c4db6836f20893db718334d56ac0f0d9) | Qwen2.5-14B | 14B | 927 | v1 | Standard | -- | -- |
+| [`0x38a156d...`](https://sepolia.starkscan.co/tx/0x38a156d972cdc111f40bca7dedf056f42031088daf434d3849a1352da713317) | Qwen2.5-14B | 14B | 1,007 | v1 | Standard | -- | -- |
 
-Two different model architectures (Qwen2 + ChatGLM), both verified on-chain in single transactions.
+Three different model architectures (SmolLM + Qwen2 + ChatGLM), verified on-chain in single transactions. The latest verification uses the upgraded v2 AIR with 120-bit security.
 
 ### SDK-submitted proofs
 
@@ -726,7 +734,8 @@ print(result["calldata_felts"]) # ~950
 | Resource | URL |
 |----------|-----|
 | GitHub | https://github.com/Bitsage-Network/obelyzk.rs |
-| Contract (Sepolia) | https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 |
+| Contract v2 (Sepolia) | https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005 |
+| Contract v1 (Sepolia) | https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7 |
 | crates.io | https://crates.io/crates/obelyzk |
 | npm SDK | https://www.npmjs.com/package/@obelyzk/sdk |
 | PyPI SDK | https://pypi.org/project/obelyzk |

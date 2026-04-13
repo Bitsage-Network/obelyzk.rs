@@ -640,3 +640,101 @@ All success criteria met. The recursive STARK verifier is **live on Starknet Sep
 3. **Policy commitment threading**: The recursive witness generator needed
    `PolicyConfig` threaded through to match the prover's Fiat-Shamir transcript.
    Added `prove_recursive_with_policy()` API.
+
+---
+
+## 13. Upgraded Recursive STARK (April 12, 2026)
+
+The recursive STARK system has been upgraded to a hardened 89-column chain AIR with
+38 constraints, replacing the original 28-column/27-constraint design. This upgrade
+provides 120-bit cryptographic security and introduces 8 independent security layers.
+
+### 13.1 New On-Chain Verification
+
+| Field | Value |
+|-------|-------|
+| **Contract** | [`0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005) |
+| **First verified TX** | [`0x055c2bf89f43d9b65580862e0b81e6b47842b9dda3b862c134f35b61b0ae620f`](https://sepolia.starkscan.co/tx/0x055c2bf89f43d9b65580862e0b81e6b47842b9dda3b862c134f35b61b0ae620f) |
+| **Model** | SmolLM2-135M |
+| **Calldata** | ~4,824 felts |
+| **Security** | 120-bit (pow_bits=20, log_blowup=5, n_queries=20, log_last_layer_deg=0) |
+
+### 13.2 Chain AIR Architecture
+
+The upgraded AIR uses two components:
+
+- **Chain AIR**: 89 columns, 38 constraints. Includes amortized accumulator
+  (unconditional constraint that blocks the all-zeros-selector attack),
+  carry-chain modular addition for HadesPerm-level chain integrity, and
+  boundary constraints binding the chain to model dimensions.
+
+- **Hades AIR**: 1225 columns. S-box, MDS matrix, and round transition constraints
+  for full Poseidon/Hades permutation verification.
+
+The Cairo verifier at `recursive_air.cairo` implements all 38 constraints matching
+the Rust implementation exactly. Cross-component verification is enforced via
+LogUp chain-to-Hades binding.
+
+### 13.3 Security Layers (8 total)
+
+The upgraded system is protected by 8 independent security layers:
+
+1. **Fiat-Shamir channel binding**: All public inputs (circuit_hash, weight_super_root,
+   io_commitment) are mixed into the channel before tree commits, preventing
+   transcript manipulation.
+
+2. **Amortized accumulator**: An unconditional constraint (not gated by any selector)
+   that blocks the all-zeros-selector attack. Even if an attacker zeroes out all
+   selectors, this constraint forces the accumulator to maintain integrity.
+
+3. **n_poseidon_perms on-chain validation**: The contract validates the declared
+   number of Poseidon permutations against the trace size, preventing trace
+   miniaturization attacks where an attacker submits a smaller trace than required.
+
+4. **seed_digest checkpoint**: The initial chain digest is bound to model dimensions
+   (hidden size, layer count, architecture), ensuring the proof cannot be reused
+   across different model configurations.
+
+5. **pass1_final_digest binding**: The final digest after pass 1 is constrained as a
+   public input, proving that the full GKR verification ran to completion rather
+   than being truncated.
+
+6. **Carry-chain modular addition**: HadesPerm-level rows use carry-chain arithmetic
+   for modular addition, preventing overflow attacks in the Poseidon permutation
+   chain.
+
+7. **LogUp chain-to-Hades binding**: Cross-component verification ensures that the
+   chain AIR and Hades AIR reference the same permutation values. An attacker
+   cannot satisfy one component while violating the other.
+
+8. **Offline Hades verification**: The prover performs full Hades permutation checks
+   before generating the STARK proof, catching witness construction errors before
+   they reach the on-chain verifier.
+
+### 13.4 PcsConfig
+
+The proof uses hardened PCS parameters for 120-bit security:
+
+```
+pow_bits        = 20    (proof-of-work grinding difficulty)
+log_blowup      = 5     (FRI blowup factor: 2^5 = 32x)
+n_queries       = 20    (FRI query count)
+log_last_layer_deg = 0  (final FRI layer is degree 1)
+```
+
+### 13.5 Usage
+
+Generate a recursive proof with the upgraded system:
+
+```bash
+./prove-model \
+  --model-dir /path/to/model \
+  --layers N \
+  --gkr \
+  --format ml_gkr \
+  --recursive
+```
+
+The model must be registered on-chain first via `register_model_recursive` on the
+verifier contract. The proof is ~4,824 felts, verified in a single Starknet
+transaction.
