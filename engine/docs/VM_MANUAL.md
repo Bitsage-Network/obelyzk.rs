@@ -453,16 +453,20 @@ bash scripts/deploy_vm.sh
 
 ## On-Chain Verification
 
-Proofs are verified on Starknet Sepolia via recursive STARK (942 felts, 1 TX).
+Proofs are verified on Starknet Sepolia via recursive STARK (~4,934 felts, 1 TX, 160-bit security).
 
-**Contract:** [`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7)
+The production v2 recursive verifier uses a 48-column chain AIR (was 89 -- 41 unused columns removed) with 38 constraints, including an amortized accumulator, carry-chain modular addition, and hades_commitment binding for two-level recursion. PcsConfig: pow_bits=20, log_blowup=5, n_queries=28. Two-level recursion: Level 1 cairo-prove (145 Hades perms, off-chain) + Level 2 chain STARK (on-chain). 9 security layers.
+
+**Contract (v2, preferred):** [`0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005)
+
+**Contract (v1):** [`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7)
 
 ```bash
 # Submit a recursive proof
 node scripts/submit_recursive.mjs /tmp/proof.json
 
-# Check verification count
-starkli call 0x1c208a...0c7 get_recursive_verification_count 0x_model_id
+# Check verification count (v2 contract)
+starkli call 0x0121d1...8c005 get_recursive_verification_count 0x_model_id
 ```
 
 ---

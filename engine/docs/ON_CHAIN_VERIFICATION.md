@@ -4,7 +4,9 @@
 **Version**: 0.3.0
 **Network**: Starknet Sepolia
 
-**Latest verified TX**: [`0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) — Qwen2.5-14B, 192 matmuls, 337 layers, 946 calldata felts
+**Latest verified TX (production recursive STARK)**: [`0x021512dd...`](https://sepolia.starkscan.co/tx/0x021512dd991a1c317a1aa93a382bed322af2e63d9fa01b9c5a3b133cf1ceebb8) — SmolLM2-135M, 48-column chain AIR, 38 constraints, ~4,934 calldata felts, 160-bit security, 4 verified TXs on Sepolia
+
+**Previous verified TX**: [`0x5ce1b4...edfd3`](https://sepolia.starkscan.co/tx/0x5ce1b41815e29a7b3dd03b77187cf32c8c5f0e2607960303174cbea303edfd3) — Qwen2.5-14B, 192 matmuls, 337 layers, 946 calldata felts
 
 ---
 
@@ -17,10 +19,11 @@ cryptographic calldata that a Starknet smart contract can verify on-chain.
 
 There are two verification paths:
 
-| Path | TXs | Calldata | Status |
-|------|-----|----------|--------|
-| **Recursive STARK** (preferred) | 1 | ~950 felts | **Fully trustless on Sepolia** (OODS + Merkle + FRI + PoW), 5 verifications live |
-| **Streaming GKR** (fallback) | 6+ | 8,744--255,100 felts | Fully deployed, 14/14 steps passing on-chain |
+| Path | TXs | Calldata | Security | Status |
+|------|-----|----------|----------|--------|
+| **Recursive STARK v2** (preferred) | 1 | ~4,934 felts | 160-bit (pow_bits=20, log_blowup=5, n_queries=28) | **Verified on Sepolia** ([TX](https://sepolia.starkscan.co/tx/0x021512dd991a1c317a1aa93a382bed322af2e63d9fa01b9c5a3b133cf1ceebb8)), 4 TXs verified |
+| **Recursive STARK v1** | 1 | ~950 felts | Standard | **Verified on Sepolia**, 5+ verifications live |
+| **Streaming GKR** (fallback) | 6+ | 8,744--255,100 felts | Standard | Fully deployed, 14/14 steps passing on-chain |
 
 **Why recursive is preferred.** The streaming pipeline sends the raw GKR proof
 data on-chain across multiple transactions. For large models (30+ layers) this
@@ -54,11 +57,16 @@ Six key fixes made this work:
 
 ### Compression Ratios
 
-| Model | GKR felts | Recursive felts | Compression | Verified |
-|-------|-----------|-----------------|-------------|----------|
-| SmolLM2 1-layer | 8,744 | 718 | 12.2x | Devnet |
-| SmolLM2 30-layer | 46,148 | 942 | 49x | **Sepolia** |
-| Qwen3-14B 40-layer | ~112,000 | ~950 (projected) | ~118x | Pending |
+| Model | GKR felts | Recursive felts | AIR | Compression | Verified |
+|-------|-----------|-----------------|-----|-------------|----------|
+| SmolLM2 30-layer (v2) | 46,148 | ~4,934 | 48-col/38-constraint | 9.4x | **Sepolia** ([TX](https://sepolia.starkscan.co/tx/0x021512dd991a1c317a1aa93a382bed322af2e63d9fa01b9c5a3b133cf1ceebb8)) |
+| SmolLM2 1-layer (v1) | 8,744 | 718 | 28-col/27-constraint | 12.2x | Devnet |
+| SmolLM2 30-layer (v1) | 46,148 | 942 | 28-col/27-constraint | 49x | **Sepolia** |
+| Qwen3-14B 40-layer | ~112,000 | ~4,934 (v2) | 48-col/38-constraint | ~23x | Pending |
+
+Note: The v2 AIR produces larger calldata (~4,934 felts vs ~950 felts) due to the
+48-column trace with 38 constraints and two-level recursion, but provides significantly stronger
+security (160-bit vs standard) and 9 independent security layers.
 
 ---
 
@@ -97,17 +105,54 @@ On-chain (1 TX)         ->  stwo-cairo-verifier verifies the STARK
 ```
 
 The key insight: the GKR verifier's Fiat-Shamir transcript is a chain of Poseidon
-permutations. The recursive AIR constrains this chain with 27 constraints:
+permutations. The production recursive AIR (v2) constrains this chain with a 48-column
+chain AIR (was 89 -- 41 unused columns removed) and 38 constraints, providing 160-bit
+cryptographic security via a two-level recursion architecture.
 
-- **9 boundary constraints** (first row): `digest_before == initial_digest` (zero)
-- **9 boundary constraints** (last row): `digest_after == final_digest`
-- **9 chain constraints** (internal rows): `digest_after[row_i] == digest_before[row_{i+1}]`
+**Chain AIR** (48 columns, 38 constraints):
 
-All constraints are degree 2 (selector times difference). The trace has:
+- Boundary constraints binding initial and final digests
+- Amortized accumulator constraint (unconditional -- blocks all-zeros-selector attack)
+- Carry-chain modular addition for HadesPerm-level chain integrity
+- seed_digest checkpoint binding chain to model dimensions
+- pass1_final_digest binding proving full GKR verification ran
+- hades_commitment binding for two-level recursion
 
-- **28 execution columns**: `digest_before(9) + digest_after(9) + shifted_next_before(9) + op_type(1)`
-- **3 preprocessed selectors**: `is_first`, `is_last`, `is_chain`
-- **Felt252 limb decomposition**: 9 M31 limbs per felt252 (9 x 28 bits = 252 bits)
+**Two-level recursion:**
+- Level 1: cairo-prove verifies 145 Hades permutations (10s, 278K felts, OFF-CHAIN)
+- Level 2: Chain STARK binds to Level 1 commitment (6.5s, ~4,934 felts, ON-CHAIN)
+
+**Hades AIR** (1225 columns):
+
+- S-box constraints for Poseidon/Hades nonlinear layer
+- MDS matrix multiplication constraints
+- Round transition constraints
+
+Cross-component integrity is enforced via LogUp chain-to-Hades binding.
+
+**PcsConfig** (160-bit security):
+
+- `pow_bits=20`: proof-of-work grinding difficulty
+- `log_blowup=5`: FRI blowup factor (2^5 = 32x)
+- `n_queries=28`: FRI query count
+- `log_last_layer_deg=0`: final FRI layer is degree 1
+- Security: pow_bits + log_blowup * n_queries = 20 + 5*28 = 160 bits
+
+**9 Security Layers**:
+
+1. Fiat-Shamir channel binding (all public inputs mixed before tree commits)
+2. Amortized accumulator (unconditional constraint, blocks all-zeros-selector attack)
+3. n_poseidon_perms on-chain validation (prevents trace miniaturization)
+4. seed_digest checkpoint (binds chain to model dimensions)
+5. pass1_final_digest binding (proves full GKR verification ran)
+6. Carry-chain modular addition (HadesPerm-level chain integrity)
+7. hades_commitment binding (two-level recursion)
+8. Boundary constraints (initial/final digest)
+9. 160-bit STARK security (pow=20, blowup=5, queries=28)
+
+The previous v1 AIR used 28 execution columns, 3 preprocessed selectors, and
+27 constraints. The v1 system remains operational but the v2 system is preferred
+for new deployments.
 
 The STARK uses `Poseidon252MerkleChannel` so that the proof is natively verifiable
 by stwo-cairo-verifier (Cairo's native Poseidon for Fiat-Shamir and Merkle).
@@ -116,7 +161,20 @@ by stwo-cairo-verifier (Cairo's native Poseidon for Fiat-Shamir and Merkle).
 
 ## 3. Contracts on Starknet Sepolia
 
-### 3.1 Recursive Verifier (Fully Trustless)
+### 3.1 Recursive Verifier v2 (Production, 48-Column Chain AIR)
+
+| Field | Value |
+|-------|-------|
+| **Contract address** | [`0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005) |
+| **Latest verified TX** | [`0x021512dd...`](https://sepolia.starkscan.co/tx/0x021512dd991a1c317a1aa93a382bed322af2e63d9fa01b9c5a3b133cf1ceebb8) |
+| **Verification count** | 4 on Sepolia |
+| **AIR** | 48 columns (chain) + 1225 columns (Hades), 38 constraints |
+| **Security** | 160-bit (pow_bits=20, log_blowup=5, n_queries=28) |
+| **Source** | `elo-cairo-verifier/src/recursive_verifier.cairo` + `recursive_air.cairo` (38 constraints matching Rust) |
+| **Status** | **Live on Sepolia. Fully trustless STARK verification with 9 security layers. Two-level recursion.** |
+| **Explorer** | [View on Starkscan](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005) |
+
+### 3.1.1 Recursive Verifier v1 (Original)
 
 | Field | Value |
 |-------|-------|
@@ -128,7 +186,8 @@ by stwo-cairo-verifier (Cairo's native Poseidon for Fiat-Shamir and Merkle).
 | **Deploy TX** | [`0x7b7715e4710b7f9e329bb91cffbdc05ac54b1e68b88989bee9fa60ec2dcdb9c`](https://sepolia.starkscan.co/tx/0x7b7715e4710b7f9e329bb91cffbdc05ac54b1e68b88989bee9fa60ec2dcdb9c) |
 | **First verification** | [`0x61a60a7fcf899d38da5e0f4632746f48843e1c537dabe57ea7df42ad71c0ba6`](https://sepolia.starkscan.co/tx/0x61a60a7fcf899d38da5e0f4632746f48843e1c537dabe57ea7df42ad71c0ba6) |
 | **MIN_POW_BITS** | 10 (production hardened) |
-| **Status** | **Live on Sepolia. Fully trustless STARK verification.** |
+| **AIR** | 28 columns, 27 constraints |
+| **Status** | **Live on Sepolia. Superseded by v2 for new deployments.** |
 | **Explorer** | [View on Starkscan](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7) |
 
 This contract performs **full cryptographic STARK verification** on-chain:
@@ -466,7 +525,7 @@ remaining step is deploying the class to Sepolia.
 ### 8.1 What Works
 
 - **RecursiveAir** (`elo-cairo-verifier/src/recursive_air.cairo`): Full Cairo
-  implementation of the AIR with all 27 constraints. Implements the `Air` trait
+  implementation of the AIR with all 38 constraints. Implements the `Air` trait
   from `stwo_verifier_core`. Matches the Rust `RecursiveVerifierEval` exactly.
 
 - **RecursiveVerifierContract** (`elo-cairo-verifier/src/recursive_verifier.cairo`):
@@ -490,17 +549,28 @@ remaining step is deploying the class to Sepolia.
 
 ### 8.2 Verified Models
 
-| Model | Calldata | Prove Time | TX |
-|-------|----------|------------|-----|
-| SmolLM2-135M (30-layer) | 942 felts | 102s | [`0x276c6a44...`](https://sepolia.starkscan.co/tx/0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc) |
-| Qwen2-0.5B | 924 felts | 287s | Verified on Sepolia |
+| Model | Calldata | Prove Time | Contract | TX |
+|-------|----------|------------|----------|-----|
+| SmolLM2-135M (v2 AIR) | ~4,934 felts | 102s | v2 (`0x0121d1...`) | [`0x021512dd...`](https://sepolia.starkscan.co/tx/0x021512dd991a1c317a1aa93a382bed322af2e63d9fa01b9c5a3b133cf1ceebb8) |
+| SmolLM2-135M (30-layer) | 942 felts | 102s | v1 (`0x1c208a...`) | [`0x276c6a44...`](https://sepolia.starkscan.co/tx/0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc) |
+| Qwen2-0.5B | 924 felts | 287s | v1 (`0x1c208a...`) | Verified on Sepolia |
 
-### 8.3 Sepolia Deployment (Complete)
+### 8.3 Sepolia Deployment
 
-The recursive verifier contract at `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`
-is deployed with class `0x056a8b05376d4133e14451884dcef650d469c137bed273dd1bba3f39e5df28a5`.
-This is the final production class with full OODS + Merkle + FRI + PoW verification
-and an upgrade timelock mechanism (propose/execute/cancel, 5-minute delay).
+Two recursive verifier contracts are deployed on Sepolia:
+
+**v2 (production, preferred)**: Contract `0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`.
+Uses the 48-column chain AIR with 38 constraints and 160-bit security (pow_bits=20,
+log_blowup=5, n_queries=28). Two-level recursion: Level 1 cairo-prove (145 Hades perms,
+off-chain) + Level 2 chain STARK (on-chain). Includes 9 security layers (Fiat-Shamir
+binding, amortized accumulator, n_poseidon_perms validation, seed_digest checkpoint,
+pass1_final_digest binding, carry-chain modular addition, hades_commitment binding,
+boundary constraints, 160-bit STARK security). 4 verified TXs on Sepolia. Contract
+includes upgrade timelock.
+
+**v1 (original)**: Contract `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`
+with class `0x056a8b05376d4133e14451884dcef650d469c137bed273dd1bba3f39e5df28a5`.
+Uses 28-column AIR with 27 constraints. Remains operational for backward compatibility.
 
 A single Starknet transaction cryptographically verifies that the GKR verifier
 accepted the original ML inference proof. The streaming pipeline is fully optional.

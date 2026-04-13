@@ -158,7 +158,11 @@ impl InstrumentedChannel {
         let digest_after = self.inner.digest();
 
         // Record the Hades call
-        let input = [digest_before, FieldElement::from(n_draws as u64), FieldElement::THREE];
+        let input = [
+            digest_before,
+            FieldElement::from(n_draws as u64),
+            FieldElement::THREE,
+        ];
         let mut output = input;
         crate::crypto::hades::hades_permutation(&mut output);
         self.ops.push(WitnessOp::HadesPerm { input, output });
@@ -191,12 +195,7 @@ impl InstrumentedChannel {
     /// return state[0]
     /// ```
     /// Total: 2 Hades calls.
-    pub fn mix_poly_coeffs(
-        &mut self,
-        c0: SecureField,
-        c1: SecureField,
-        c2: SecureField,
-    ) {
+    pub fn mix_poly_coeffs(&mut self, c0: SecureField, c1: SecureField, c2: SecureField) {
         use crate::crypto::poseidon_channel::pack_m31s;
         let m31s: Vec<M31> = vec![
             c0.0 .0, c0.0 .1, c0.1 .0, c0.1 .1, c1.0 .0, c1.0 .1, c1.1 .0, c1.1 .1, c2.0 .0,
@@ -213,7 +212,10 @@ impl InstrumentedChannel {
         state[1] += felt1;
         let input1 = state;
         crate::crypto::hades::hades_permutation(&mut state);
-        self.ops.push(WitnessOp::HadesPerm { input: input1, output: state });
+        self.ops.push(WitnessOp::HadesPerm {
+            input: input1,
+            output: state,
+        });
         self.n_poseidon_perms += 1;
 
         // Call 2: absorb remainder [felt2] + padding
@@ -221,7 +223,10 @@ impl InstrumentedChannel {
         state[1] += FieldElement::ONE; // padding at state[remainder.len()] = state[1]
         let input2 = state;
         crate::crypto::hades::hades_permutation(&mut state);
-        self.ops.push(WitnessOp::HadesPerm { input: input2, output: state });
+        self.ops.push(WitnessOp::HadesPerm {
+            input: input2,
+            output: state,
+        });
         self.n_poseidon_perms += 1;
 
         // Record channel operation (atomic digest transition)
@@ -232,8 +237,11 @@ impl InstrumentedChannel {
 
         // Advance inner channel and verify
         self.inner.mix_poly_coeffs(c0, c1, c2);
-        debug_assert_eq!(self.inner.digest(), state[0],
-            "mix_poly_coeffs decomposition mismatch");
+        debug_assert_eq!(
+            self.inner.digest(),
+            state[0],
+            "mix_poly_coeffs decomposition mismatch"
+        );
     }
 
     /// Mix degree-3 polynomial coefficients (4 QM31s).
@@ -262,14 +270,20 @@ impl InstrumentedChannel {
         state[1] += felt1;
         let input1 = state;
         crate::crypto::hades::hades_permutation(&mut state);
-        self.ops.push(WitnessOp::HadesPerm { input: input1, output: state });
+        self.ops.push(WitnessOp::HadesPerm {
+            input: input1,
+            output: state,
+        });
         self.n_poseidon_perms += 1;
 
         state[0] += felt2;
         state[1] += FieldElement::ONE;
         let input2 = state;
         crate::crypto::hades::hades_permutation(&mut state);
-        self.ops.push(WitnessOp::HadesPerm { input: input2, output: state });
+        self.ops.push(WitnessOp::HadesPerm {
+            input: input2,
+            output: state,
+        });
         self.n_poseidon_perms += 1;
 
         self.ops.push(WitnessOp::ChannelOp {
@@ -278,15 +292,22 @@ impl InstrumentedChannel {
         });
 
         self.inner.mix_poly_coeffs_deg3(c0, c1, c2, c3);
-        debug_assert_eq!(self.inner.digest(), state[0],
-            "mix_poly_coeffs_deg3 decomposition mismatch");
+        debug_assert_eq!(
+            self.inner.digest(),
+            state[0],
+            "mix_poly_coeffs_deg3 decomposition mismatch"
+        );
     }
 
     /// Draw a raw felt252.
     pub fn draw_felt252(&mut self) -> FieldElement {
         let digest = self.inner.digest();
         let n_draws = self.inner.n_draws();
-        let input = [digest, FieldElement::from(n_draws as u64), FieldElement::THREE];
+        let input = [
+            digest,
+            FieldElement::from(n_draws as u64),
+            FieldElement::THREE,
+        ];
         let mut output = input;
         crate::crypto::hades::hades_permutation(&mut output);
         self.ops.push(WitnessOp::HadesPerm { input, output });
@@ -385,7 +406,15 @@ pub fn generate_witness(
     weight_super_root: QM31,
     io_commitment: QM31,
 ) -> Result<GkrVerifierWitness, crate::gkr::types::GKRError> {
-    generate_witness_with_policy(circuit, proof, output, weights, weight_super_root, io_commitment, None)
+    generate_witness_with_policy(
+        circuit,
+        proof,
+        output,
+        weights,
+        weight_super_root,
+        io_commitment,
+        None,
+    )
 }
 
 /// Generate witness with explicit policy binding.
@@ -417,7 +446,14 @@ pub fn generate_witness_with_policy(
     let mut prod_channel = crate::crypto::poseidon_channel::PoseidonChannel::new();
 
     let _claim = if let Some(p) = policy {
-        crate::gkr::verifier::verify_gkr_with_policy(circuit, proof, output, weights, &mut prod_channel, p)?
+        crate::gkr::verifier::verify_gkr_with_policy(
+            circuit,
+            proof,
+            output,
+            weights,
+            &mut prod_channel,
+            p,
+        )?
     } else if let Some(w) = weights {
         crate::gkr::verifier::verify_gkr_with_weights(circuit, proof, output, w, &mut prod_channel)?
     } else {
@@ -437,6 +473,10 @@ pub fn generate_witness_with_policy(
     channel.mix_u64(d as u64);
     channel.mix_u64(circuit.input_shape.0 as u64);
     channel.mix_u64(circuit.input_shape.1 as u64);
+
+    // SECURITY: Capture the seed digest — deterministic given the model.
+    // This becomes a public input and AIR checkpoint constraint.
+    let seed_digest = felt_to_securefield(channel.inner().digest());
 
     // Reconstruct output claim
     let output_padded = pad_matrix_pow2(output);
@@ -582,6 +622,19 @@ pub fn generate_witness_with_policy(
     let (_instrumented_poseidon, n_sumcheck_rounds, n_qm31_ops, n_equality_checks) =
         channel.counters();
 
+    // Compute hades_commitment from all HadesPerm pairs in the ops.
+    // This matches the Cairo Hades verifier program's output.
+    let hades_commitment = {
+        let pairs: Vec<_> = channel.ops().iter().filter_map(|op| {
+            if let WitnessOp::HadesPerm { input, output } = op {
+                Some((*input, *output))
+            } else {
+                None
+            }
+        }).collect();
+        super::prover::compute_hades_commitment(&pairs)
+    };
+
     let witness = GkrVerifierWitness {
         ops: channel.into_ops(),
         public_inputs: RecursivePublicInputs {
@@ -589,7 +642,9 @@ pub fn generate_witness_with_policy(
             io_commitment,
             weight_super_root,
             n_layers: d as u32,
-            verified: true,
+            n_poseidon_perms: total_poseidon_calls as u32,
+            seed_digest,
+            hades_commitment,
         },
         // Use the production verifier's total count (covers ALL layer types)
         n_poseidon_perms: total_poseidon_calls,

@@ -67,22 +67,15 @@ pub enum WitnessOp {
 
     /// Equality assertion: `lhs == rhs`.
     /// The AIR constrains `lhs - rhs = 0`.
-    EqualityCheck {
-        lhs: SecureField,
-        rhs: SecureField,
-    },
+    EqualityCheck { lhs: SecureField, rhs: SecureField },
 
     /// Mix a SecureField into the Fiat-Shamir channel.
     /// This is a Hades permutation with specific packing — recorded for
     /// consistency but implemented via HadesPerm in the AIR.
-    ChannelMix {
-        value: SecureField,
-    },
+    ChannelMix { value: SecureField },
 
     /// Draw a SecureField from the Fiat-Shamir channel.
-    ChannelDraw {
-        result: SecureField,
-    },
+    ChannelDraw { result: SecureField },
 }
 
 /// The complete witness of a GKR verifier execution.
@@ -130,6 +123,13 @@ pub struct RecursivePublicInputs {
     /// Binds the proof to a specific inference (what went in, what came out).
     pub io_commitment: QM31,
 
+    /// Level 1 Hades recursive proof commitment (felt252).
+    /// Poseidon hash of all verified (input, output) Hades permutation pairs.
+    /// Computed by the Cairo Hades verifier program and proven by cairo-prove.
+    /// When non-zero, this binds the chain STARK to a cryptographically
+    /// verified set of Hades permutations (two-level recursion).
+    pub hades_commitment: FieldElement,
+
     /// Poseidon Merkle root of all weight matrices.
     /// Binds the proof to specific model weights (prevents weight substitution).
     pub weight_super_root: QM31,
@@ -137,8 +137,23 @@ pub struct RecursivePublicInputs {
     /// Total number of GKR layers verified (for the AIR log_size).
     pub n_layers: u32,
 
-    /// Whether verification succeeded (must be true for a valid proof).
-    pub verified: bool,
+    /// Total Poseidon permutations in the verifier execution.
+    /// SECURITY: This is validated on-chain against the registered model's
+    /// expected complexity. Without this, an attacker could submit a trivially
+    /// small trace (2 Hades permutations) that satisfies all chain AIR constraints
+    /// without ever running the GKR verifier. The AIR uses this to reconstruct
+    /// the preprocessed columns (is_first, is_last, is_chain) deterministically.
+    pub n_poseidon_perms: u32,
+
+    /// Poseidon channel digest after the 3 circuit-seeding operations:
+    ///   mix_u64(n_layers), mix_u64(input_shape.0), mix_u64(input_shape.1)
+    ///
+    /// SECURITY: This checkpoint constrains the chain's early rows to match
+    /// the GKR verifier's deterministic seeding. An attacker fabricating a
+    /// chain cannot pass this constraint without knowing the model dimensions
+    /// and producing the exact same Hades permutations the real verifier would.
+    /// This value is deterministic per model (doesn't depend on inference data).
+    pub seed_digest: QM31,
 }
 
 /// The recursive STARK proof — replaces the 112K felt GKR calldata.
@@ -156,11 +171,34 @@ pub struct RecursiveProof {
     /// Public inputs committed in the circuit.
     pub public_inputs: RecursivePublicInputs,
 
-    /// Final channel digest from the GKR verifier (for boundary constraint).
+    /// Full felt252 IO commitment (Poseidon hash of packed IO).
+    pub io_commitment_felt252: FieldElement,
+
+    /// Pass 1 (full GKR verification) final channel digest.
+    /// Mixed into the Fiat-Shamir channel to bind the STARK proof to a
+    /// COMPLETE GKR verification. Without this, an attacker could fabricate
+    /// a partial witness that passes the chain AIR without running the full verifier.
+    pub pass1_final_digest: FieldElement,
+
+    /// Pass 2 (instrumented replay) final digest — used for chain AIR boundary.
     pub final_digest: FieldElement,
+
+    /// LogUp claimed sum for the chain component (0 if LogUp disabled).
+    pub logup_claimed_sum: QM31,
+
+    /// Number of real (active) rows in the chain trace.
+    /// This is the ChannelOp count from Pass 2, NOT n_poseidon_perms (which
+    /// counts ALL Poseidon calls including non-ChannelOp ones from Pass 1).
+    /// The AIR's amortized accumulator uses this for the correction term.
+    pub n_real_rows: u32,
 
     /// Trace log_size (needed for verifier to reconstruct the AIR).
     pub log_size: u32,
+
+    /// Hades permutation pairs for two-level recursion.
+    /// Each pair is (input[3], output[3]) verified by the prover offline.
+    /// Used to generate the Level 1 Hades recursive proof via cairo-prove.
+    pub hades_pairs: Vec<([starknet_ff::FieldElement; 3], [starknet_ff::FieldElement; 3])>,
 
     /// Proof metadata for debugging/display.
     pub metadata: RecursiveProofMetadata,

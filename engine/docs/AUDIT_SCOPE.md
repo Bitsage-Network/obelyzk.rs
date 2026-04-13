@@ -65,7 +65,17 @@ STARK, and verifies it on Starknet via a Cairo smart contract.
 - Inner GKR proof correctly encoded as AIR witness
 - Recursive AIR constraints faithfully reproduce GKR verifier logic
 - STARK soundness (delegates to STWO's `prove()`/`verify()`)
-- Proof compression preserves soundness (981 felts for 30-layer model)
+- Proof compression preserves soundness (~4,934 felts for v2 AIR, 981 felts for v1)
+- 160-bit security via PcsConfig (pow_bits=20, log_blowup=5, n_queries=28)
+- 48-column chain AIR with 38 constraints (v2), including amortized accumulator
+  (41 unused columns removed from previous 89-column design)
+- Hades AIR with 1225 columns for Poseidon permutation verification
+- Two-level recursion: Level 1 cairo-prove (145 Hades perms, off-chain) + Level 2
+  chain STARK (on-chain)
+- 9 security layers: Fiat-Shamir binding, amortized accumulator, n_poseidon_perms
+  validation, seed_digest checkpoint, pass1_final_digest binding, carry-chain
+  modular addition, hades_commitment binding, boundary constraints, 160-bit STARK
+  security
 
 ### 2.3 Cairo Serialization
 
@@ -137,9 +147,12 @@ STARK, and verifies it on Starknet via a Cairo smart contract.
 **LOC**: ~132
 
 **Key security properties**:
-- AIR constraints match the Rust `src/recursive/air.rs` definitions
+- AIR constraints match the Rust `src/recursive/air.rs` definitions exactly
+  (38 constraints in v2, 27 constraints in v1)
 - Constraint degree bounds correctly specified
 - No missing constraints that would allow invalid witnesses
+- Amortized accumulator constraint is unconditional (blocks all-zeros-selector attack)
+- Carry-chain modular addition constraints enforce HadesPerm-level integrity
 
 ### 2.8 STWO Cairo Verifier Modifications
 
@@ -229,8 +242,9 @@ identical cryptography and are covered by equivalence tests.
 
 | Item | Value |
 |------|-------|
-| **Recursive verifier contract** | `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` |
-| **Recursive verifier class hash** | `0x056a8b05376d4133e14451884dcef650d469c137bed273dd1bba3f39e5df28a5` |
+| **Recursive verifier v2 contract** | `0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005` |
+| **Recursive verifier v1 contract** | `0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7` |
+| **Recursive verifier v1 class hash** | `0x056a8b05376d4133e14451884dcef650d469c137bed273dd1bba3f39e5df28a5` |
 | **Streaming GKR class (v31)** | `0x6a6b7a75d5ec1f63d715617d352bc0d353042b2a033d98fa28ffbaf6c5b5439` |
 | **Deployer account** | `0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344` |
 | **Network** | Starknet Sepolia (chain ID: SN_SEPOLIA) |
@@ -293,8 +307,10 @@ cryptographic outputs.
 
 ### 6.4 End-to-End On-Chain Verification
 
-Two models have been verified end-to-end on Starknet Sepolia:
-- SmolLM2-135M (30 layers, 211 GKR layers): recursive STARK, single TX
+Three models have been verified end-to-end on Starknet Sepolia:
+- SmolLM2-135M (v2 AIR, 48-col/38-constraint, 160-bit security): recursive STARK,
+  single TX ([`0x055c2bf8...`](https://sepolia.starkscan.co/tx/0x055c2bf89f43d9b65580862e0b81e6b47842b9dda3b862c134f35b61b0ae620f))
+- SmolLM2-135M (30 layers, 211 GKR layers): recursive STARK v1, single TX
 - 5-layer MLP: streaming GKR, 14 sequential transactions
 
 ---

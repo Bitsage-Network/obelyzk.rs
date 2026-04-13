@@ -295,7 +295,11 @@ tuples. The verifier reads these during proof verification.
 - **STWO STARK soundness**: The STWO proving system provides 128-bit security via
   the QM31 extension field, assuming correct implementation of FRI (Fast
   Reed-Solomon Interactive Oracle Proofs), OODS (Out-of-Domain Sampling), Merkle
-  commitment scheme, and proof-of-work grinding resistance.
+  commitment scheme, and proof-of-work grinding resistance. The upgraded recursive
+  STARK (v2) provides 160-bit security via PcsConfig (pow_bits=20, log_blowup=5,
+  n_queries=28, log_last_layer_deg=0) and is protected by 9 independent security
+  layers including amortized accumulator constraints, carry-chain modular addition,
+  hades_commitment binding for two-level recursion, and boundary constraints.
 
 ### 5.2 Infrastructure Assumptions
 
@@ -439,13 +443,21 @@ allows:
 - Proposing contract upgrades to malicious code
 - (After timelock) executing upgrades
 
-### 7.4 No Contract Upgrade Timelock on Recursive Verifier
+### 7.4 Contract Upgrade Timelock on Recursive Verifier
 
-The recursive STARK verifier contract (`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`)
-supports upgrades via a propose-then-execute pattern, but the timelock duration may
-be insufficient for the community to detect and respond to a malicious upgrade
-proposal. The streaming GKR verifier has a 5-minute timelock; the recursive verifier
-should match or exceed this.
+Both recursive verifier contracts support upgrades via a propose-then-execute pattern
+with a timelock:
+
+- **v2 contract** (`0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005`):
+  Production 48-column chain AIR with 38 constraints and 160-bit security. Two-level
+  recursion architecture. Includes upgrade timelock mechanism.
+
+- **v1 contract** (`0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7`):
+  Original 28-column/27-constraint design. Has 5-minute timelock matching the
+  streaming GKR verifier.
+
+The timelock duration may be insufficient for the community to detect and respond to
+a malicious upgrade proposal.
 
 ### 7.5 Activation Function Partial Verification
 
@@ -466,7 +478,29 @@ confidentiality should consider additional protections.
 
 ### 7.7 Proof Size and Gas
 
-Recursive STARK proofs compress the proof to approximately 981 felts for a 30-layer
-model (260x compression vs. streaming). However, on-chain verification gas costs
-remain significant. Extremely large models may exceed the Starknet sequencer step
-limit (10M steps), requiring further compression or proof splitting.
+The production recursive STARK (v2) proofs are approximately 4,934 felts for a 30-layer
+model due to the 48-column chain AIR with 38 constraints and two-level recursion. The original
+v1 system compressed to approximately 942-981 felts. Both versions verify in a single
+Starknet transaction. On-chain verification gas costs remain significant. Extremely
+large models may approach the Starknet sequencer step limit (10M steps), though the
+constant-size property ensures model size does not affect verification cost.
+
+### 7.8 Recursive STARK Security Layers
+
+The v2 recursive STARK system uses 9 independent security layers. A failure in
+any single layer does not compromise the overall system, but the effectiveness of
+certain layers depends on the correctness of others:
+
+1. **Fiat-Shamir channel binding** depends on Poseidon2 collision resistance
+2. **Amortized accumulator** is unconditional (no selector dependency)
+3. **n_poseidon_perms validation** depends on correct trace size reporting
+4. **seed_digest checkpoint** depends on Fiat-Shamir binding
+5. **pass1_final_digest binding** depends on correct witness generation
+6. **Carry-chain modular addition** depends on correct M31 arithmetic
+7. **hades_commitment binding** depends on Level 1 cairo-prove integrity (two-level recursion)
+8. **Boundary constraints** depend on correct initial/final digest computation
+9. **160-bit STARK security** depends on PcsConfig enforcement (pow=20, blowup=5, queries=28)
+
+The two-level recursion architecture strengthens security: Level 1 (cairo-prove)
+verifies 145 Hades permutations off-chain, and Level 2 (chain STARK) binds to the
+Level 1 commitment on-chain. All 9 layers provide on-chain or cryptographic protection.

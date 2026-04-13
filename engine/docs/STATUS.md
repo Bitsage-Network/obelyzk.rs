@@ -43,7 +43,8 @@ On top of the prover, we built a **transaction classifier** and **on-chain firew
 | Component | Status | Evidence |
 |-----------|--------|----------|
 | **GKR Prover (CPU+GPU)** | Production | 936 tests, 7 models proven, 103s for 40-layer Qwen3-14B |
-| **Recursive STARK** | Production | 981 felts, 1 TX, verified on Sepolia ([TX](https://sepolia.starkscan.co/tx/0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc)) |
+| **Recursive STARK v2** | Production | 48-col chain AIR, 38 constraints, ~4,934 felts, 160-bit security, 4 verified TXs on Sepolia (latest: [`0x021512dd...`](https://sepolia.starkscan.co/tx/0x021512dd991a1c317a1aa93a382bed322af2e63d9fa01b9c5a3b133cf1ceebb8)), contract `0x0121d1...8c005`, 9 security layers, two-level recursion |
+| **Recursive STARK v1** | Production | 28-col AIR, 27 constraints, 981 felts, verified on Sepolia ([TX](https://sepolia.starkscan.co/tx/0x276c6a448829c0f3975080914a89c2a9611fc41912aff1fddfe29d8f3364ddc)) |
 | **Streaming GKR Verifier** | Production | 6/6 steps verified on Sepolia, 14/14 streaming steps |
 | **PolicyConfig** | Production | 21 tests, 3 presets, Fiat-Shamir bound, Cairo enforced |
 | **Model Loading** | Production | HuggingFace SafeTensors, ONNX, any LLaMA/Qwen/Phi architecture |
@@ -83,7 +84,8 @@ On top of the prover, we built a **transaction classifier** and **on-chain firew
 
 | Contract | Address | Purpose |
 |----------|---------|---------|
-| **Recursive Verifier** | [`0x1c208a5f...`](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7) | 1-TX STARK verification (OODS+Merkle+FRI+PoW) |
+| **Recursive Verifier v2** | [`0x0121d1e9...`](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005) | Production: 48-col chain AIR, 38 constraints, 160-bit security, 9 security layers, two-level recursion |
+| **Recursive Verifier v1** | [`0x1c208a5f...`](https://sepolia.starkscan.co/contract/0x1c208a5fe731c0d03b098b524f274c537587ea1d43d903838cc4a2bf90c40c7) | Original: 28-col AIR, 27 constraints, 1-TX STARK verification |
 | **Streaming Verifier** | [`0x0121d1e9...`](https://sepolia.starkscan.co/contract/0x0121d1e9882967e03399f153d57fc208f3d9bce69adc48d9e12d424502a8c005) | 6-TX GKR streaming verification |
 | **AgentFirewallZK** | [`0x043b51f6...`](https://sepolia.starkscan.co/contract/0x043b51f6f571137d0e7c3afa4ca689e84271ba97c5b6fc83349a3fe1275634f0) | Agent management, action gating, trust scoring |
 | **ContractRegistry** | [`0x075f9812...`](https://sepolia.starkscan.co/contract/0x075f9812753666ee506509de0de10bdea3ad1a79d4ed31817a0e2534c9d90607) | Target contract attestations (is_verified, has_source) |
@@ -162,13 +164,13 @@ Any HuggingFace transformer with SafeTensors weights:
 
 | Model | Params | Prove Time (A10G) | Recursive Felts |
 |-------|--------|-------------------|-----------------|
-| SmolLM2-135M (1 layer) | 135M | 3.3s | 981 |
-| SmolLM2-135M (30 layers) | 135M | 95s | 981 |
-| Qwen2-0.5B | 494M | ~20s | 981 |
-| Llama-3.2-3B | 3B | ~35s | 981 |
-| Phi-3-mini | 3.8B | ~45s | 981 |
-| Mistral-7B | 7B | ~90s | 981 |
-| Qwen3-14B (H100) | 14B | 103s | 981 |
+| SmolLM2-135M (1 layer) | 135M | 3.3s | ~4,934 (v2) / 981 (v1) |
+| SmolLM2-135M (30 layers) | 135M | 95s | ~4,934 (v2) / 981 (v1) |
+| Qwen2-0.5B | 494M | ~20s | ~4,934 (v2) / 981 (v1) |
+| Llama-3.2-3B | 3B | ~35s | ~4,934 (v2) / 981 (v1) |
+| Phi-3-mini | 3.8B | ~45s | ~4,934 (v2) / 981 (v1) |
+| Mistral-7B | 7B | ~90s | ~4,934 (v2) / 981 (v1) |
+| Qwen3-14B (H100) | 14B | 103s | ~4,934 (v2) / 981 (v1) |
 
 ### For Transaction Classification
 

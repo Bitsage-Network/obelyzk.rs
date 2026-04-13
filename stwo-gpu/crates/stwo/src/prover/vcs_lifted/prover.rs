@@ -81,6 +81,24 @@ impl<B: MerkleOpsLifted<H>, H: MerkleHasherLifted> MerkleProverLifted<B, H> {
 
         // Compute the queried values.
         let max_log_size = self.layers.len() - 1;
+
+        // Fold query positions from the global FRI domain to this tree's domain.
+        // When multiple components have different max_constraint_log_degree_bounds,
+        // the FRI queries are drawn at the largest domain, but this tree may be
+        // committed at a smaller domain. Fold excess positions by collapsing the
+        // top bits while preserving the twin-coset structure (bit 0 = coset index).
+        let tree_domain_log_size = max_log_size;
+        let global_query_log_size = query_positions.iter().copied().max().map(|m| (m + 1).next_power_of_two().ilog2()).unwrap_or(0) as usize;
+        let fold_shift = global_query_log_size.saturating_sub(tree_domain_log_size);
+        let folded_positions: Vec<usize> = if fold_shift > 0 {
+            query_positions.iter().map(|&pos| {
+                // Fold: keep the coset bit (bit 0) and fold the position bits
+                (pos >> (fold_shift + 1) << 1) | (pos & 1)
+            }).collect()
+        } else {
+            query_positions.to_vec()
+        };
+        let query_positions = &folded_positions;
         for col in columns.iter() {
             let log_size = col.len().ilog2() as usize;
             let shift = max_log_size - log_size;

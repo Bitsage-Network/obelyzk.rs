@@ -205,7 +205,11 @@ fn gkr_batch_weight_opening_jobs() -> usize {
             let cpus = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4);
-            (cpus / 2).clamp(2, 16)
+            #[cfg(test)]
+            let max = 2;
+            #[cfg(not(test))]
+            let max = (cpus / 2).clamp(2, 16);
+            max
         })
 }
 
@@ -982,7 +986,15 @@ fn apply_aggregated_oracle_sumcheck(
                     let cpus = std::thread::available_parallelism()
                         .map(|n| n.get())
                         .unwrap_or(4);
-                    (cpus / 2).clamp(2, 16)
+                    // In test builds, cap lower to avoid thread contention
+                    // when multiple GKR tests run in parallel.
+                    // In test builds, use minimal threads to prevent contention
+                    // when the test runner executes many GKR tests concurrently.
+                    #[cfg(test)]
+                    let max = 2;
+                    #[cfg(not(test))]
+                    let max = (cpus / 2).clamp(2, 16);
+                    max
                 });
 
             let pool = rayon::ThreadPoolBuilder::new()
@@ -1094,7 +1106,13 @@ fn apply_aggregated_oracle_sumcheck(
                 let cpus = std::thread::available_parallelism()
                     .map(|n| n.get())
                     .unwrap_or(4);
-                (cpus / 2).clamp(2, 16)
+                // In test builds, use minimal threads to prevent contention
+                // when the test runner executes many GKR tests concurrently.
+                #[cfg(test)]
+                let max = 2;
+                #[cfg(not(test))]
+                let max = (cpus / 2).clamp(2, 16);
+                max
             });
 
         let pool = rayon::ThreadPoolBuilder::new()

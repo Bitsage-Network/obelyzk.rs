@@ -11966,15 +11966,16 @@ mod tests {
             "batched_matmul_proofs should be empty in GKR mode"
         );
 
-        // Unified STARK covers both ReLU layers
+        // GKR now natively covers activations — unified STARK is skipped.
+        // The activation claims are still populated for downstream consumers.
         assert!(
-            proof.unified_stark.is_some(),
-            "should have unified STARK for activations"
+            proof.unified_stark.is_none(),
+            "unified STARK should be skipped (GKR covers activations natively)"
         );
         assert_eq!(
             proof.activation_claims.len(),
             2,
-            "2 activation layers in STARK"
+            "2 activation layer claims from GKR path"
         );
 
         // Output shape
@@ -12018,11 +12019,12 @@ mod tests {
             .expect("pure GKR with RMSNorm should succeed");
 
         assert!(proof.gkr_proof.is_some(), "should have GKR proof");
+        // GKR now natively covers RMSNorm — unified STARK is skipped.
         assert!(
-            proof.unified_stark.is_some(),
-            "should have unified STARK for RMSNorm"
+            proof.unified_stark.is_none(),
+            "unified STARK should be skipped (GKR covers RMSNorm natively)"
         );
-        assert_eq!(proof.rmsnorm_claims.len(), 1, "1 RMSNorm layer in STARK");
+        assert_eq!(proof.rmsnorm_claims.len(), 1, "1 RMSNorm layer claim from GKR path");
     }
 
     #[test]
@@ -12069,11 +12071,12 @@ mod tests {
             .expect("pure GKR with 2 RMSNorm layers should succeed");
 
         assert!(proof.gkr_proof.is_some(), "should have GKR proof");
+        // GKR now natively covers RMSNorm — unified STARK is skipped.
         assert!(
-            proof.unified_stark.is_some(),
-            "should have unified STARK for RMSNorm"
+            proof.unified_stark.is_none(),
+            "unified STARK should be skipped (GKR covers RMSNorm natively)"
         );
-        assert_eq!(proof.rmsnorm_claims.len(), 2, "2 RMSNorm layers in STARK");
+        assert_eq!(proof.rmsnorm_claims.len(), 2, "2 RMSNorm layer claims from GKR path");
     }
 
     #[test]
@@ -12202,9 +12205,10 @@ mod tests {
             "1 activation claim (ReLU)"
         );
         assert_eq!(proof.add_claims.len(), 1, "1 Add claim");
+        // GKR now natively covers activation + add — unified STARK is skipped.
         assert!(
-            proof.unified_stark.is_some(),
-            "unified STARK covers activation + add"
+            proof.unified_stark.is_none(),
+            "unified STARK should be skipped (GKR covers activation + add natively)"
         );
     }
 

@@ -2329,11 +2329,26 @@ fn main() {
                 Some(&resolved_policy),
             ) {
                 Ok(recursive_proof) => {
+                    // NOTE: io_commitment_felt252 uses the lossy QM31→felt252 conversion.
+                    // The Cairo contract's io_commitment check compares against this value
+                    // (read from the proof body). The caller param must match.
                     eprintln!(
                         "  Recursive STARK: {:.2}s, {} Poseidon perms, log_size={}",
                         recursive_proof.metadata.recursive_prove_time_secs,
                         recursive_proof.metadata.n_poseidon_perms,
                         recursive_proof.metadata.trace_log_size,
+                    );
+
+                    // Export Hades pairs for two-level recursion
+                    let hades_args_path = format!("{}.hades_args.json", cli.output.display());
+                    let hades_args = obelyzk::recursive::export_hades_pairs_cairo_args(
+                        &recursive_proof.hades_pairs,
+                    );
+                    std::fs::write(&hades_args_path, &hades_args).ok();
+                    eprintln!(
+                        "  Hades pairs: {} permutations → {}",
+                        recursive_proof.hades_pairs.len(),
+                        hades_args_path,
                     );
 
                     // Serialize recursive proof into calldata felts for single-TX submission
