@@ -27,9 +27,11 @@ PRESET_mistral_7b="mistralai/Mistral-7B-v0.3|32|15|symmetric8|3|4096|32|8|swiglu
 PRESET_phi3_mini="microsoft/Phi-3-mini-4k-instruct|32|7|symmetric8|2|3072|32|32|swiglu|Phi-3 Mini 3.8B (32 layers, fast)"
 PRESET_gemma2_9b="google/gemma-2-9b|42|18|symmetric8|4|3584|16|8|gelu|Gemma 2 9B (42 layers, GQA)"
 PRESET_qwen25_0_5b="Qwen/Qwen2.5-0.5B|24|1|symmetric8|1|896|14|2|swiglu|Qwen2.5 0.5B (24 layers, GQA)"
+PRESET_qwen3_4b="Qwen/Qwen3-4B|36|5|symmetric8|2|2560|32|8|swiglu|Qwen3 4B (36 layers, GQA)"
+PRESET_qwen3_1_7b="Qwen/Qwen3-1.7B|28|2|symmetric8|1|2048|16|8|swiglu|Qwen3 1.7B (28 layers, GQA)"
 
 # All known preset names
-_PRESETS=("qwen3-14b" "llama3-8b" "llama3-70b" "mistral-7b" "phi3-mini" "gemma2-9b" "qwen2.5-0.5b")
+_PRESETS=("qwen3-14b" "qwen3-4b" "qwen3-1.7b" "llama3-8b" "llama3-70b" "mistral-7b" "phi3-mini" "gemma2-9b" "qwen2.5-0.5b")
 
 # ─── Preset → Model ID Mapping ──────────────────────────────────────
 #
@@ -48,6 +50,8 @@ get_preset_model_id() {
         phi3-mini)  echo "0x10" ;;
         gemma2-9b)  echo "0x11" ;;
         qwen2.5-0.5b) echo "0x12" ;;
+        qwen3-4b)   echo "0x13" ;;
+        qwen3-1.7b) echo "0x14" ;;
         *)          echo "0x1" ;;
     esac
 }
