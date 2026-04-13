@@ -7,13 +7,68 @@
 use itertools::Itertools;
 use tracing::{span, Level};
 
+use crate::core::air::Component;
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
 use crate::core::poly::circle::CanonicCoset;
 use crate::prover::backend::{Backend, Col, Column, ColumnOps, CpuBackend};
 use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, SecureCirclePoly};
+use crate::prover::poly::twiddles::{TwiddleBuffer, TwiddleTree};
 use crate::prover::poly::BitReversedOrder;
 use crate::prover::secure_column::SecureColumnByCoords;
+
+/// Controls how constraint evaluations are accumulated and finalized.
+#[derive(Debug, Clone, Copy)]
+pub enum EvaluationMode {
+    /// Reuses evaluations from the commitment phase by splitting commitment domains
+    /// `log_expansion` times into (possibly non-canonical) subdomains.
+    ///
+    /// Faster, but only applicable when the committed evaluations already cover the needed domain
+    /// and the log_expansion is consistent across all components.
+    SubDomain { log_expansion: u32 },
+    /// Low-degree extends all columns to the evaluation domain before evaluating constraints.
+    ///
+    /// Slower, but always applicable.
+    ExtendToEvalDomain,
+}
+
+impl EvaluationMode {
+    /// Determines whether the committed trace columns can be used directly for constraint
+    /// evaluation or must be extended to the evaluation domain.
+    ///
+    /// Returns `SubDomain { log_expansion }` when all components share the same expansion ratio
+    /// (`log_blowup_factor - constraint_log_degree`).
+    /// Otherwise returns `ExtendToEvalDomain`.
+    pub fn infer(components: &[&dyn Component], log_blowup_factor: u32) -> Self {
+        let mut common_log_expansion: Option<u32> = None;
+        for c in components {
+            let trace_log_size = c
+                .trace_log_degree_bounds()
+                .iter()
+                .flatten()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            let constraint_log_degree = c
+                .max_constraint_log_degree_bound()
+                .saturating_sub(trace_log_size);
+            if constraint_log_degree > log_blowup_factor {
+                return EvaluationMode::ExtendToEvalDomain;
+            }
+            let log_expansion = log_blowup_factor - constraint_log_degree;
+            match common_log_expansion {
+                None => common_log_expansion = Some(log_expansion),
+                Some(prev) if prev != log_expansion => {
+                    return EvaluationMode::ExtendToEvalDomain;
+                }
+                _ => {}
+            }
+        }
+        EvaluationMode::SubDomain {
+            log_expansion: common_log_expansion.unwrap_or(0),
+        }
+    }
+}
 
 // TODO(ShaharS), rename terminology to constraints instead of columns.
 /// Accumulates evaluations of u_i(P), each at an evaluation domain of the size of that polynomial.
@@ -25,17 +80,25 @@ pub struct DomainEvaluationAccumulator<B: Backend> {
     /// `evaluation_i * alpha^(N - 1 - i)`
     /// where `N` is the total number of evaluations.
     sub_accumulations: Vec<Option<SecureColumnByCoords<B>>>,
+    /// Specifies how the constraints are evaluated.
+    evaluation_mode: EvaluationMode,
 }
 
 impl<B: Backend> DomainEvaluationAccumulator<B> {
     /// Creates a new accumulator.
     /// `random_coeff` should be a secure random field element, drawn from the channel.
     /// `max_log_size` is the maximum log_size of the accumulated evaluations.
-    pub fn new(random_coeff: SecureField, max_log_size: u32, total_columns: usize) -> Self {
+    pub fn new(
+        random_coeff: SecureField,
+        max_log_size: u32,
+        total_columns: usize,
+        evaluation_mode: EvaluationMode,
+    ) -> Self {
         let max_log_size = max_log_size as usize;
         Self {
             random_coeff_powers: B::generate_secure_powers(random_coeff, total_columns),
             sub_accumulations: (0..(max_log_size + 1)).map(|_| None).collect(),
+            evaluation_mode,
         }
     }
 
@@ -80,13 +143,19 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
             .truncate(self.random_coeff_powers.len() - n_coeffs);
     }
 
+    /// Returns the evaluation mode.
+    pub const fn evaluation_mode(&self) -> EvaluationMode {
+        self.evaluation_mode
+    }
+
     /// Returns the log size of the resulting polynomial.
     pub const fn log_size(&self) -> u32 {
         (self.sub_accumulations.len() - 1) as u32
     }
 
     /// Computes f(P) as coefficients.
-    pub fn finalize(self) -> SecureCirclePoly<B> {
+    /// `twiddles` must be precomputed for the max-size canonical domain's half coset.
+    pub fn finalize(self, twiddles: &TwiddleTree<B>) -> SecureCirclePoly<B> {
         assert_eq!(
             self.random_coeff_powers.len(),
             0,
@@ -104,17 +173,33 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
         let lifted_accumulation = B::lift_and_accumulate(sub_accumulations);
 
         if let Some(eval) = lifted_accumulation {
-            // `lifted_accumulation` must be of size `log_size`, i.e. there must at least one sub
-            // accumulation of size `log_size`.
-            let twiddles =
-                B::precompute_twiddles(CanonicCoset::new(log_size).circle_domain().half_coset);
+            // Determine the domain and twiddles based on evaluation mode.
+            let (domain, owned_twiddles) = match self.evaluation_mode {
+                EvaluationMode::SubDomain { log_expansion: 0 }
+                | EvaluationMode::ExtendToEvalDomain => {
+                    (CanonicCoset::new(log_size).circle_domain(), None)
+                }
+                EvaluationMode::SubDomain { log_expansion } => {
+                    let committed_domain =
+                        CanonicCoset::new(log_size + log_expansion).circle_domain();
+                    let subdomain = committed_domain.split(log_expansion).0;
+                    let tw = TwiddleTree {
+                        root_coset: subdomain.half_coset,
+                        // Only itwiddles are needed for interpolation.
+                        twiddles: TwiddleBuffer::empty(),
+                        itwiddles: twiddles.itwiddles.extract_subdomain_twiddles(
+                            committed_domain.log_size(),
+                            subdomain.log_size(),
+                        ),
+                    };
+                    (subdomain, Some(tw))
+                }
+            };
+            let twiddles_ref = owned_twiddles.as_ref().unwrap_or(twiddles);
 
             SecureCirclePoly(eval.columns.map(|c| {
-                CircleEvaluation::<B, BaseField, BitReversedOrder>::new(
-                    CanonicCoset::new(log_size).circle_domain(),
-                    c,
-                )
-                .interpolate_with_twiddles(&twiddles)
+                CircleEvaluation::<B, BaseField, BitReversedOrder>::new(domain, c)
+                    .interpolate_with_twiddles(twiddles_ref)
             }))
         } else {
             SecureCirclePoly(std::array::from_fn(|_| {
@@ -168,6 +253,7 @@ mod tests {
     use crate::core::circle::CirclePoint;
     use crate::core::fields::m31::M31;
     use crate::prover::backend::cpu::CpuCircleEvaluation;
+    use crate::prover::poly::circle::PolyOps;
     use crate::qm31;
 
     #[test]
@@ -195,6 +281,7 @@ mod tests {
             alpha,
             LOG_SIZE_BOUND - 1,
             evaluations.len(),
+            EvaluationMode::SubDomain { log_expansion: 0 },
         );
         let n_cols_per_size: [(u32, usize); (LOG_SIZE_BOUND - LOG_SIZE_MIN) as usize] =
             array::from_fn(|i| {
@@ -229,7 +316,12 @@ mod tests {
             }
             eval_chunk_offset += n_cols;
         }
-        let accumulator_poly = accumulator.finalize();
+        let twiddles = CpuBackend::precompute_twiddles(
+            CanonicCoset::new(LOG_SIZE_BOUND - 1)
+                .circle_domain()
+                .half_coset,
+        );
+        let accumulator_poly = accumulator.finalize(&twiddles);
 
         // Pick an arbitrary sample point.
         let point = CirclePoint::<SecureField>::get_point(98989892);

@@ -1,12 +1,19 @@
 use hashbrown::HashMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std_shims::{vec, BTreeMap, Vec};
+use std_shims::{vec, Vec};
 use thiserror::Error;
 
 use crate::core::fields::m31::BaseField;
 use crate::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
 use crate::core::ColumnVec;
+
+/// The log number of consecutive QM31s packed into a single Merkle leaf.
+///
+/// When FRI layers are skipped, adjacent evaluation points are grouped into chunks of
+/// `2^LOG_PACKED_LEAF_SIZE` and hashed together, reducing the number of Merkle tree leaves.
+pub const LOG_PACKED_LEAF_SIZE: u32 = 2;
+pub const PACKED_LEAF_SIZE: usize = 1 << LOG_PACKED_LEAF_SIZE;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Default)]
 pub struct MerkleDecommitmentLifted<H: MerkleHasherLifted> {
@@ -36,31 +43,32 @@ pub struct ExtendedMerkleDecommitmentLifted<H: MerkleHasherLifted> {
 }
 
 /// The verifier part of the vector commitment scheme.
-// TODO(Leo): the fields column_log_sizes and n_colums_per_log_size contain more information than
-// needed for implementing a merkle verifier (knowing the max and length of column_log_sizes is
-// enough). However, this info is needed by the pcs and storing it here makes integration easier.
-// Consider refactoring the API.
+// TODO(Leo): the fields column_log_sizes contains more information than needed for implementing a
+// merkle verifier (knowing the max and length of column_log_sizes is enough). However, this info is
+// needed by the pcs and storing it here makes integration easier. Consider refactoring the API.
 pub struct MerkleVerifierLifted<H: MerkleHasherLifted> {
     /// The commitment value.
     pub root: H::Hash,
     /// A vector containing the log sizes of the columns that were committed, in the order they
     /// were sent to the MerkleProver (i.e. before sorting).
     pub column_log_sizes: Vec<u32>,
-    /// A dictionary mapping an integer n to the number of columns of log size n.
-    pub n_columns_per_log_size: BTreeMap<u32, usize>,
+    /// The height of the Merkle tree. Note that it can be different than the largest committed
+    /// column if the verifier has set a larger lifting size.
+    pub height: u32,
 }
 
 impl<H: MerkleHasherLifted> MerkleVerifierLifted<H> {
-    pub fn new(root: H::Hash, column_log_sizes: Vec<u32>) -> Self {
-        let mut n_columns_per_log_size = BTreeMap::new();
-        for log_size in &column_log_sizes {
-            *n_columns_per_log_size.entry(*log_size).or_insert(0) += 1;
-        }
-
+    pub fn new(root: H::Hash, column_log_sizes: Vec<u32>, lifting_log_size: Option<u32>) -> Self {
+        let max_column_log_size = column_log_sizes.iter().copied().max().unwrap_or_default();
+        let height = lifting_log_size.unwrap_or(max_column_log_size);
+        assert!(
+            max_column_log_size <= height,
+            "The lifting log size is smaller than the largest column."
+        );
         Self {
             root,
             column_log_sizes,
-            n_columns_per_log_size,
+            height,
         }
     }
 
@@ -98,7 +106,7 @@ impl<H: MerkleHasherLifted> MerkleVerifierLifted<H> {
         queried_values: ColumnVec<Vec<BaseField>>,
         decommitment: MerkleDecommitmentLifted<H>,
     ) -> Result<(), MerkleVerificationError> {
-        let Some(max_log_size) = self.column_log_sizes.iter().max() else {
+        if self.height == 0 {
             return Ok(());
         };
 
@@ -106,7 +114,9 @@ impl<H: MerkleHasherLifted> MerkleVerifierLifted<H> {
         // are the same.
         for (i, j) in (0..query_positions.len()).tuple_windows() {
             if query_positions[i] == query_positions[j] {
-                assert_eq!(queried_values[i], queried_values[j]);
+                for col in &queried_values {
+                    assert_eq!(col[i], col[j]);
+                }
             }
         }
 
@@ -127,12 +137,12 @@ impl<H: MerkleHasherLifted> MerkleVerifierLifted<H> {
 
         // Build the leaves.
         let mut prev_layer_hashes: Vec<(usize, H::Hash)> = vec![];
-        for pos in query_positions.iter() {
+        for pos in query_positions.iter().dedup() {
             let row: Vec<_> = sorted_queries_iter
                 .iter_mut()
                 .map(|col_iter| *col_iter.next().unwrap())
                 .collect();
-            let mut hasher = H::default_with_initial_state();
+            let mut hasher = H::default();
             hasher.update_leaf(&row);
             prev_layer_hashes.push((*pos, hasher.finalize()));
         }
@@ -144,7 +154,7 @@ impl<H: MerkleHasherLifted> MerkleVerifierLifted<H> {
 
         let mut hash_witness = decommitment.hash_witness.into_iter();
         // Verify inner layers
-        for _ in 0..*max_log_size {
+        for _ in 0..self.height {
             let mut curr_layer_hashes: Vec<(usize, H::Hash)> = vec![];
             // Chunk the previous layer by siblings.
             for chunk in prev_layer_hashes.as_slice().chunk_by(|a, b| a.0 ^ 1 == b.0) {
@@ -196,12 +206,16 @@ pub enum MerkleVerificationError {
 #[cfg(all(test, feature = "prover"))]
 mod tests {
     use num_traits::Zero;
+    use rand::rngs::SmallRng;
+    use rand::{Rng, SeedableRng};
 
     use crate::core::fields::m31::BaseField;
     use crate::core::vcs::blake2_hash::Blake2sHash;
     use crate::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
     use crate::core::vcs_lifted::test_utils::prepare_merkle;
-    use crate::core::vcs_lifted::verifier::MerkleVerificationError;
+    use crate::core::vcs_lifted::verifier::{MerkleVerificationError, MerkleVerifierLifted};
+    use crate::prover::backend::CpuBackend;
+    use crate::prover::vcs_lifted::prover::MerkleProverLifted;
 
     #[test]
     fn test_merkle_success() {
@@ -271,5 +285,34 @@ mod tests {
             verifier.verify(&queries, values, decommitment).unwrap_err(),
             MerkleVerificationError::WitnessTooLong
         );
+    }
+
+    #[test]
+    fn test_merkle_duplicate_query_positions() {
+        let mut rng = SmallRng::seed_from_u64(42);
+        let log_sizes = vec![3, 4, 3];
+        let cols: Vec<Vec<BaseField>> = log_sizes
+            .iter()
+            .map(|&log_size| {
+                (0..(1 << log_size))
+                    .map(|_| BaseField::from(rng.gen_range(1..(1u32 << 30))))
+                    .collect()
+            })
+            .collect();
+        let max_log_size = *log_sizes.iter().max().unwrap();
+
+        let merkle = MerkleProverLifted::<CpuBackend, Blake2sMerkleHasher>::commit(
+            cols.iter().collect(),
+            max_log_size,
+            0,
+        );
+
+        // Use queries with a duplicate position.
+        let queries = vec![3, 3, 7];
+        let (values, decommitment) = merkle.decommit(&queries, cols.iter().collect());
+        let verifier = MerkleVerifierLifted::new(merkle.root(), log_sizes, None);
+        verifier
+            .verify(&queries, values, decommitment.decommitment)
+            .unwrap();
     }
 }

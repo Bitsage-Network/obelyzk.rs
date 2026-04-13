@@ -419,7 +419,7 @@ mod tests {
         const LOG_N_INSTANCES: u32 = 10;
         let config = PcsConfig {
             pow_bits: 10,
-            fri_config: FriConfig::new(5, 1, 64),
+            fri_config: FriConfig::new(5, 1, 64, 1),
         };
 
         // Prove.
@@ -501,7 +501,8 @@ mod tests {
             .unwrap();
         let config = PcsConfig {
             pow_bits: 10,
-            fri_config: FriConfig::new(5, 1, 64),
+            fri_config: FriConfig::new(5, 1, 64, 1),
+            lifting_log_size: None,
         };
 
         // Prove.
@@ -549,7 +550,8 @@ mod tests {
             .unwrap();
         let config = PcsConfig {
             pow_bits: 10,
-            fri_config: FriConfig::new(5, 1, 64),
+            fri_config: FriConfig::new(5, 1, 64, 1),
+            lifting_log_size: None,
         };
 
         // Prove.

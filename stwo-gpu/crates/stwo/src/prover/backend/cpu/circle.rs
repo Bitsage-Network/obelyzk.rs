@@ -9,12 +9,10 @@ use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
 use crate::core::fields::{batch_inverse_in_place, ExtensionOf};
 use crate::core::poly::circle::{CanonicCoset, CircleDomain};
-use crate::core::poly::line::LineDomain;
 use crate::core::poly::utils::{domain_line_twiddles_from_tree, fold, get_folding_alphas};
 use crate::core::utils::{bit_reverse, bit_reverse_index};
 use crate::prover::backend::{Col, Column};
 use crate::prover::fri::FriOps;
-use crate::prover::line::LineEvaluation;
 use crate::prover::poly::circle::{
     CircleCoefficients, CircleEvaluation, PolyOps, SecureEvaluation,
 };
@@ -147,8 +145,6 @@ impl PolyOps for CpuBackend {
     ) -> SecureField {
         let log_size = evals.domain.log_size();
         let mut folding_alphas = get_folding_alphas(point, log_size as usize);
-        let first_inner_layer_domain = LineDomain::new(Coset::half_odds(log_size - 1));
-        let mut layer_evaluation = LineEvaluation::new_zero(first_inner_layer_domain);
 
         let secure_field_values: Vec<SecureField> = evals
             .values
@@ -157,8 +153,7 @@ impl PolyOps for CpuBackend {
             .map(|f| SecureField::from(*f))
             .collect_vec();
 
-        CpuBackend::fold_circle_into_line(
-            &mut layer_evaluation,
+        let mut layer_evaluation = CpuBackend::fold_circle_into_line(
             &SecureEvaluation::new(
                 evals.domain,
                 SecureColumnByCoords::from_iter(secure_field_values),
@@ -168,8 +163,12 @@ impl PolyOps for CpuBackend {
         );
 
         while layer_evaluation.len() > 1 {
-            layer_evaluation =
-                CpuBackend::fold_line(&layer_evaluation, folding_alphas.pop().unwrap(), twiddles);
+            layer_evaluation = CpuBackend::fold_line(
+                &layer_evaluation,
+                folding_alphas.pop().unwrap(),
+                twiddles,
+                1,
+            );
         }
 
         layer_evaluation.values.at(0) / SecureField::from(2_u32.pow(log_size))
@@ -188,24 +187,46 @@ impl PolyOps for CpuBackend {
         domain: CircleDomain,
         twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
-        assert!(domain.half_coset.is_doubling_of(twiddles.root_coset));
+        let buffer = vec![BaseField::zero(); domain.size()];
+        Self::evaluate_into(poly, domain, twiddles, buffer)
+    }
 
-        let mut values = poly.extend(domain.log_size()).coeffs;
+    fn evaluate_into(
+        poly: &CircleCoefficients<Self>,
+        domain: CircleDomain,
+        twiddles: &TwiddleTree<Self>,
+        mut buffer: Col<Self, BaseField>,
+    ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
+        assert!(domain.half_coset.is_doubling_of(twiddles.root_coset));
+        assert_eq!(buffer.len(), domain.size());
+
+        // Copy extended coefficients into the buffer.
+        let poly_len = poly.coeffs.len();
+        buffer[..poly_len].copy_from_slice(&poly.coeffs);
+        for v in &mut buffer[poly_len..] {
+            *v = BaseField::zero();
+        }
 
         if domain.log_size() == 1 {
-            let (mut v0, mut v1) = (values[0], values[1]);
+            let (mut v0, mut v1) = (buffer[0], buffer[1]);
             butterfly(&mut v0, &mut v1, domain.half_coset.initial.y);
-            return CircleEvaluation::new(domain, vec![v0, v1]);
+            buffer[0] = v0;
+            buffer[1] = v1;
+            return CircleEvaluation::new(domain, buffer);
         }
 
         if domain.log_size() == 2 {
-            let (mut v0, mut v1, mut v2, mut v3) = (values[0], values[1], values[2], values[3]);
+            let (mut v0, mut v1, mut v2, mut v3) = (buffer[0], buffer[1], buffer[2], buffer[3]);
             let CirclePoint { x, y } = domain.half_coset.initial;
             butterfly(&mut v0, &mut v2, x);
             butterfly(&mut v1, &mut v3, x);
             butterfly(&mut v0, &mut v1, y);
             butterfly(&mut v2, &mut v3, -y);
-            return CircleEvaluation::new(domain, vec![v0, v1, v2, v3]);
+            buffer[0] = v0;
+            buffer[1] = v1;
+            buffer[2] = v2;
+            buffer[3] = v3;
+            return CircleEvaluation::new(domain, buffer);
         }
 
         let line_twiddles = domain_line_twiddles_from_tree(domain, &twiddles.twiddles);
@@ -213,14 +234,14 @@ impl PolyOps for CpuBackend {
 
         for (layer, layer_twiddles) in line_twiddles.iter().enumerate().rev() {
             for (h, &t) in layer_twiddles.iter().enumerate() {
-                fft_layer_loop(&mut values, layer + 1, h, t, butterfly);
+                fft_layer_loop(&mut buffer, layer + 1, h, t, butterfly);
             }
         }
         for (h, t) in circle_twiddles.enumerate() {
-            fft_layer_loop(&mut values, 0, h, t, butterfly);
+            fft_layer_loop(&mut buffer, 0, h, t, butterfly);
         }
 
-        CircleEvaluation::new(domain, values)
+        CircleEvaluation::new(domain, buffer)
     }
 
     fn precompute_twiddles(coset: Coset) -> TwiddleTree<Self> {

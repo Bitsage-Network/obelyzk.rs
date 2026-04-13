@@ -26,10 +26,19 @@ pub struct TreeSubspan {
     pub col_end: usize,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Configuration parameters for the committment scheme prover.
 pub struct PcsConfig {
+    /// The number of proof of work bits before the FRI queries.
     pub pow_bits: u32,
     pub fri_config: FriConfig,
+    /// An optional integer which controls the size of the lifting domain (This size includes the
+    /// `log_blowup_factor`). When specified, the prover lifts all polynomials to the domain of
+    /// given log size.
+    /// If `None`, the prover lifts each tree’s polynomials to the largest domain within that tree
+    /// (an implicit assumption here is that the largest domains are all of equal size across
+    /// trees, except possibly for the preprocessed tree).
+    pub lifting_log_size: Option<u32>,
 }
 impl PcsConfig {
     pub const fn security_bits(&self) -> u32 {
@@ -40,19 +49,24 @@ impl PcsConfig {
         let PcsConfig {
             pow_bits,
             fri_config,
+            lifting_log_size,
         } = self;
         let FriConfig {
             log_blowup_factor,
             n_queries,
             log_last_layer_degree_bound,
+            fold_step,
         } = fri_config;
 
-        channel.mix_felts(&[SecureField::from_u32_unchecked(
-            *pow_bits,
-            *log_blowup_factor,
-            *n_queries as u32,
-            *log_last_layer_degree_bound,
-        )]);
+        channel.mix_felts(&[
+            SecureField::from_u32_unchecked(
+                *pow_bits,
+                *log_blowup_factor,
+                *n_queries as u32,
+                *log_last_layer_degree_bound,
+            ),
+            SecureField::from_u32_unchecked(*fold_step, lifting_log_size.unwrap_or(0), 0, 0),
+        ]);
     }
 }
 
@@ -60,7 +74,8 @@ impl Default for PcsConfig {
     fn default() -> Self {
         Self {
             pow_bits: 10,
-            fri_config: FriConfig::new(0, 1, 3),
+            fri_config: FriConfig::new(0, 1, 3, 1),
+            lifting_log_size: None,
         }
     }
 }
@@ -71,7 +86,8 @@ mod tests {
     fn test_security_bits() {
         let config = super::PcsConfig {
             pow_bits: 42,
-            fri_config: super::FriConfig::new(10, 10, 70),
+            fri_config: super::FriConfig::new(10, 10, 70, 1),
+            lifting_log_size: None,
         };
         assert!(config.security_bits() == 10 * 70 + 42);
     }

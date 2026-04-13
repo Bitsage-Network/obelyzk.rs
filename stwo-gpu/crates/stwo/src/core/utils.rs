@@ -1,8 +1,28 @@
 use core::iter::Peekable;
+use core::ops::Deref;
 
 use std_shims::Vec;
 
 use super::fields::Field;
+
+/// An enum that either borrows or owns a value.
+/// Useful when a struct can optionally receive an external `& T` but also needs a fallback owned
+/// instance.
+pub enum MaybeOwned<'a, T> {
+    Borrowed(&'a T),
+    Owned(T),
+}
+
+impl<T> Deref for MaybeOwned<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        match self {
+            MaybeOwned::Borrowed(r) => r,
+            MaybeOwned::Owned(ref v) => v,
+        }
+    }
+}
 
 pub trait IteratorMutExt<'a, T: 'a>: Iterator<Item = &'a mut T> {
     fn assign(self, other: impl IntoIterator<Item = T>)

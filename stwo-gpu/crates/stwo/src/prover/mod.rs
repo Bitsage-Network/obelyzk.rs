@@ -4,14 +4,15 @@ use tracing::{info, instrument, span, Level};
 use crate::core::channel::{Channel, MerkleChannel};
 use crate::core::circle::CirclePoint;
 use crate::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
+use crate::core::pcs::utils::get_lifting_log_size;
 use crate::core::proof::{ExtendedStarkProof, StarkProof};
-use crate::core::verifier::{COMPOSITION_LOG_SPLIT, PREPROCESSED_TRACE_IDX};
+use crate::core::verifier::PREPROCESSED_TRACE_IDX;
 use crate::prover::backend::BackendForChannel;
 
 mod air;
-pub use air::component_prover::{ComponentProver, ComponentProvers, Trace};
-pub use air::{AccumulationOps, ColumnAccumulator, DomainEvaluationAccumulator};
-mod pcs;
+pub use air::component_prover::{ComponentProver, ComponentProvers, Poly, Trace};
+pub use air::{AccumulationOps, ColumnAccumulator, DomainEvaluationAccumulator, EvaluationMode};
+pub mod pcs;
 pub use pcs::quotient_ops::QuotientOps;
 pub use pcs::{CommitmentSchemeProver, CommitmentTreeProver, TreeBuilder};
 pub mod backend;
@@ -19,6 +20,7 @@ pub mod channel;
 pub mod fri;
 pub mod line;
 pub mod lookups;
+pub mod mempool;
 pub mod poly;
 pub mod secure_column;
 pub mod vcs;
@@ -58,8 +60,13 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
         class = "CompositionPolynomialGeneration"
     )
     .entered();
-    let composition_poly = component_provers.compute_composition_polynomial(random_coeff, &trace);
-    let composition_log_size = composition_poly.log_size();
+
+    let composition_poly = component_provers.compute_composition_polynomial(
+        random_coeff,
+        &trace,
+        commitment_scheme.twiddles,
+        commitment_scheme.config.fri_config.log_blowup_factor,
+    );
     span1.exit();
 
     // Commit on the Composition Polynomial by splitting its coeffs to two polynomialsof degree
@@ -74,9 +81,33 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
 
     // Draw OODS point.
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
-    // The max degree of a committed polynomial is equal to the degree of the composition poly /
-    // 2^COMPOSITION_LOG_SPLIT.
-    let max_log_degree_bound = composition_log_size - COMPOSITION_LOG_SPLIT;
+
+    let split_composition_log_size = commitment_scheme
+        .trees
+        .last()
+        .unwrap()
+        .commitment
+        .layers
+        .len() as u32
+        - 1;
+
+    // If `self.config.lifting_log_size` is None, the lifting size is the length of the split
+    // composition polynomials' domain.
+    let lifting_log_size =
+        get_lifting_log_size(&commitment_scheme.config, split_composition_log_size);
+    if include_all_preprocessed_columns {
+        // If all the preprocessed columns are included, the lifting log size must be greater than
+        // or equal to the preprocessed log size.
+        let preprocessed_log_size = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
+            .commitment
+            .layers
+            .len() as u32
+            - 1;
+        assert!(lifting_log_size >= preprocessed_log_size);
+    }
+    let max_log_degree_bound =
+        lifting_log_size - commitment_scheme.config.fri_config.log_blowup_factor;
+
     // Get mask sample points relative to oods point.
     let mut sample_points = component_provers.components().mask_points(
         oods_point,
@@ -95,7 +126,7 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     // Evaluate composition polynomial at OODS point and check that it matches the trace OODS
     // values. This is a sanity check.
     if proof
-        .extract_composition_oods_eval(oods_point, composition_log_size)
+        .extract_composition_oods_eval(oods_point, max_log_degree_bound)
         .unwrap()
         != component_provers
             .components()

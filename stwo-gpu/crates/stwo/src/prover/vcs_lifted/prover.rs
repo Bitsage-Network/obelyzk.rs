@@ -4,6 +4,7 @@ use tracing::{span, Level};
 
 use super::ops::MerkleOpsLifted;
 use crate::core::fields::m31::BaseField;
+use crate::core::fields::qm31::SECURE_EXTENSION_DEGREE;
 use crate::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
 use crate::core::vcs_lifted::verifier::{
     ExtendedMerkleDecommitmentLifted, MerkleDecommitmentLifted, MerkleDecommitmentLiftedAux,
@@ -30,21 +31,44 @@ impl<B: MerkleOpsLifted<H>, H: MerkleHasherLifted> MerkleProverLifted<B, H> {
     /// # Returns
     ///
     /// A new instance of `MerkleProverLifted` with the committed layers.
-    pub fn commit(columns: Vec<&Col<B, BaseField>>) -> Self {
+    pub fn commit(
+        columns: Vec<&Col<B, BaseField>>,
+        lifting_log_size: u32,
+        log_rows_per_leaf: u32,
+    ) -> Self {
         let _span = span!(Level::TRACE, "Merkle", class = "MerkleCommitment").entered();
         if columns.is_empty() {
             return Self {
-                layers: vec![B::build_leaves(&[])],
+                layers: vec![B::build_leaves(&[], lifting_log_size)],
             };
         }
 
-        let columns = &mut columns.into_iter().sorted_by_key(|c| c.len()).collect_vec();
-
-        let max_log_size = columns.last().unwrap().len().ilog2();
         let mut layers: Vec<Col<B, H::Hash>> = Vec::new();
-        layers.push(B::build_leaves(columns));
+        // We enter this branch only during FRI commit phase, in which we commit 4 columns of the
+        // same size. In particular, we don't need to sort the columns by size.
+        if log_rows_per_leaf > 0 {
+            // TODO(Leo): add support for higher log_rows_per_leaf sizes.
+            assert_eq!(
+                log_rows_per_leaf, 2,
+                "Leaf packing is only supported for log_rows_per_leaf = 2."
+            );
+            let columns: [&Col<B, BaseField>; SECURE_EXTENSION_DEGREE] =
+                columns.try_into().unwrap();
+            let packed_columns = B::pack_leaves_input(&columns);
+            let max_log_size = packed_columns[0].len().ilog2();
+            assert!(lifting_log_size >= max_log_size);
+            layers.push(B::build_leaves(
+                &packed_columns.iter().collect_vec(),
+                lifting_log_size,
+            ));
+        } else {
+            let sorted_columns = columns.into_iter().sorted_by_key(|c| c.len()).collect_vec();
+            let max_log_size = sorted_columns.last().unwrap().len().ilog2();
+            assert!(lifting_log_size >= max_log_size);
+            layers.push(B::build_leaves(&sorted_columns, lifting_log_size));
+        }
 
-        (0..max_log_size).for_each(|_| {
+        (0..lifting_log_size).for_each(|_| {
             layers.push(B::build_next_layer(layers.last().unwrap()));
         });
         layers.reverse();
@@ -171,7 +195,7 @@ mod test {
     use crate::core::poly::circle::CanonicCoset;
     use crate::core::vcs::blake2_hash::{Blake2sHash, Blake2sHasher};
     use crate::core::vcs::blake2_merkle::Blake2sMerkleHasher as Blake2sMerkleHasherCurrent;
-    use crate::core::vcs_lifted::blake2_merkle::{Blake2sMerkleHasher, LEAF_PREFIX};
+    use crate::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
     use crate::core::vcs_lifted::test_utils::lift_poly;
     use crate::prover::backend::cpu::CpuCirclePoly;
     use crate::prover::backend::CpuBackend;
@@ -183,7 +207,7 @@ mod test {
         let mixed_degree_merkle_prover =
             MerkleProver::<CpuBackend, Blake2sMerkleHasherCurrent>::commit(vec![]);
         let lifted_merkle_prover =
-            MerkleProverLifted::<CpuBackend, Blake2sMerkleHasher>::commit(vec![]);
+            MerkleProverLifted::<CpuBackend, Blake2sMerkleHasher>::commit(vec![], 0, 0);
         assert_eq!(
             mixed_degree_merkle_prover.layers,
             lifted_merkle_prover.layers
@@ -194,11 +218,15 @@ mod test {
         Vec<Vec<BaseField>>,
         MerkleProverLifted<CpuBackend, Blake2sHasher>,
     ) {
-        let columns: Vec<Vec<BaseField>> = (2..5)
+        let max_log_size = 4;
+        let columns: Vec<Vec<BaseField>> = (2..=max_log_size)
             .map(|i| (0..1 << i).map(M31::from_u32_unchecked).collect())
             .collect();
-        let merkle_prover =
-            MerkleProverLifted::<CpuBackend, Blake2sHasher>::commit(columns.iter().collect());
+        let merkle_prover = MerkleProverLifted::<CpuBackend, Blake2sHasher>::commit(
+            columns.iter().collect(),
+            max_log_size,
+            0,
+        );
         (columns, merkle_prover)
     }
 
@@ -209,14 +237,13 @@ mod test {
 
         // Compute the expected first leaf.
         let mut hasher = Blake2sHasher::default();
-        let mut data = LEAF_PREFIX.to_vec();
-        data.extend([0u8; 12]);
+        let data = [0u8; 12];
         hasher.update(&data);
         assert_eq!(hasher.finalize(), leaves[0]);
 
         // Compute the expected fifth leaf.
         let mut hasher = Blake2sHasher::default();
-        let mut data = LEAF_PREFIX.to_vec();
+        let mut data = Vec::new();
         data.extend(0_u32.to_le_bytes());
         data.extend(2_u32.to_le_bytes());
         data.extend(4_u32.to_le_bytes());
@@ -225,7 +252,7 @@ mod test {
 
         // Compute the expected last leaf.
         let mut hasher = Blake2sHasher::default();
-        let mut data = LEAF_PREFIX.to_vec();
+        let mut data = Vec::new();
         data.extend(3_u32.to_le_bytes());
         data.extend(7_u32.to_le_bytes());
         data.extend(15_u32.to_le_bytes());
@@ -266,8 +293,7 @@ mod test {
     #[test]
     fn test_bit_reverse_lifted_merkle_cpu() {
         const LOG_SIZE: u32 = 3;
-        const LIFTED_LOG_SIZE: u32 = 8;
-
+        const LIFTED_LOG_SIZE: u32 = 9;
         let domain = CanonicCoset::new(LOG_SIZE).circle_domain();
         let poly = CpuCirclePoly::new((0..1 << LOG_SIZE).map(BaseField::from).collect());
         let lifted_evaluation = lift_poly(&poly, LIFTED_LOG_SIZE);
@@ -280,16 +306,16 @@ mod test {
                 &lifted_evaluation.values,
                 &last_column,
             ]);
-        let lifted_merkle_prover_1 =
-            MerkleProverLifted::<CpuBackend, Blake2sMerkleHasher>::commit(vec![
-                &lifted_evaluation.values,
-                &last_column,
-            ]);
-        let lifted_merkle_prover_2 =
-            MerkleProverLifted::<CpuBackend, Blake2sMerkleHasher>::commit(vec![
-                &poly.evaluate(domain),
-                &last_column,
-            ]);
+        let lifted_merkle_prover_1 = MerkleProverLifted::<CpuBackend, Blake2sMerkleHasher>::commit(
+            vec![&lifted_evaluation.values, &last_column],
+            LIFTED_LOG_SIZE,
+            0,
+        );
+        let lifted_merkle_prover_2 = MerkleProverLifted::<CpuBackend, Blake2sMerkleHasher>::commit(
+            vec![&poly.evaluate(domain), &last_column],
+            LIFTED_LOG_SIZE,
+            0,
+        );
 
         assert_eq!(lifted_merkle_prover_1.root(), lifted_merkle_prover_2.root());
         assert_eq!(
