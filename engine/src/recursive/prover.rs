@@ -230,12 +230,10 @@ pub fn prove_recursive_with_policy(
             #[cfg(test)]
             "test" => PcsConfig::default(), // 13 bits — unit tests only
             _ => PcsConfig {
-                pow_bits: 16,
-                // log_last_layer_degree_bound=0: Cairo FRI verifier requires last layer
-                // to be a single constant (degree 0). Higher values are unsupported.
-                // 76 bits security: pow(16) + blowup(3)*queries(20) = 16+60 = 76
+                pow_bits: 20,
+                // 120 bits: pow(20) + blowup(5)*queries(20) = 20+100 = 120
                 // log_last_layer_degree_bound=0 required by Cairo FRI verifier
-                fri_config: stwo::core::fri::FriConfig::new(0, 3, 20),
+                fri_config: stwo::core::fri::FriConfig::new(0, 5, 20),
             },
         }
     };

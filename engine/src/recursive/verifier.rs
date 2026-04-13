@@ -49,8 +49,8 @@ pub fn verify_recursive(
             #[cfg(test)]
             "test" => PcsConfig::default(),
             _ => PcsConfig {
-                pow_bits: 16,
-                fri_config: stwo::core::fri::FriConfig::new(0, 3, 20),
+                pow_bits: 20,
+                fri_config: stwo::core::fri::FriConfig::new(0, 5, 20),
             },
         }
     };
