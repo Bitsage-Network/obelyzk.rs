@@ -13,7 +13,6 @@
 ///   Level 2: Chain STARK (digest chain integrity + binds to Level 1)
 
 use core::poseidon::hades_permutation;
-use core::poseidon::poseidon_hash_span;
 
 /// Verify all Hades permutation pairs and return a binding commitment.
 ///
@@ -32,9 +31,8 @@ fn main(input: Array<felt252>) -> Array<felt252> {
     // Read number of pairs
     let n_pairs: u32 = (*span.pop_front().unwrap()).try_into().unwrap();
 
-    // Verify each pair
-    let mut commitment_data: Array<felt252> = array![];
-    commitment_data.append(n_pairs.into());
+    // Verify each pair and build commitment via Hades chain
+    let mut commitment: felt252 = 0;
 
     let mut i: u32 = 0;
     loop {
@@ -60,19 +58,12 @@ fn main(input: Array<felt252>) -> Array<felt252> {
         assert!(actual_out1 == expected_out1, "Hades output[1] mismatch at pair {}", i);
         assert!(actual_out2 == expected_out2, "Hades output[2] mismatch at pair {}", i);
 
-        // Accumulate for commitment
-        commitment_data.append(in0);
-        commitment_data.append(in1);
-        commitment_data.append(in2);
-        commitment_data.append(expected_out0);
-        commitment_data.append(expected_out1);
-        commitment_data.append(expected_out2);
+        // Accumulate commitment via Hades chain (avoids poseidon_hash_span hole issue)
+        let (h, _, _) = hades_permutation(commitment, actual_out0, 2);
+        commitment = h;
 
         i += 1;
     };
-
-    // Compute binding commitment: Poseidon hash of all verified pairs
-    let commitment = poseidon_hash_span(commitment_data.span());
 
     // Return the commitment (used by chain STARK for binding)
     array![commitment, n_pairs.into()]
