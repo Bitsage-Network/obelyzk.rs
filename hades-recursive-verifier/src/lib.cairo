@@ -58,9 +58,15 @@ fn main(input: Array<felt252>) -> Array<felt252> {
         assert!(actual_out1 == expected_out1, "Hades output[1] mismatch at pair {}", i);
         assert!(actual_out2 == expected_out2, "Hades output[2] mismatch at pair {}", i);
 
-        // Accumulate commitment via Hades chain (avoids poseidon_hash_span hole issue)
-        let (h, _, _) = hades_permutation(commitment, actual_out0, 2);
-        commitment = h;
+        // Accumulate commitment via Hades chain.
+        // Read all 3 outputs to avoid Poseidon builtin segment holes.
+        let (h, h1, h2) = hades_permutation(commitment, actual_out0, 2);
+        if h1 == h2 {
+            // Unreachable in practice but forces VM to materialize h1, h2
+            commitment = h + 1;
+        } else {
+            commitment = h;
+        }
 
         i += 1;
     };
