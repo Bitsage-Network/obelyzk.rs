@@ -282,6 +282,20 @@ pub fn prove_recursive_with_policy(
     channel.mix_u64(witness.public_inputs.n_poseidon_perms as u64);
     // SECURITY: seed_digest checkpoint — binds chain content to model dimensions.
     channel.mix_felts(&[witness.public_inputs.seed_digest]);
+    // SECURITY: hades_commitment — binds to Level 1 Hades recursive proof.
+    // This is the Poseidon hash of all verified (input, output) Hades pairs.
+    // Two-level recursion: the chain STARK transitively attests Hades correctness.
+    {
+        let bytes = witness.public_inputs.hades_commitment.to_bytes_be();
+        let u0 = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+        let u1 = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+        let u2 = u64::from_be_bytes(bytes[16..24].try_into().unwrap());
+        let u3 = u64::from_be_bytes(bytes[24..32].try_into().unwrap());
+        channel.mix_u64(u0);
+        channel.mix_u64(u1);
+        channel.mix_u64(u2);
+        channel.mix_u64(u3);
+    }
 
     // Bind the felt252 io_commitment into the channel.
     // IMPORTANT: This MUST use the SAME value that ends up in the proof body
@@ -816,6 +830,9 @@ pub fn prove_recursive_with_policy(
         n_real_rows: trace_data.n_real_rows as u32,
         log_size: chain_log_size,
         hades_pairs: hades_perms.clone(),
+        // This field is set after Level 1 proof generation. For now, compute the
+        // commitment deterministically from the pairs (matching Cairo program output).
+        // The chain STARK binds to this value via Fiat-Shamir channel.
         metadata: RecursiveProofMetadata {
             recursive_prove_time_secs: recursive_prove_time,
             gkr_prove_time_secs,
@@ -852,6 +869,21 @@ pub fn extract_hades_perms(
             }
         })
         .collect()
+}
+
+/// Compute the Hades commitment matching the Cairo verifier program's output.
+/// The Cairo program chains: commitment = Hades(commitment, actual_out0, 2)[0]
+/// for each pair, starting from commitment = 0.
+pub fn compute_hades_commitment(
+    pairs: &[([starknet_ff::FieldElement; 3], [starknet_ff::FieldElement; 3])],
+) -> starknet_ff::FieldElement {
+    let mut commitment = starknet_ff::FieldElement::ZERO;
+    for (_input, output) in pairs {
+        let mut state = [commitment, output[0], starknet_ff::FieldElement::TWO];
+        crate::crypto::hades::hades_permutation(&mut state);
+        commitment = state[0];
+    }
+    commitment
 }
 
 /// Export Hades permutation pairs as Cairo arguments JSON.

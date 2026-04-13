@@ -622,6 +622,19 @@ pub fn generate_witness_with_policy(
     let (_instrumented_poseidon, n_sumcheck_rounds, n_qm31_ops, n_equality_checks) =
         channel.counters();
 
+    // Compute hades_commitment from all HadesPerm pairs in the ops.
+    // This matches the Cairo Hades verifier program's output.
+    let hades_commitment = {
+        let pairs: Vec<_> = channel.ops().iter().filter_map(|op| {
+            if let WitnessOp::HadesPerm { input, output } = op {
+                Some((*input, *output))
+            } else {
+                None
+            }
+        }).collect();
+        super::prover::compute_hades_commitment(&pairs)
+    };
+
     let witness = GkrVerifierWitness {
         ops: channel.into_ops(),
         public_inputs: RecursivePublicInputs {
@@ -631,6 +644,7 @@ pub fn generate_witness_with_policy(
             n_layers: d as u32,
             n_poseidon_perms: total_poseidon_calls as u32,
             seed_digest,
+            hades_commitment,
         },
         // Use the production verifier's total count (covers ALL layer types)
         n_poseidon_perms: total_poseidon_calls,

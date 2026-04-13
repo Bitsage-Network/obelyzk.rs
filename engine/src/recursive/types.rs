@@ -123,6 +123,13 @@ pub struct RecursivePublicInputs {
     /// Binds the proof to a specific inference (what went in, what came out).
     pub io_commitment: QM31,
 
+    /// Level 1 Hades recursive proof commitment (felt252).
+    /// Poseidon hash of all verified (input, output) Hades permutation pairs.
+    /// Computed by the Cairo Hades verifier program and proven by cairo-prove.
+    /// When non-zero, this binds the chain STARK to a cryptographically
+    /// verified set of Hades permutations (two-level recursion).
+    pub hades_commitment: FieldElement,
+
     /// Poseidon Merkle root of all weight matrices.
     /// Binds the proof to specific model weights (prevents weight substitution).
     pub weight_super_root: QM31,

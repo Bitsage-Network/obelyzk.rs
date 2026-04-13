@@ -3612,6 +3612,9 @@ mod recursive_serde {
         serialize_u32(proof.public_inputs.n_poseidon_perms, &mut output);
         serialize_qm31(proof.public_inputs.seed_digest, &mut output);
 
+        // Level 1 Hades recursive proof commitment (two-level recursion binding)
+        output.push(proof.public_inputs.hades_commitment);
+
         // Full felt252 IO commitment for on-chain cross-checking.
         output.push(proof.io_commitment_felt252);
 
