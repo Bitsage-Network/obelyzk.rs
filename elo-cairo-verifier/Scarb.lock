@@ -11,6 +11,7 @@ version = "0.4.0"
 dependencies = [
  "bounded_int",
  "snforge_std",
+ "stwo_cairo_air",
  "stwo_constraint_framework",
  "stwo_verifier_core",
  "stwo_verifier_utils",
@@ -27,6 +28,16 @@ version = "0.54.1"
 source = "git+https://github.com/foundry-rs/starknet-foundry?tag=v0.54.1#3128a7b74129172b26caa3c7ff3851cda4869985"
 dependencies = [
  "snforge_scarb_plugin",
+]
+
+[[package]]
+name = "stwo_cairo_air"
+version = "0.1.0"
+dependencies = [
+ "bounded_int",
+ "stwo_constraint_framework",
+ "stwo_verifier_core",
+ "stwo_verifier_utils",
 ]
 
 [[package]]
