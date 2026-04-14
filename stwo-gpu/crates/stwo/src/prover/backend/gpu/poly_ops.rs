@@ -16,6 +16,8 @@ use tracing::{span, Level};
 
 #[cfg(feature = "cuda-runtime")]
 use num_traits::One;
+#[cfg(feature = "cuda-runtime")]
+use crate::prover::backend::Column;
 
 use super::conversion::{
     circle_coeffs_ref_to_simd, circle_eval_ref_to_simd, twiddle_ref_to_simd, twiddle_to_gpu,
