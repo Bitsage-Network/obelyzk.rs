@@ -59,6 +59,15 @@ pub trait IGeneralStwoVerifier<TContractState> {
 
     fn is_verified(self: @TContractState, proof_hash: felt252) -> bool;
     fn get_verification_count(self: @TContractState, program_hash: felt252) -> u64;
+
+    /// Propose a contract class upgrade (owner only, subject to timelock).
+    fn propose_upgrade(ref self: TContractState, new_class_hash: starknet::ClassHash);
+    /// Execute a proposed upgrade after the timelock has elapsed.
+    fn execute_upgrade(ref self: TContractState);
+    /// Cancel a pending upgrade.
+    fn cancel_upgrade(ref self: TContractState);
+    /// Get the pending upgrade info.
+    fn get_pending_upgrade(self: @TContractState) -> (starknet::ClassHash, u64);
 }
 
 #[starknet::contract]
@@ -100,7 +109,13 @@ mod GeneralStwoVerifierContract {
         session_data: Map<(u64, u32), felt252>,
         // Running hash of all chunks for integrity
         session_data_hash: Map<u64, felt252>,
+        // Upgradability (timelock)
+        pending_upgrade: starknet::ClassHash,
+        upgrade_proposed_at: u64,
     }
+
+    // 5 minutes for dev/Sepolia. Bump to 86400 (24h) before mainnet.
+    const UPGRADE_DELAY: u64 = 300;
 
     #[event]
     #[derive(Drop, starknet::Event)]
@@ -109,6 +124,8 @@ mod GeneralStwoVerifierContract {
         StwoProofVerified: StwoProofVerified,
         StreamOpened: StreamOpened,
         StreamChunkReceived: StreamChunkReceived,
+        UpgradeProposed: UpgradeProposed,
+        UpgradeExecuted: UpgradeExecuted,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -128,6 +145,18 @@ mod GeneralStwoVerifierContract {
         verified_at: u64,
         submitter: ContractAddress,
         mode: felt252, // 'single' or 'stream'
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct UpgradeProposed {
+        new_class_hash: starknet::ClassHash,
+        proposed_at: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct UpgradeExecuted {
+        new_class_hash: starknet::ClassHash,
+        executed_at: u64,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -324,6 +353,47 @@ mod GeneralStwoVerifierContract {
 
         fn get_verification_count(self: @ContractState, program_hash: felt252) -> u64 {
             self.verification_count.read(program_hash)
+        }
+
+        // ─── Upgradability (timelocked) ───────────────────────────────────
+        fn propose_upgrade(ref self: ContractState, new_class_hash: starknet::ClassHash) {
+            assert!(get_caller_address() == self.owner.read(), "Only owner");
+            assert!(new_class_hash.into() != 0_felt252, "Zero class hash");
+
+            let now = get_block_timestamp();
+            self.pending_upgrade.write(new_class_hash);
+            self.upgrade_proposed_at.write(now);
+            self.emit(UpgradeProposed { new_class_hash, proposed_at: now });
+        }
+
+        fn execute_upgrade(ref self: ContractState) {
+            assert!(get_caller_address() == self.owner.read(), "Only owner");
+
+            let new_class_hash = self.pending_upgrade.read();
+            assert!(new_class_hash.into() != 0_felt252, "No upgrade pending");
+
+            let proposed_at = self.upgrade_proposed_at.read();
+            let now = get_block_timestamp();
+            assert!(now >= proposed_at + UPGRADE_DELAY, "Upgrade delay not elapsed");
+
+            // Clear pending state
+            self.pending_upgrade.write(0.try_into().unwrap());
+            self.upgrade_proposed_at.write(0);
+
+            self.emit(UpgradeExecuted { new_class_hash, executed_at: now });
+
+            // Replace contract class (takes effect immediately)
+            starknet::syscalls::replace_class_syscall(new_class_hash).unwrap();
+        }
+
+        fn cancel_upgrade(ref self: ContractState) {
+            assert!(get_caller_address() == self.owner.read(), "Only owner");
+            self.pending_upgrade.write(0.try_into().unwrap());
+            self.upgrade_proposed_at.write(0);
+        }
+
+        fn get_pending_upgrade(self: @ContractState) -> (starknet::ClassHash, u64) {
+            (self.pending_upgrade.read(), self.upgrade_proposed_at.read())
         }
     }
 
