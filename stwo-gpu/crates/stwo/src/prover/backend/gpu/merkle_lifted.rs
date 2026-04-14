@@ -10,15 +10,33 @@
 use starknet_ff::FieldElement as FieldElement252;
 
 use crate::core::fields::m31::BaseField;
+use crate::core::fields::qm31::SECURE_EXTENSION_DEGREE;
 use crate::core::vcs::blake2_hash::Blake2sHash;
 use crate::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasherGeneric;
 use crate::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
+use crate::core::vcs_lifted::verifier::PACKED_LEAF_SIZE;
 use crate::prover::backend::simd::SimdBackend;
 use crate::prover::backend::Col;
-use crate::prover::vcs_lifted::ops::MerkleOpsLifted;
+use crate::prover::vcs_lifted::ops::{MerkleOpsLifted, PackLeavesOps};
 
 use super::conversion::base_col_ref_to_simd;
 use super::GpuBackend;
+
+// =============================================================================
+// PackLeavesOps
+// =============================================================================
+
+impl PackLeavesOps for GpuBackend {
+    fn pack_leaves_input(
+        values: &[&Col<Self, BaseField>; SECURE_EXTENSION_DEGREE],
+    ) -> [Col<Self, BaseField>; SECURE_EXTENSION_DEGREE * PACKED_LEAF_SIZE] {
+        // GpuBackend::Column<BaseField> = BaseColumn = SimdBackend::Column<BaseField>
+        // so we can delegate to SimdBackend directly.
+        let simd_values: [&Col<SimdBackend, BaseField>; SECURE_EXTENSION_DEGREE] =
+            std::array::from_fn(|i| base_col_ref_to_simd(values[i]));
+        <SimdBackend as PackLeavesOps>::pack_leaves_input(&simd_values)
+    }
+}
 
 // =============================================================================
 // Blake2s Lifted Merkle (generic over IS_M31_OUTPUT)
@@ -27,7 +45,7 @@ use super::GpuBackend;
 impl<const IS_M31_OUTPUT: bool> MerkleOpsLifted<Blake2sMerkleHasherGeneric<IS_M31_OUTPUT>>
     for GpuBackend
 {
-    fn build_leaves(columns: &[&Col<Self, BaseField>]) -> Col<Self, Blake2sHash> {
+    fn build_leaves(columns: &[&Col<Self, BaseField>], lifting_log_size: u32) -> Col<Self, Blake2sHash> {
         // GpuBackend::Column<BaseField> = BaseColumn = SimdBackend::Column<BaseField>
         // GpuBackend::Column<Blake2sHash> = Vec<Blake2sHash> = SimdBackend::Column<Blake2sHash>
         // So we can pass through directly.
@@ -35,6 +53,7 @@ impl<const IS_M31_OUTPUT: bool> MerkleOpsLifted<Blake2sMerkleHasherGeneric<IS_M3
             columns.iter().map(|c| base_col_ref_to_simd(*c)).collect();
         <SimdBackend as MerkleOpsLifted<Blake2sMerkleHasherGeneric<IS_M31_OUTPUT>>>::build_leaves(
             &simd_columns,
+            lifting_log_size,
         )
     }
 
@@ -53,10 +72,11 @@ impl<const IS_M31_OUTPUT: bool> MerkleOpsLifted<Blake2sMerkleHasherGeneric<IS_M3
 impl MerkleOpsLifted<Poseidon252MerkleHasher> for GpuBackend {
     fn build_leaves(
         columns: &[&Col<Self, BaseField>],
+        lifting_log_size: u32,
     ) -> Col<Self, FieldElement252> {
         let simd_columns: Vec<&Col<SimdBackend, BaseField>> =
             columns.iter().map(|c| base_col_ref_to_simd(*c)).collect();
-        <SimdBackend as MerkleOpsLifted<Poseidon252MerkleHasher>>::build_leaves(&simd_columns)
+        <SimdBackend as MerkleOpsLifted<Poseidon252MerkleHasher>>::build_leaves(&simd_columns, lifting_log_size)
     }
 
     fn build_next_layer(

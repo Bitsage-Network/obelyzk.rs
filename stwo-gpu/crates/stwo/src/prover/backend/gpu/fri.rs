@@ -70,7 +70,7 @@ use crate::prover::poly::BitReversedOrder;
 use crate::prover::secure_column::SecureColumnByCoords;
 
 use super::conversion::{
-    line_eval_mut_to_simd, secure_eval_ref_to_simd, secure_eval_to_gpu, twiddle_ref_to_simd,
+    secure_eval_ref_to_simd, secure_eval_to_gpu, twiddle_ref_to_simd,
 };
 use super::GpuBackend;
 
@@ -83,6 +83,7 @@ impl FriOps for GpuBackend {
         eval: &LineEvaluation<Self>,
         alpha: SecureField,
         twiddles: &TwiddleTree<Self>,
+        fold_step: u32,
     ) -> LineEvaluation<Self> {
         let _span = span!(Level::TRACE, "GpuBackend::fold_line").entered();
 
@@ -93,15 +94,24 @@ impl FriOps for GpuBackend {
             let simd_eval = unsafe {
                 &*(eval as *const LineEvaluation<GpuBackend> as *const LineEvaluation<SimdBackend>)
             };
-            let cpu_eval = fold_line_cpu(&simd_eval.to_cpu(), alpha);
-            let result: LineEvaluation<SimdBackend> = LineEvaluation::new(
-                cpu_eval.domain(),
-                cpu_eval.values.into_iter().collect(),
-            );
-            return unsafe { std::mem::transmute(result) };
+            let simd_twiddles = twiddle_ref_to_simd(twiddles);
+            return unsafe {
+                std::mem::transmute(SimdBackend::fold_line(simd_eval, alpha, simd_twiddles, fold_step))
+            };
         }
 
-        // Try CUDA path for large evaluations
+        // For non-unit fold steps, delegate to SIMD (CUDA path only optimized for fold_step=1)
+        if fold_step != 1 {
+            let simd_twiddles = twiddle_ref_to_simd(twiddles);
+            let simd_eval = unsafe {
+                &*(eval as *const LineEvaluation<GpuBackend> as *const LineEvaluation<SimdBackend>)
+            };
+            return unsafe {
+                std::mem::transmute(SimdBackend::fold_line(simd_eval, alpha, simd_twiddles, fold_step))
+            };
+        }
+
+        // Try CUDA path for large evaluations (fold_step == 1)
         #[cfg(feature = "cuda-runtime")]
         if log_size >= GPU_FRI_THRESHOLD_LOG_SIZE && super::cuda_executor::is_cuda_available() {
             if let Ok(result) = fold_line_cuda(eval, alpha, twiddles, log_size) {
@@ -115,39 +125,38 @@ impl FriOps for GpuBackend {
     }
 
     fn fold_circle_into_line(
-        dst: &mut LineEvaluation<Self>,
         src: &SecureEvaluation<Self, BitReversedOrder>,
         alpha: SecureField,
         twiddles: &TwiddleTree<Self>,
-    ) {
+    ) -> LineEvaluation<Self> {
         let _span = span!(Level::TRACE, "GpuBackend::fold_circle_into_line").entered();
 
         let log_size = src.len().ilog2();
 
-        // Small evaluations: use CPU fallback
+        // Small evaluations: use SIMD fallback
         if log_size <= LOG_N_LANES {
-            let simd_dst = line_eval_mut_to_simd(dst);
             let simd_src = secure_eval_ref_to_simd(src);
-            let mut cpu_dst = simd_dst.to_cpu();
-            fold_circle_into_line_cpu(&mut cpu_dst, &simd_src.to_cpu(), alpha);
-            *simd_dst = LineEvaluation::new(
-                cpu_dst.domain(),
-                SecureColumnByCoords::from_cpu(cpu_dst.values),
-            );
-            return;
+            let simd_twiddles = twiddle_ref_to_simd(twiddles);
+            return unsafe {
+                std::mem::transmute(SimdBackend::fold_circle_into_line(
+                    simd_src,
+                    alpha,
+                    simd_twiddles,
+                ))
+            };
         }
 
         // Try CUDA path for large evaluations
         #[cfg(feature = "cuda-runtime")]
         if log_size >= GPU_FRI_THRESHOLD_LOG_SIZE && super::cuda_executor::is_cuda_available() {
-            if fold_circle_into_line_cuda(dst, src, alpha, twiddles, log_size).is_ok() {
-                return;
+            if let Ok(result) = fold_circle_into_line_cuda(src, alpha, twiddles, log_size) {
+                return result;
             }
             // Fall through to SIMD on CUDA error
         }
 
         // SIMD path (parallel with rayon)
-        fold_circle_into_line_simd(dst, src, alpha, twiddles, log_size);
+        fold_circle_into_line_simd(src, alpha, twiddles, log_size)
     }
 
     fn resolve_pending_line_evaluation(eval: &mut LineEvaluation<Self>) {
@@ -250,23 +259,21 @@ fn fold_line_simd(
 }
 
 fn fold_circle_into_line_simd(
-    dst: &mut LineEvaluation<GpuBackend>,
     src: &SecureEvaluation<GpuBackend, BitReversedOrder>,
     alpha: SecureField,
     twiddles: &TwiddleTree<GpuBackend>,
     log_size: u32,
-) {
+) -> LineEvaluation<GpuBackend> {
+    use crate::core::circle::Coset;
+    use crate::core::poly::line::LineDomain;
+
     let domain = src.domain;
-    let alpha_sq = alpha * alpha;
     let simd_twiddles = twiddle_ref_to_simd(twiddles);
     let itwiddles = domain_line_twiddles_from_tree(domain, &simd_twiddles.itwiddles)[0];
 
     let simd_src = unsafe {
         &*(src as *const SecureEvaluation<GpuBackend, BitReversedOrder>
             as *const SecureEvaluation<SimdBackend, BitReversedOrder>)
-    };
-    let simd_dst = unsafe {
-        &*(dst as *const LineEvaluation<GpuBackend> as *const LineEvaluation<SimdBackend>)
     };
 
     let n_vecs = 1usize << (log_size - 1 - LOG_N_LANES);
@@ -296,19 +303,20 @@ fn fold_circle_into_line_simd(
                     PackedSecureField::from_packed_m31s(array::from_fn(|i| pairs[i].1));
                 val0 + PackedSecureField::broadcast(alpha) * val1
             };
-            let dst_val = unsafe { simd_dst.values.packed_at(vec_index) };
-            let new_val = dst_val * PackedSecureField::broadcast(alpha_sq) + value;
-            (vec_index, new_val)
+            (vec_index, value)
         })
         .collect()
     };
 
-    let simd_dst_mut = unsafe {
-        &mut *(dst as *mut LineEvaluation<GpuBackend> as *mut LineEvaluation<SimdBackend>)
-    };
+    let line_log_size = log_size - 1;
+    let dst_domain = LineDomain::new(Coset::half_odds(line_log_size));
+    let mut folded_values = SecureColumnByCoords::<SimdBackend>::zeros(1 << line_log_size);
     for (vec_index, value) in results {
-        unsafe { simd_dst_mut.values.set_packed(vec_index, value) };
+        unsafe { folded_values.set_packed(vec_index, value) };
     }
+
+    let result: LineEvaluation<SimdBackend> = LineEvaluation::new(dst_domain, folded_values);
+    unsafe { std::mem::transmute(result) }
 }
 
 // =============================================================================
@@ -382,12 +390,13 @@ fn fold_line_cuda(
 
 #[cfg(feature = "cuda-runtime")]
 fn fold_circle_into_line_cuda(
-    dst: &mut LineEvaluation<GpuBackend>,
     src: &SecureEvaluation<GpuBackend, BitReversedOrder>,
     alpha: SecureField,
     _twiddles: &TwiddleTree<GpuBackend>,
     _log_size: u32,
-) -> Result<(), super::cuda_executor::CudaFftError> {
+) -> Result<LineEvaluation<GpuBackend>, super::cuda_executor::CudaFftError> {
+    use crate::core::circle::Coset;
+    use crate::core::poly::line::LineDomain;
     use super::conversion::{secure_column_to_aos, aos_to_secure_column};
     use super::memory::{
         take_cached_fri_gpu_data, cache_fri_gpu_data, cache_fri_column_gpu,
@@ -405,13 +414,8 @@ fn fold_circle_into_line_cuda(
         &*(src as *const SecureEvaluation<GpuBackend, BitReversedOrder>
             as *const SecureEvaluation<SimdBackend, BitReversedOrder>)
     };
-    let simd_dst = unsafe {
-        &*(dst as *const LineEvaluation<GpuBackend> as *const LineEvaluation<SimdBackend>)
-    };
 
     let d_src_cached = take_cached_fri_gpu_data(&simd_src.values);
-    // Drop any cached dst GPU data (not used in this path)
-    let _ = take_cached_fri_gpu_data(&simd_dst.values);
 
     let executor = super::cuda_executor::get_cuda_executor().map_err(|e| e.clone())?;
 
@@ -419,9 +423,9 @@ fn fold_circle_into_line_cuda(
     let circle_cache_key = (domain.half_coset.initial_index.0, log_size);
     let d_itwiddles = get_or_upload_twiddle_gpu(circle_cache_key, &itwiddles_u32, &executor.device)?;
 
-    // Upload src and dst to GPU, fold, download result
+    // Upload src to GPU, fold, download result
     let src_aos = secure_column_to_aos(&simd_src.values, n);
-    let mut dst_aos = secure_column_to_aos(&simd_dst.values, n_dst);
+    let mut dst_aos = vec![0u32; n_dst * 4];
 
     // Use GPU-cached src if available (skip H2D for src)
     let d_result = if let Some(d_src_gpu) = d_src_cached {
@@ -437,23 +441,22 @@ fn fold_circle_into_line_cuda(
     };
 
     let result_col = aos_to_secure_column(&dst_aos, n_dst);
-    let simd_dst_mut = unsafe {
-        &mut *(dst as *mut LineEvaluation<GpuBackend> as *mut LineEvaluation<SimdBackend>)
-    };
-    simd_dst_mut.values = result_col;
 
     // Deinterleave AoS → SoA on GPU for Poseidon252 Merkle cache
     if let Ok(soa_cols) = executor.execute_deinterleave_aos_to_soa(&d_result, n_dst) {
         for (i, d_col) in soa_cols.into_iter().enumerate() {
-            let col_ptr = simd_dst_mut.values.columns[i].as_slice().as_ptr() as usize;
+            let col_ptr = result_col.columns[i].as_slice().as_ptr() as usize;
             cache_fri_column_gpu(col_ptr, d_col);
         }
     }
 
     // Cache AoS for next fold round
-    cache_fri_gpu_data(&simd_dst_mut.values, d_result);
+    cache_fri_gpu_data(&result_col, d_result);
 
-    Ok(())
+    let line_log_size = log_size - 1;
+    let dst_domain = LineDomain::new(Coset::half_odds(line_log_size));
+    let result: LineEvaluation<SimdBackend> = LineEvaluation::new(dst_domain, result_col);
+    Ok(unsafe { std::mem::transmute(result) })
 }
 
 /// Convert a `SecureField` (QM31) to its 4 raw u32 components.

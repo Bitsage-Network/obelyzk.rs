@@ -26,6 +26,7 @@ use crate::core::pcs::quotients::{quotient_constants, ColumnSampleBatch};
 use crate::prover::backend::simd::SimdBackend;
 use crate::prover::pcs::quotient_ops::{AccumulatedNumerators, QuotientOps};
 use crate::prover::poly::circle::{CircleEvaluation, SecureEvaluation};
+use crate::prover::poly::twiddles::TwiddleTree;
 use crate::prover::poly::BitReversedOrder;
 use crate::prover::secure_column::SecureColumnByCoords;
 
@@ -34,6 +35,7 @@ impl QuotientOps for GpuBackend {
         columns: &[&CircleEvaluation<Self, BaseField, BitReversedOrder>],
         sample_batches: &[ColumnSampleBatch],
         accumulated_numerators_vec: &mut Vec<AccumulatedNumerators<Self>>,
+        log_blowup_factor: u32,
     ) {
         #[cfg(feature = "cuda-runtime")]
         {
@@ -41,7 +43,7 @@ impl QuotientOps for GpuBackend {
                 match gpu_accumulate_numerators(columns, sample_batches) {
                     Ok(gpu_acc) => {
                         if gpu_quotient_hardening_enabled() {
-                            let simd_acc = simd_accumulate_numerators(columns, sample_batches);
+                            let simd_acc = simd_accumulate_numerators(columns, sample_batches, log_blowup_factor);
                             assert_accumulated_numerators_equal(
                                 "accumulate_numerators",
                                 &gpu_acc,
@@ -69,30 +71,26 @@ impl QuotientOps for GpuBackend {
             }
         }
 
-        accumulated_numerators_vec.extend(simd_accumulate_numerators(columns, sample_batches));
+        accumulated_numerators_vec.extend(simd_accumulate_numerators(columns, sample_batches, log_blowup_factor));
     }
 
     fn compute_quotients_and_combine(
         accs: Vec<AccumulatedNumerators<Self>>,
+        lifting_log_size: u32,
+        log_blowup_factor: u32,
+        twiddles: &TwiddleTree<Self>,
     ) -> SecureEvaluation<Self, BitReversedOrder> {
-        let max_log_size = accs
-            .iter()
-            .map(|x| x.partial_numerators_acc.len())
-            .max()
-            .unwrap()
-            .ilog2();
-
         // GPU dispatch for large domains
         #[cfg(feature = "cuda-runtime")]
         {
             use super::constraints::GPU_QUOTIENT_THRESHOLD_LOG_SIZE;
 
-            if max_log_size >= GPU_QUOTIENT_THRESHOLD_LOG_SIZE {
-                match gpu_compute_quotients_and_combine(&accs, max_log_size) {
+            if lifting_log_size >= GPU_QUOTIENT_THRESHOLD_LOG_SIZE {
+                match gpu_compute_quotients_and_combine(&accs, lifting_log_size) {
                     Ok(result) => {
                         tracing::debug!(
                             "[GPU] PCS quotient combination: log_size={}, {} samples",
-                            max_log_size,
+                            lifting_log_size,
                             accs.len()
                         );
                         return result;
@@ -105,13 +103,14 @@ impl QuotientOps for GpuBackend {
         }
 
         // SIMD fallback
-        simd_compute_quotients_and_combine(accs)
+        simd_compute_quotients_and_combine(accs, lifting_log_size, log_blowup_factor, twiddles)
     }
 }
 
 fn simd_accumulate_numerators(
     columns: &[&CircleEvaluation<GpuBackend, BaseField, BitReversedOrder>],
     sample_batches: &[ColumnSampleBatch],
+    log_blowup_factor: u32,
 ) -> Vec<AccumulatedNumerators<GpuBackend>> {
     let simd_columns: Vec<&CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> = columns
         .iter()
@@ -119,7 +118,7 @@ fn simd_accumulate_numerators(
         .collect();
 
     let mut simd_acc: Vec<AccumulatedNumerators<SimdBackend>> = Vec::new();
-    SimdBackend::accumulate_numerators(&simd_columns, sample_batches, &mut simd_acc);
+    SimdBackend::accumulate_numerators(&simd_columns, sample_batches, &mut simd_acc, log_blowup_factor);
 
     simd_acc
         .into_iter()
@@ -328,7 +327,12 @@ fn assert_accumulated_numerators_equal(
 /// SIMD fallback for compute_quotients_and_combine.
 fn simd_compute_quotients_and_combine(
     accs: Vec<AccumulatedNumerators<GpuBackend>>,
+    lifting_log_size: u32,
+    log_blowup_factor: u32,
+    twiddles: &TwiddleTree<GpuBackend>,
 ) -> SecureEvaluation<GpuBackend, BitReversedOrder> {
+    use super::conversion::twiddle_ref_to_simd;
+    let simd_twiddles = twiddle_ref_to_simd(twiddles);
     let simd_accs: Vec<AccumulatedNumerators<SimdBackend>> = accs
         .into_iter()
         .map(|acc| AccumulatedNumerators {
@@ -340,7 +344,7 @@ fn simd_compute_quotients_and_combine(
         })
         .collect();
 
-    let result = SimdBackend::compute_quotients_and_combine(simd_accs);
+    let result = SimdBackend::compute_quotients_and_combine(simd_accs, lifting_log_size, log_blowup_factor, simd_twiddles);
 
     SecureEvaluation::new(
         result.domain,

@@ -217,15 +217,28 @@ impl PolyOps for GpuBackend {
         domain: CircleDomain,
         twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
+        // SAFETY: evaluate_into writes all values via FFT before they are read.
+        let buffer = unsafe { Col::<Self, BaseField>::uninitialized(domain.size()) };
+        Self::evaluate_into(poly, domain, twiddles, buffer)
+    }
+
+    fn evaluate_into(
+        poly: &CircleCoefficients<Self>,
+        domain: CircleDomain,
+        twiddles: &TwiddleTree<Self>,
+        _buffer: Col<Self, BaseField>,
+    ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
         #[cfg(feature = "cuda-runtime")]
         {
             // Keep non-canonic domains on the proven SIMD path.
             if domain.is_canonic() && domain.log_size() >= poly.log_size() {
+                let pool = crate::prover::mempool::BaseColumnPool::default();
                 let mut polys = Self::evaluate_polynomials(
                     vec![poly.clone()],
                     domain.log_size() - poly.log_size(),
                     twiddles,
                     false,
+                    &pool,
                 );
                 if let Some(single) = polys.pop() {
                     return single.evals;
@@ -259,6 +272,7 @@ impl PolyOps for GpuBackend {
         log_blowup_factor: u32,
         twiddles: &TwiddleTree<Self>,
         store_polynomials_coefficients: bool,
+        _pool: &crate::prover::mempool::BaseColumnPool<Self>,
     ) -> Vec<crate::prover::air::component_prover::Poly<Self>>
     where
         Self: crate::prover::backend::Backend,
