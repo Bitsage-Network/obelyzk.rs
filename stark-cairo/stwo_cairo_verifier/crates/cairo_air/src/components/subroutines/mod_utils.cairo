@@ -261,76 +261,125 @@ pub fn mod_utils_evaluate(
     c3_limb_8_col249: QM31,
     c3_limb_9_col250: QM31,
     c3_limb_10_col251: QM31,
-    memory_address_to_id_lookup_elements: @crate::MemoryAddressToIdElements,
-    memory_id_to_big_lookup_elements: @crate::MemoryIdToBigElements,
+    common_lookup_elements: @CommonLookupElements,
     ref memory_address_to_id_sum_0: QM31,
+    ref numerator_0: QM31,
     ref memory_id_to_big_sum_1: QM31,
+    ref numerator_1: QM31,
     ref memory_address_to_id_sum_2: QM31,
+    ref numerator_2: QM31,
     ref memory_id_to_big_sum_3: QM31,
+    ref numerator_3: QM31,
     ref memory_address_to_id_sum_4: QM31,
+    ref numerator_4: QM31,
     ref memory_id_to_big_sum_5: QM31,
+    ref numerator_5: QM31,
     ref memory_address_to_id_sum_6: QM31,
+    ref numerator_6: QM31,
     ref memory_id_to_big_sum_7: QM31,
+    ref numerator_7: QM31,
     ref memory_address_to_id_sum_8: QM31,
+    ref numerator_8: QM31,
     ref memory_id_to_big_sum_9: QM31,
+    ref numerator_9: QM31,
     ref memory_address_to_id_sum_10: QM31,
+    ref numerator_10: QM31,
     ref memory_id_to_big_sum_11: QM31,
+    ref numerator_11: QM31,
     ref memory_address_to_id_sum_12: QM31,
+    ref numerator_12: QM31,
     ref memory_id_to_big_sum_13: QM31,
+    ref numerator_13: QM31,
     ref memory_address_to_id_sum_14: QM31,
+    ref numerator_14: QM31,
     ref memory_id_to_big_sum_15: QM31,
+    ref numerator_15: QM31,
     ref memory_address_to_id_sum_16: QM31,
+    ref numerator_16: QM31,
     ref memory_id_to_big_sum_17: QM31,
+    ref numerator_17: QM31,
     ref memory_address_to_id_sum_18: QM31,
+    ref numerator_18: QM31,
     ref memory_address_to_id_sum_19: QM31,
+    ref numerator_19: QM31,
     ref memory_address_to_id_sum_20: QM31,
+    ref numerator_20: QM31,
     ref memory_address_to_id_sum_21: QM31,
+    ref numerator_21: QM31,
     ref memory_address_to_id_sum_22: QM31,
+    ref numerator_22: QM31,
     ref memory_address_to_id_sum_23: QM31,
+    ref numerator_23: QM31,
     ref memory_id_to_big_sum_24: QM31,
+    ref numerator_24: QM31,
     ref memory_address_to_id_sum_25: QM31,
+    ref numerator_25: QM31,
     ref memory_id_to_big_sum_26: QM31,
+    ref numerator_26: QM31,
     ref memory_address_to_id_sum_27: QM31,
+    ref numerator_27: QM31,
     ref memory_id_to_big_sum_28: QM31,
+    ref numerator_28: QM31,
     ref memory_address_to_id_sum_29: QM31,
+    ref numerator_29: QM31,
     ref memory_id_to_big_sum_30: QM31,
+    ref numerator_30: QM31,
     ref memory_address_to_id_sum_31: QM31,
+    ref numerator_31: QM31,
     ref memory_id_to_big_sum_32: QM31,
+    ref numerator_32: QM31,
     ref memory_address_to_id_sum_33: QM31,
+    ref numerator_33: QM31,
     ref memory_id_to_big_sum_34: QM31,
+    ref numerator_34: QM31,
     ref memory_address_to_id_sum_35: QM31,
+    ref numerator_35: QM31,
     ref memory_id_to_big_sum_36: QM31,
+    ref numerator_36: QM31,
     ref memory_address_to_id_sum_37: QM31,
+    ref numerator_37: QM31,
     ref memory_id_to_big_sum_38: QM31,
+    ref numerator_38: QM31,
     ref memory_address_to_id_sum_39: QM31,
+    ref numerator_39: QM31,
     ref memory_id_to_big_sum_40: QM31,
+    ref numerator_40: QM31,
     ref memory_address_to_id_sum_41: QM31,
+    ref numerator_41: QM31,
     ref memory_id_to_big_sum_42: QM31,
+    ref numerator_42: QM31,
     ref memory_address_to_id_sum_43: QM31,
+    ref numerator_43: QM31,
     ref memory_id_to_big_sum_44: QM31,
+    ref numerator_44: QM31,
     ref memory_address_to_id_sum_45: QM31,
+    ref numerator_45: QM31,
     ref memory_id_to_big_sum_46: QM31,
+    ref numerator_46: QM31,
     ref memory_address_to_id_sum_47: QM31,
+    ref numerator_47: QM31,
     ref memory_id_to_big_sum_48: QM31,
+    ref numerator_48: QM31,
     ref memory_address_to_id_sum_49: QM31,
+    ref numerator_49: QM31,
     ref memory_id_to_big_sum_50: QM31,
+    ref numerator_50: QM31,
     ref memory_address_to_id_sum_51: QM31,
+    ref numerator_51: QM31,
     ref memory_id_to_big_sum_52: QM31,
+    ref numerator_52: QM31,
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
 ) -> [QM31; 0] {
     let [mod_utils_input_first_addr, mod_utils_input_instance_num] = input;
 
     // Constraint - is_instance_0 is 0 or 1.
     let constraint_quotient = ((is_instance_0_col0
-        * (is_instance_0_col0 - qm31_const::<1, 0, 0, 0>())))
-        * domain_vanishing_eval_inv;
+        * (is_instance_0_col0 - qm31_const::<1, 0, 0, 0>())));
     sum = sum * random_coeff + constraint_quotient;
 
     // Constraint - is_instance_0 is 0 when instance_num is not 0.
-    let constraint_quotient = ((is_instance_0_col0 * mod_utils_input_instance_num))
-        * domain_vanishing_eval_inv;
+    let constraint_quotient = ((is_instance_0_col0 * mod_utils_input_instance_num));
     sum = sum * random_coeff + constraint_quotient;
     let is_instance_0_minus_1_tmp_7b599_1: QM31 = (is_instance_0_col0 - qm31_const::<1, 0, 0, 0>());
     let instance_addr_tmp_7b599_2: QM31 = (mod_utils_input_first_addr
@@ -351,12 +400,12 @@ pub fn mod_utils_evaluate(
         p0_limb_8_col10,
         p0_limb_9_col11,
         p0_limb_10_col12,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_0,
+        ref numerator_0,
         ref memory_id_to_big_sum_1,
+        ref numerator_1,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -373,12 +422,12 @@ pub fn mod_utils_evaluate(
         p1_limb_8_col22,
         p1_limb_9_col23,
         p1_limb_10_col24,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_2,
+        ref numerator_2,
         ref memory_id_to_big_sum_3,
+        ref numerator_3,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -395,12 +444,12 @@ pub fn mod_utils_evaluate(
         p2_limb_8_col34,
         p2_limb_9_col35,
         p2_limb_10_col36,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_4,
+        ref numerator_4,
         ref memory_id_to_big_sum_5,
+        ref numerator_5,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -417,12 +466,12 @@ pub fn mod_utils_evaluate(
         p3_limb_8_col46,
         p3_limb_9_col47,
         p3_limb_10_col48,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_6,
+        ref numerator_6,
         ref memory_id_to_big_sum_7,
+        ref numerator_7,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_29_evaluate(
@@ -433,12 +482,12 @@ pub fn mod_utils_evaluate(
         values_ptr_limb_2_col52,
         values_ptr_limb_3_col53,
         partial_limb_msb_col54,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_8,
+        ref numerator_8,
         ref memory_id_to_big_sum_9,
+        ref numerator_9,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_29_evaluate(
@@ -449,12 +498,12 @@ pub fn mod_utils_evaluate(
         offsets_ptr_limb_2_col58,
         offsets_ptr_limb_3_col59,
         partial_limb_msb_col60,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_10,
+        ref numerator_10,
         ref memory_id_to_big_sum_11,
+        ref numerator_11,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_29_evaluate(
@@ -465,12 +514,12 @@ pub fn mod_utils_evaluate(
         offsets_ptr_prev_limb_2_col64,
         offsets_ptr_prev_limb_3_col65,
         partial_limb_msb_col66,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_12,
+        ref numerator_12,
         ref memory_id_to_big_sum_13,
+        ref numerator_13,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_29_evaluate(
@@ -481,12 +530,12 @@ pub fn mod_utils_evaluate(
         n_limb_2_col70,
         n_limb_3_col71,
         partial_limb_msb_col72,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_14,
+        ref numerator_14,
         ref memory_id_to_big_sum_15,
+        ref numerator_15,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_29_evaluate(
@@ -497,12 +546,12 @@ pub fn mod_utils_evaluate(
         n_prev_limb_2_col76,
         n_prev_limb_3_col77,
         partial_limb_msb_col78,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_16,
+        ref numerator_16,
         ref memory_id_to_big_sum_17,
+        ref numerator_17,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     let n_prev_minus_1_tmp_7b599_59: QM31 = ((((n_prev_limb_0_col74
@@ -522,8 +571,7 @@ pub fn mod_utils_evaluate(
         * (n_prev_minus_1_tmp_7b599_59
             - (((n_limb_0_col68 + (n_limb_1_col69 * qm31_const::<512, 0, 0, 0>()))
                 + (n_limb_2_col70 * qm31_const::<262144, 0, 0, 0>()))
-                + (n_limb_3_col71 * qm31_const::<134217728, 0, 0, 0>())))))
-        * domain_vanishing_eval_inv;
+                + (n_limb_3_col71 * qm31_const::<134217728, 0, 0, 0>())))));
     sum = sum * random_coeff + constraint_quotient;
 
     // Constraint - Progression of offsets_ptr between instances.
@@ -532,8 +580,7 @@ pub fn mod_utils_evaluate(
             - (((offsets_ptr_prev_limb_0_col62
                 + (offsets_ptr_prev_limb_1_col63 * qm31_const::<512, 0, 0, 0>()))
                 + (offsets_ptr_prev_limb_2_col64 * qm31_const::<262144, 0, 0, 0>()))
-                + (offsets_ptr_prev_limb_3_col65 * qm31_const::<134217728, 0, 0, 0>())))))
-        * domain_vanishing_eval_inv;
+                + (offsets_ptr_prev_limb_3_col65 * qm31_const::<134217728, 0, 0, 0>())))));
     sum = sum * random_coeff + constraint_quotient;
     mem_cond_verify_equal_known_id_evaluate(
         [
@@ -541,19 +588,19 @@ pub fn mod_utils_evaluate(
             block_reset_condition_tmp_7b599_61,
         ],
         values_ptr_prev_id_col79,
-        memory_address_to_id_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_18,
+        ref numerator_18,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     mem_cond_verify_equal_known_id_evaluate(
         [prev_instance_addr_tmp_7b599_3, p0_id_col1, block_reset_condition_tmp_7b599_61],
         p_prev0_id_col80,
-        memory_address_to_id_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_19,
+        ref numerator_19,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     mem_cond_verify_equal_known_id_evaluate(
@@ -562,10 +609,10 @@ pub fn mod_utils_evaluate(
             block_reset_condition_tmp_7b599_61,
         ],
         p_prev1_id_col81,
-        memory_address_to_id_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_20,
+        ref numerator_20,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     mem_cond_verify_equal_known_id_evaluate(
@@ -574,10 +621,10 @@ pub fn mod_utils_evaluate(
             block_reset_condition_tmp_7b599_61,
         ],
         p_prev2_id_col82,
-        memory_address_to_id_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_21,
+        ref numerator_21,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     mem_cond_verify_equal_known_id_evaluate(
@@ -586,10 +633,10 @@ pub fn mod_utils_evaluate(
             block_reset_condition_tmp_7b599_61,
         ],
         p_prev3_id_col83,
-        memory_address_to_id_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_22,
+        ref numerator_22,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     let read_small_output_tmp_7b599_81_limb_0: QM31 = read_small_evaluate(
@@ -602,12 +649,12 @@ pub fn mod_utils_evaluate(
         offsets_a_limb_2_col89,
         remainder_bits_col90,
         partial_limb_msb_col91,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_23,
+        ref numerator_23,
         ref memory_id_to_big_sum_24,
+        ref numerator_24,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     let read_small_output_tmp_7b599_91_limb_0: QM31 = read_small_evaluate(
@@ -620,12 +667,12 @@ pub fn mod_utils_evaluate(
         offsets_b_limb_2_col97,
         remainder_bits_col98,
         partial_limb_msb_col99,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_25,
+        ref numerator_25,
         ref memory_id_to_big_sum_26,
+        ref numerator_26,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     let read_small_output_tmp_7b599_101_limb_0: QM31 = read_small_evaluate(
@@ -638,12 +685,12 @@ pub fn mod_utils_evaluate(
         offsets_c_limb_2_col105,
         remainder_bits_col106,
         partial_limb_msb_col107,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_27,
+        ref numerator_27,
         ref memory_id_to_big_sum_28,
+        ref numerator_28,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     let values_ptr_tmp_7b599_102: QM31 = (((values_ptr_limb_0_col50
@@ -664,12 +711,12 @@ pub fn mod_utils_evaluate(
         a0_limb_8_col117,
         a0_limb_9_col118,
         a0_limb_10_col119,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_29,
+        ref numerator_29,
         ref memory_id_to_big_sum_30,
+        ref numerator_30,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -687,12 +734,12 @@ pub fn mod_utils_evaluate(
         a1_limb_8_col129,
         a1_limb_9_col130,
         a1_limb_10_col131,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_31,
+        ref numerator_31,
         ref memory_id_to_big_sum_32,
+        ref numerator_32,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -710,12 +757,12 @@ pub fn mod_utils_evaluate(
         a2_limb_8_col141,
         a2_limb_9_col142,
         a2_limb_10_col143,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_33,
+        ref numerator_33,
         ref memory_id_to_big_sum_34,
+        ref numerator_34,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -733,12 +780,12 @@ pub fn mod_utils_evaluate(
         a3_limb_8_col153,
         a3_limb_9_col154,
         a3_limb_10_col155,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_35,
+        ref numerator_35,
         ref memory_id_to_big_sum_36,
+        ref numerator_36,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -755,12 +802,12 @@ pub fn mod_utils_evaluate(
         b0_limb_8_col165,
         b0_limb_9_col166,
         b0_limb_10_col167,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_37,
+        ref numerator_37,
         ref memory_id_to_big_sum_38,
+        ref numerator_38,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -778,12 +825,12 @@ pub fn mod_utils_evaluate(
         b1_limb_8_col177,
         b1_limb_9_col178,
         b1_limb_10_col179,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_39,
+        ref numerator_39,
         ref memory_id_to_big_sum_40,
+        ref numerator_40,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -801,12 +848,12 @@ pub fn mod_utils_evaluate(
         b2_limb_8_col189,
         b2_limb_9_col190,
         b2_limb_10_col191,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_41,
+        ref numerator_41,
         ref memory_id_to_big_sum_42,
+        ref numerator_42,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -824,12 +871,12 @@ pub fn mod_utils_evaluate(
         b3_limb_8_col201,
         b3_limb_9_col202,
         b3_limb_10_col203,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_43,
+        ref numerator_43,
         ref memory_id_to_big_sum_44,
+        ref numerator_44,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -846,12 +893,12 @@ pub fn mod_utils_evaluate(
         c0_limb_8_col213,
         c0_limb_9_col214,
         c0_limb_10_col215,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_45,
+        ref numerator_45,
         ref memory_id_to_big_sum_46,
+        ref numerator_46,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -869,12 +916,12 @@ pub fn mod_utils_evaluate(
         c1_limb_8_col225,
         c1_limb_9_col226,
         c1_limb_10_col227,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_47,
+        ref numerator_47,
         ref memory_id_to_big_sum_48,
+        ref numerator_48,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -892,12 +939,12 @@ pub fn mod_utils_evaluate(
         c2_limb_8_col237,
         c2_limb_9_col238,
         c2_limb_10_col239,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_49,
+        ref numerator_49,
         ref memory_id_to_big_sum_50,
+        ref numerator_50,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_num_bits_99_evaluate(
@@ -915,12 +962,12 @@ pub fn mod_utils_evaluate(
         c3_limb_8_col249,
         c3_limb_9_col250,
         c3_limb_10_col251,
-        memory_address_to_id_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_51,
+        ref numerator_51,
         ref memory_id_to_big_sum_52,
+        ref numerator_52,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
 

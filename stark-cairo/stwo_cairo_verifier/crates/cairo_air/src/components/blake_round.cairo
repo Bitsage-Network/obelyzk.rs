@@ -49,12 +49,7 @@ pub impl InteractionClaimImpl of InteractionClaimTrait {
 pub struct Component {
     pub claim: Claim,
     pub interaction_claim: InteractionClaim,
-    pub blake_round_sigma_lookup_elements: crate::BlakeRoundSigmaElements,
-    pub range_check_7_2_5_lookup_elements: crate::RangeCheck_7_2_5Elements,
-    pub memory_address_to_id_lookup_elements: crate::MemoryAddressToIdElements,
-    pub memory_id_to_big_lookup_elements: crate::MemoryIdToBigElements,
-    pub blake_g_lookup_elements: crate::BlakeGElements,
-    pub blake_round_lookup_elements: crate::BlakeRoundElements,
+    pub common_lookup_elements: CommonLookupElements,
 }
 
 pub impl NewComponentImpl of NewComponent<Component> {
@@ -64,17 +59,12 @@ pub impl NewComponentImpl of NewComponent<Component> {
     fn new(
         claim: @Claim,
         interaction_claim: @InteractionClaim,
-        interaction_elements: @CairoInteractionElements,
+        common_lookup_elements: @CommonLookupElements,
     ) -> Component {
         Component {
             claim: *claim,
             interaction_claim: *interaction_claim,
-            blake_round_sigma_lookup_elements: interaction_elements.blake_round_sigma.clone(),
-            range_check_7_2_5_lookup_elements: interaction_elements.range_checks.rc_7_2_5.clone(),
-            memory_address_to_id_lookup_elements: interaction_elements.memory_address_to_id.clone(),
-            memory_id_to_big_lookup_elements: interaction_elements.memory_id_to_value.clone(),
-            blake_g_lookup_elements: interaction_elements.blake_g.clone(),
-            blake_round_lookup_elements: interaction_elements.blake_round.clone(),
+            common_lookup_elements: common_lookup_elements.clone(),
         }
     }
 }
@@ -87,72 +77,128 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         ref trace_mask_values: ColumnSpan<Span<QM31>>,
         ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
         random_coeff: QM31,
-        point: CirclePoint<QM31>,
     ) {
         let log_size = *(self.claim.log_size);
-        let trace_domain = CanonicCosetImpl::new(log_size);
-        let domain_vanishing_eval_inv = trace_domain.eval_vanishing(point).inverse();
         let claimed_sum = *self.interaction_claim.claimed_sum;
         let column_size = m31(pow2(log_size));
         let mut blake_round_sigma_sum_0: QM31 = Zero::zero();
+        let mut numerator_0: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_1: QM31 = Zero::zero();
+        let mut numerator_1: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_2: QM31 = Zero::zero();
+        let mut numerator_2: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_3: QM31 = Zero::zero();
+        let mut numerator_3: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_4: QM31 = Zero::zero();
+        let mut numerator_4: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_5: QM31 = Zero::zero();
+        let mut numerator_5: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_6: QM31 = Zero::zero();
+        let mut numerator_6: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_7: QM31 = Zero::zero();
+        let mut numerator_7: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_8: QM31 = Zero::zero();
+        let mut numerator_8: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_9: QM31 = Zero::zero();
+        let mut numerator_9: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_10: QM31 = Zero::zero();
+        let mut numerator_10: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_11: QM31 = Zero::zero();
+        let mut numerator_11: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_12: QM31 = Zero::zero();
+        let mut numerator_12: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_13: QM31 = Zero::zero();
+        let mut numerator_13: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_14: QM31 = Zero::zero();
+        let mut numerator_14: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_15: QM31 = Zero::zero();
+        let mut numerator_15: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_16: QM31 = Zero::zero();
+        let mut numerator_16: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_17: QM31 = Zero::zero();
+        let mut numerator_17: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_18: QM31 = Zero::zero();
+        let mut numerator_18: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_19: QM31 = Zero::zero();
+        let mut numerator_19: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_20: QM31 = Zero::zero();
+        let mut numerator_20: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_21: QM31 = Zero::zero();
+        let mut numerator_21: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_22: QM31 = Zero::zero();
+        let mut numerator_22: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_23: QM31 = Zero::zero();
+        let mut numerator_23: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_24: QM31 = Zero::zero();
+        let mut numerator_24: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_25: QM31 = Zero::zero();
+        let mut numerator_25: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_26: QM31 = Zero::zero();
+        let mut numerator_26: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_27: QM31 = Zero::zero();
+        let mut numerator_27: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_28: QM31 = Zero::zero();
+        let mut numerator_28: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_29: QM31 = Zero::zero();
+        let mut numerator_29: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_30: QM31 = Zero::zero();
+        let mut numerator_30: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_31: QM31 = Zero::zero();
+        let mut numerator_31: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_32: QM31 = Zero::zero();
+        let mut numerator_32: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_33: QM31 = Zero::zero();
+        let mut numerator_33: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_34: QM31 = Zero::zero();
+        let mut numerator_34: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_35: QM31 = Zero::zero();
+        let mut numerator_35: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_36: QM31 = Zero::zero();
+        let mut numerator_36: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_37: QM31 = Zero::zero();
+        let mut numerator_37: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_38: QM31 = Zero::zero();
+        let mut numerator_38: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_39: QM31 = Zero::zero();
+        let mut numerator_39: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_40: QM31 = Zero::zero();
+        let mut numerator_40: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_41: QM31 = Zero::zero();
+        let mut numerator_41: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_42: QM31 = Zero::zero();
+        let mut numerator_42: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_43: QM31 = Zero::zero();
+        let mut numerator_43: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_44: QM31 = Zero::zero();
+        let mut numerator_44: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_45: QM31 = Zero::zero();
+        let mut numerator_45: QM31 = Zero::zero();
         let mut range_check_7_2_5_sum_46: QM31 = Zero::zero();
+        let mut numerator_46: QM31 = Zero::zero();
         let mut memory_address_to_id_sum_47: QM31 = Zero::zero();
+        let mut numerator_47: QM31 = Zero::zero();
         let mut memory_id_to_big_sum_48: QM31 = Zero::zero();
+        let mut numerator_48: QM31 = Zero::zero();
         let mut blake_g_sum_49: QM31 = Zero::zero();
+        let mut numerator_49: QM31 = Zero::zero();
         let mut blake_g_sum_50: QM31 = Zero::zero();
+        let mut numerator_50: QM31 = Zero::zero();
         let mut blake_g_sum_51: QM31 = Zero::zero();
+        let mut numerator_51: QM31 = Zero::zero();
         let mut blake_g_sum_52: QM31 = Zero::zero();
+        let mut numerator_52: QM31 = Zero::zero();
         let mut blake_g_sum_53: QM31 = Zero::zero();
+        let mut numerator_53: QM31 = Zero::zero();
         let mut blake_g_sum_54: QM31 = Zero::zero();
+        let mut numerator_54: QM31 = Zero::zero();
         let mut blake_g_sum_55: QM31 = Zero::zero();
+        let mut numerator_55: QM31 = Zero::zero();
         let mut blake_g_sum_56: QM31 = Zero::zero();
+        let mut numerator_56: QM31 = Zero::zero();
         let mut blake_round_sum_57: QM31 = Zero::zero();
+        let mut numerator_57: QM31 = Zero::zero();
         let mut blake_round_sum_58: QM31 = Zero::zero();
+        let mut numerator_58: QM31 = Zero::zero();
 
         let [
             input_limb_0_col0,
@@ -366,7 +412,7 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             blake_g_output_limb_5_col208,
             blake_g_output_limb_6_col209,
             blake_g_output_limb_7_col210,
-            enabler,
+            enabler_col211,
         ]: [Span<QM31>; 212] =
             (*trace_mask_values
             .multi_pop_front()
@@ -891,28 +937,27 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             .try_into()
             .unwrap())
             .unbox();
-        let [enabler]: [QM31; 1] = (*enabler.try_into().unwrap()).unbox();
+        let [enabler_col211]: [QM31; 1] = (*enabler_col211.try_into().unwrap()).unbox();
 
         core::internal::revoke_ap_tracking();
 
-        let constraint_quotient = (enabler * enabler - enabler) * domain_vanishing_eval_inv;
-        sum = sum * random_coeff + constraint_quotient;
-
         blake_round_sigma_sum_0 = self
-            .blake_round_sigma_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_1_col1, blake_round_sigma_output_limb_0_col35,
-                    blake_round_sigma_output_limb_1_col36, blake_round_sigma_output_limb_2_col37,
-                    blake_round_sigma_output_limb_3_col38, blake_round_sigma_output_limb_4_col39,
-                    blake_round_sigma_output_limb_5_col40, blake_round_sigma_output_limb_6_col41,
-                    blake_round_sigma_output_limb_7_col42, blake_round_sigma_output_limb_8_col43,
-                    blake_round_sigma_output_limb_9_col44, blake_round_sigma_output_limb_10_col45,
-                    blake_round_sigma_output_limb_11_col46, blake_round_sigma_output_limb_12_col47,
-                    blake_round_sigma_output_limb_13_col48, blake_round_sigma_output_limb_14_col49,
-                    blake_round_sigma_output_limb_15_col50,
-                ],
+                    qm31_const::<1805967942, 0, 0, 0>(), input_limb_1_col1,
+                    blake_round_sigma_output_limb_0_col35, blake_round_sigma_output_limb_1_col36,
+                    blake_round_sigma_output_limb_2_col37, blake_round_sigma_output_limb_3_col38,
+                    blake_round_sigma_output_limb_4_col39, blake_round_sigma_output_limb_5_col40,
+                    blake_round_sigma_output_limb_6_col41, blake_round_sigma_output_limb_7_col42,
+                    blake_round_sigma_output_limb_8_col43, blake_round_sigma_output_limb_9_col44,
+                    blake_round_sigma_output_limb_10_col45, blake_round_sigma_output_limb_11_col46,
+                    blake_round_sigma_output_limb_12_col47, blake_round_sigma_output_limb_13_col48,
+                    blake_round_sigma_output_limb_14_col49, blake_round_sigma_output_limb_15_col50,
+                ]
+                    .span(),
             );
+        numerator_0 = qm31_const::<1, 0, 0, 0>();
         read_u_32_evaluate(
             (input_limb_34_col34 + blake_round_sigma_output_limb_0_col35),
             low_16_bits_col51,
@@ -921,14 +966,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col54,
             high_5_ms_bits_col55,
             message_word_0_id_col56,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_1,
+            ref numerator_1,
             ref memory_address_to_id_sum_2,
+            ref numerator_2,
             ref memory_id_to_big_sum_3,
+            ref numerator_3,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -939,14 +984,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col60,
             high_5_ms_bits_col61,
             message_word_1_id_col62,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_4,
+            ref numerator_4,
             ref memory_address_to_id_sum_5,
+            ref numerator_5,
             ref memory_id_to_big_sum_6,
+            ref numerator_6,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -957,14 +1002,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col66,
             high_5_ms_bits_col67,
             message_word_2_id_col68,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_7,
+            ref numerator_7,
             ref memory_address_to_id_sum_8,
+            ref numerator_8,
             ref memory_id_to_big_sum_9,
+            ref numerator_9,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -975,14 +1020,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col72,
             high_5_ms_bits_col73,
             message_word_3_id_col74,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_10,
+            ref numerator_10,
             ref memory_address_to_id_sum_11,
+            ref numerator_11,
             ref memory_id_to_big_sum_12,
+            ref numerator_12,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -993,14 +1038,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col78,
             high_5_ms_bits_col79,
             message_word_4_id_col80,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_13,
+            ref numerator_13,
             ref memory_address_to_id_sum_14,
+            ref numerator_14,
             ref memory_id_to_big_sum_15,
+            ref numerator_15,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1011,14 +1056,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col84,
             high_5_ms_bits_col85,
             message_word_5_id_col86,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_16,
+            ref numerator_16,
             ref memory_address_to_id_sum_17,
+            ref numerator_17,
             ref memory_id_to_big_sum_18,
+            ref numerator_18,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1029,14 +1074,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col90,
             high_5_ms_bits_col91,
             message_word_6_id_col92,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_19,
+            ref numerator_19,
             ref memory_address_to_id_sum_20,
+            ref numerator_20,
             ref memory_id_to_big_sum_21,
+            ref numerator_21,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1047,14 +1092,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col96,
             high_5_ms_bits_col97,
             message_word_7_id_col98,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_22,
+            ref numerator_22,
             ref memory_address_to_id_sum_23,
+            ref numerator_23,
             ref memory_id_to_big_sum_24,
+            ref numerator_24,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1065,14 +1110,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col102,
             high_5_ms_bits_col103,
             message_word_8_id_col104,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_25,
+            ref numerator_25,
             ref memory_address_to_id_sum_26,
+            ref numerator_26,
             ref memory_id_to_big_sum_27,
+            ref numerator_27,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1083,14 +1128,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col108,
             high_5_ms_bits_col109,
             message_word_9_id_col110,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_28,
+            ref numerator_28,
             ref memory_address_to_id_sum_29,
+            ref numerator_29,
             ref memory_id_to_big_sum_30,
+            ref numerator_30,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1101,14 +1146,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col114,
             high_5_ms_bits_col115,
             message_word_10_id_col116,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_31,
+            ref numerator_31,
             ref memory_address_to_id_sum_32,
+            ref numerator_32,
             ref memory_id_to_big_sum_33,
+            ref numerator_33,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1119,14 +1164,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col120,
             high_5_ms_bits_col121,
             message_word_11_id_col122,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_34,
+            ref numerator_34,
             ref memory_address_to_id_sum_35,
+            ref numerator_35,
             ref memory_id_to_big_sum_36,
+            ref numerator_36,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1137,14 +1182,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col126,
             high_5_ms_bits_col127,
             message_word_12_id_col128,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_37,
+            ref numerator_37,
             ref memory_address_to_id_sum_38,
+            ref numerator_38,
             ref memory_id_to_big_sum_39,
+            ref numerator_39,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1155,14 +1200,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col132,
             high_5_ms_bits_col133,
             message_word_13_id_col134,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_40,
+            ref numerator_40,
             ref memory_address_to_id_sum_41,
+            ref numerator_41,
             ref memory_id_to_big_sum_42,
+            ref numerator_42,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1173,14 +1218,14 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col138,
             high_5_ms_bits_col139,
             message_word_14_id_col140,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_43,
+            ref numerator_43,
             ref memory_address_to_id_sum_44,
+            ref numerator_44,
             ref memory_id_to_big_sum_45,
+            ref numerator_45,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
         read_u_32_evaluate(
@@ -1191,185 +1236,276 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
             high_14_ms_bits_col144,
             high_5_ms_bits_col145,
             message_word_15_id_col146,
-            self.range_check_7_2_5_lookup_elements,
-            self.memory_address_to_id_lookup_elements,
-            self.memory_id_to_big_lookup_elements,
+            self.common_lookup_elements,
             ref range_check_7_2_5_sum_46,
+            ref numerator_46,
             ref memory_address_to_id_sum_47,
+            ref numerator_47,
             ref memory_id_to_big_sum_48,
+            ref numerator_48,
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
         );
 
         blake_g_sum_49 = self
-            .blake_g_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_2_col2, input_limb_3_col3, input_limb_10_col10, input_limb_11_col11,
-                    input_limb_18_col18, input_limb_19_col19, input_limb_26_col26,
-                    input_limb_27_col27, low_16_bits_col51, high_16_bits_col52, low_16_bits_col57,
-                    high_16_bits_col58, blake_g_output_limb_0_col147, blake_g_output_limb_1_col148,
+                    qm31_const::<1139985212, 0, 0, 0>(), input_limb_2_col2, input_limb_3_col3,
+                    input_limb_10_col10, input_limb_11_col11, input_limb_18_col18,
+                    input_limb_19_col19, input_limb_26_col26, input_limb_27_col27,
+                    low_16_bits_col51, high_16_bits_col52, low_16_bits_col57, high_16_bits_col58,
+                    blake_g_output_limb_0_col147, blake_g_output_limb_1_col148,
                     blake_g_output_limb_2_col149, blake_g_output_limb_3_col150,
                     blake_g_output_limb_4_col151, blake_g_output_limb_5_col152,
                     blake_g_output_limb_6_col153, blake_g_output_limb_7_col154,
-                ],
+                ]
+                    .span(),
             );
+        numerator_49 = qm31_const::<1, 0, 0, 0>();
 
         blake_g_sum_50 = self
-            .blake_g_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_4_col4, input_limb_5_col5, input_limb_12_col12, input_limb_13_col13,
-                    input_limb_20_col20, input_limb_21_col21, input_limb_28_col28,
-                    input_limb_29_col29, low_16_bits_col63, high_16_bits_col64, low_16_bits_col69,
-                    high_16_bits_col70, blake_g_output_limb_0_col155, blake_g_output_limb_1_col156,
+                    qm31_const::<1139985212, 0, 0, 0>(), input_limb_4_col4, input_limb_5_col5,
+                    input_limb_12_col12, input_limb_13_col13, input_limb_20_col20,
+                    input_limb_21_col21, input_limb_28_col28, input_limb_29_col29,
+                    low_16_bits_col63, high_16_bits_col64, low_16_bits_col69, high_16_bits_col70,
+                    blake_g_output_limb_0_col155, blake_g_output_limb_1_col156,
                     blake_g_output_limb_2_col157, blake_g_output_limb_3_col158,
                     blake_g_output_limb_4_col159, blake_g_output_limb_5_col160,
                     blake_g_output_limb_6_col161, blake_g_output_limb_7_col162,
-                ],
+                ]
+                    .span(),
             );
+        numerator_50 = qm31_const::<1, 0, 0, 0>();
 
         blake_g_sum_51 = self
-            .blake_g_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_6_col6, input_limb_7_col7, input_limb_14_col14, input_limb_15_col15,
-                    input_limb_22_col22, input_limb_23_col23, input_limb_30_col30,
-                    input_limb_31_col31, low_16_bits_col75, high_16_bits_col76, low_16_bits_col81,
-                    high_16_bits_col82, blake_g_output_limb_0_col163, blake_g_output_limb_1_col164,
+                    qm31_const::<1139985212, 0, 0, 0>(), input_limb_6_col6, input_limb_7_col7,
+                    input_limb_14_col14, input_limb_15_col15, input_limb_22_col22,
+                    input_limb_23_col23, input_limb_30_col30, input_limb_31_col31,
+                    low_16_bits_col75, high_16_bits_col76, low_16_bits_col81, high_16_bits_col82,
+                    blake_g_output_limb_0_col163, blake_g_output_limb_1_col164,
                     blake_g_output_limb_2_col165, blake_g_output_limb_3_col166,
                     blake_g_output_limb_4_col167, blake_g_output_limb_5_col168,
                     blake_g_output_limb_6_col169, blake_g_output_limb_7_col170,
-                ],
+                ]
+                    .span(),
             );
+        numerator_51 = qm31_const::<1, 0, 0, 0>();
 
         blake_g_sum_52 = self
-            .blake_g_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_8_col8, input_limb_9_col9, input_limb_16_col16, input_limb_17_col17,
-                    input_limb_24_col24, input_limb_25_col25, input_limb_32_col32,
-                    input_limb_33_col33, low_16_bits_col87, high_16_bits_col88, low_16_bits_col93,
-                    high_16_bits_col94, blake_g_output_limb_0_col171, blake_g_output_limb_1_col172,
+                    qm31_const::<1139985212, 0, 0, 0>(), input_limb_8_col8, input_limb_9_col9,
+                    input_limb_16_col16, input_limb_17_col17, input_limb_24_col24,
+                    input_limb_25_col25, input_limb_32_col32, input_limb_33_col33,
+                    low_16_bits_col87, high_16_bits_col88, low_16_bits_col93, high_16_bits_col94,
+                    blake_g_output_limb_0_col171, blake_g_output_limb_1_col172,
                     blake_g_output_limb_2_col173, blake_g_output_limb_3_col174,
                     blake_g_output_limb_4_col175, blake_g_output_limb_5_col176,
                     blake_g_output_limb_6_col177, blake_g_output_limb_7_col178,
-                ],
+                ]
+                    .span(),
             );
+        numerator_52 = qm31_const::<1, 0, 0, 0>();
 
         blake_g_sum_53 = self
-            .blake_g_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    blake_g_output_limb_0_col147, blake_g_output_limb_1_col148,
-                    blake_g_output_limb_2_col157, blake_g_output_limb_3_col158,
-                    blake_g_output_limb_4_col167, blake_g_output_limb_5_col168,
-                    blake_g_output_limb_6_col177, blake_g_output_limb_7_col178, low_16_bits_col99,
-                    high_16_bits_col100, low_16_bits_col105, high_16_bits_col106,
-                    blake_g_output_limb_0_col179, blake_g_output_limb_1_col180,
-                    blake_g_output_limb_2_col181, blake_g_output_limb_3_col182,
-                    blake_g_output_limb_4_col183, blake_g_output_limb_5_col184,
-                    blake_g_output_limb_6_col185, blake_g_output_limb_7_col186,
-                ],
+                    qm31_const::<1139985212, 0, 0, 0>(), blake_g_output_limb_0_col147,
+                    blake_g_output_limb_1_col148, blake_g_output_limb_2_col157,
+                    blake_g_output_limb_3_col158, blake_g_output_limb_4_col167,
+                    blake_g_output_limb_5_col168, blake_g_output_limb_6_col177,
+                    blake_g_output_limb_7_col178, low_16_bits_col99, high_16_bits_col100,
+                    low_16_bits_col105, high_16_bits_col106, blake_g_output_limb_0_col179,
+                    blake_g_output_limb_1_col180, blake_g_output_limb_2_col181,
+                    blake_g_output_limb_3_col182, blake_g_output_limb_4_col183,
+                    blake_g_output_limb_5_col184, blake_g_output_limb_6_col185,
+                    blake_g_output_limb_7_col186,
+                ]
+                    .span(),
             );
+        numerator_53 = qm31_const::<1, 0, 0, 0>();
 
         blake_g_sum_54 = self
-            .blake_g_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    blake_g_output_limb_0_col155, blake_g_output_limb_1_col156,
-                    blake_g_output_limb_2_col165, blake_g_output_limb_3_col166,
-                    blake_g_output_limb_4_col175, blake_g_output_limb_5_col176,
-                    blake_g_output_limb_6_col153, blake_g_output_limb_7_col154, low_16_bits_col111,
-                    high_16_bits_col112, low_16_bits_col117, high_16_bits_col118,
-                    blake_g_output_limb_0_col187, blake_g_output_limb_1_col188,
-                    blake_g_output_limb_2_col189, blake_g_output_limb_3_col190,
-                    blake_g_output_limb_4_col191, blake_g_output_limb_5_col192,
-                    blake_g_output_limb_6_col193, blake_g_output_limb_7_col194,
-                ],
+                    qm31_const::<1139985212, 0, 0, 0>(), blake_g_output_limb_0_col155,
+                    blake_g_output_limb_1_col156, blake_g_output_limb_2_col165,
+                    blake_g_output_limb_3_col166, blake_g_output_limb_4_col175,
+                    blake_g_output_limb_5_col176, blake_g_output_limb_6_col153,
+                    blake_g_output_limb_7_col154, low_16_bits_col111, high_16_bits_col112,
+                    low_16_bits_col117, high_16_bits_col118, blake_g_output_limb_0_col187,
+                    blake_g_output_limb_1_col188, blake_g_output_limb_2_col189,
+                    blake_g_output_limb_3_col190, blake_g_output_limb_4_col191,
+                    blake_g_output_limb_5_col192, blake_g_output_limb_6_col193,
+                    blake_g_output_limb_7_col194,
+                ]
+                    .span(),
             );
+        numerator_54 = qm31_const::<1, 0, 0, 0>();
 
         blake_g_sum_55 = self
-            .blake_g_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    blake_g_output_limb_0_col163, blake_g_output_limb_1_col164,
-                    blake_g_output_limb_2_col173, blake_g_output_limb_3_col174,
-                    blake_g_output_limb_4_col151, blake_g_output_limb_5_col152,
-                    blake_g_output_limb_6_col161, blake_g_output_limb_7_col162, low_16_bits_col123,
-                    high_16_bits_col124, low_16_bits_col129, high_16_bits_col130,
-                    blake_g_output_limb_0_col195, blake_g_output_limb_1_col196,
-                    blake_g_output_limb_2_col197, blake_g_output_limb_3_col198,
-                    blake_g_output_limb_4_col199, blake_g_output_limb_5_col200,
-                    blake_g_output_limb_6_col201, blake_g_output_limb_7_col202,
-                ],
+                    qm31_const::<1139985212, 0, 0, 0>(), blake_g_output_limb_0_col163,
+                    blake_g_output_limb_1_col164, blake_g_output_limb_2_col173,
+                    blake_g_output_limb_3_col174, blake_g_output_limb_4_col151,
+                    blake_g_output_limb_5_col152, blake_g_output_limb_6_col161,
+                    blake_g_output_limb_7_col162, low_16_bits_col123, high_16_bits_col124,
+                    low_16_bits_col129, high_16_bits_col130, blake_g_output_limb_0_col195,
+                    blake_g_output_limb_1_col196, blake_g_output_limb_2_col197,
+                    blake_g_output_limb_3_col198, blake_g_output_limb_4_col199,
+                    blake_g_output_limb_5_col200, blake_g_output_limb_6_col201,
+                    blake_g_output_limb_7_col202,
+                ]
+                    .span(),
             );
+        numerator_55 = qm31_const::<1, 0, 0, 0>();
 
         blake_g_sum_56 = self
-            .blake_g_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    blake_g_output_limb_0_col171, blake_g_output_limb_1_col172,
-                    blake_g_output_limb_2_col149, blake_g_output_limb_3_col150,
-                    blake_g_output_limb_4_col159, blake_g_output_limb_5_col160,
-                    blake_g_output_limb_6_col169, blake_g_output_limb_7_col170, low_16_bits_col135,
-                    high_16_bits_col136, low_16_bits_col141, high_16_bits_col142,
-                    blake_g_output_limb_0_col203, blake_g_output_limb_1_col204,
-                    blake_g_output_limb_2_col205, blake_g_output_limb_3_col206,
-                    blake_g_output_limb_4_col207, blake_g_output_limb_5_col208,
-                    blake_g_output_limb_6_col209, blake_g_output_limb_7_col210,
-                ],
+                    qm31_const::<1139985212, 0, 0, 0>(), blake_g_output_limb_0_col171,
+                    blake_g_output_limb_1_col172, blake_g_output_limb_2_col149,
+                    blake_g_output_limb_3_col150, blake_g_output_limb_4_col159,
+                    blake_g_output_limb_5_col160, blake_g_output_limb_6_col169,
+                    blake_g_output_limb_7_col170, low_16_bits_col135, high_16_bits_col136,
+                    low_16_bits_col141, high_16_bits_col142, blake_g_output_limb_0_col203,
+                    blake_g_output_limb_1_col204, blake_g_output_limb_2_col205,
+                    blake_g_output_limb_3_col206, blake_g_output_limb_4_col207,
+                    blake_g_output_limb_5_col208, blake_g_output_limb_6_col209,
+                    blake_g_output_limb_7_col210,
+                ]
+                    .span(),
             );
+        numerator_56 = qm31_const::<1, 0, 0, 0>();
+
+        // Constraint - Enabler is a bit
+        let constraint_quotient = (((enabler_col211 * enabler_col211) - enabler_col211));
+        sum = sum * random_coeff + constraint_quotient;
 
         blake_round_sum_57 = self
-            .blake_round_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_0_col0, input_limb_1_col1, input_limb_2_col2, input_limb_3_col3,
-                    input_limb_4_col4, input_limb_5_col5, input_limb_6_col6, input_limb_7_col7,
-                    input_limb_8_col8, input_limb_9_col9, input_limb_10_col10, input_limb_11_col11,
-                    input_limb_12_col12, input_limb_13_col13, input_limb_14_col14,
-                    input_limb_15_col15, input_limb_16_col16, input_limb_17_col17,
-                    input_limb_18_col18, input_limb_19_col19, input_limb_20_col20,
-                    input_limb_21_col21, input_limb_22_col22, input_limb_23_col23,
-                    input_limb_24_col24, input_limb_25_col25, input_limb_26_col26,
-                    input_limb_27_col27, input_limb_28_col28, input_limb_29_col29,
-                    input_limb_30_col30, input_limb_31_col31, input_limb_32_col32,
-                    input_limb_33_col33, input_limb_34_col34,
-                ],
+                    qm31_const::<40528774, 0, 0, 0>(), input_limb_0_col0, input_limb_1_col1,
+                    input_limb_2_col2, input_limb_3_col3, input_limb_4_col4, input_limb_5_col5,
+                    input_limb_6_col6, input_limb_7_col7, input_limb_8_col8, input_limb_9_col9,
+                    input_limb_10_col10, input_limb_11_col11, input_limb_12_col12,
+                    input_limb_13_col13, input_limb_14_col14, input_limb_15_col15,
+                    input_limb_16_col16, input_limb_17_col17, input_limb_18_col18,
+                    input_limb_19_col19, input_limb_20_col20, input_limb_21_col21,
+                    input_limb_22_col22, input_limb_23_col23, input_limb_24_col24,
+                    input_limb_25_col25, input_limb_26_col26, input_limb_27_col27,
+                    input_limb_28_col28, input_limb_29_col29, input_limb_30_col30,
+                    input_limb_31_col31, input_limb_32_col32, input_limb_33_col33,
+                    input_limb_34_col34,
+                ]
+                    .span(),
             );
+        numerator_57 = enabler_col211;
 
         blake_round_sum_58 = self
-            .blake_round_lookup_elements
+            .common_lookup_elements
             .combine_qm31(
                 [
-                    input_limb_0_col0, (input_limb_1_col1 + qm31_const::<1, 0, 0, 0>()),
-                    blake_g_output_limb_0_col179, blake_g_output_limb_1_col180,
-                    blake_g_output_limb_0_col187, blake_g_output_limb_1_col188,
-                    blake_g_output_limb_0_col195, blake_g_output_limb_1_col196,
-                    blake_g_output_limb_0_col203, blake_g_output_limb_1_col204,
-                    blake_g_output_limb_2_col205, blake_g_output_limb_3_col206,
-                    blake_g_output_limb_2_col181, blake_g_output_limb_3_col182,
-                    blake_g_output_limb_2_col189, blake_g_output_limb_3_col190,
-                    blake_g_output_limb_2_col197, blake_g_output_limb_3_col198,
-                    blake_g_output_limb_4_col199, blake_g_output_limb_5_col200,
-                    blake_g_output_limb_4_col207, blake_g_output_limb_5_col208,
-                    blake_g_output_limb_4_col183, blake_g_output_limb_5_col184,
-                    blake_g_output_limb_4_col191, blake_g_output_limb_5_col192,
-                    blake_g_output_limb_6_col193, blake_g_output_limb_7_col194,
-                    blake_g_output_limb_6_col201, blake_g_output_limb_7_col202,
-                    blake_g_output_limb_6_col209, blake_g_output_limb_7_col210,
-                    blake_g_output_limb_6_col185, blake_g_output_limb_7_col186, input_limb_34_col34,
-                ],
+                    qm31_const::<40528774, 0, 0, 0>(), input_limb_0_col0,
+                    (input_limb_1_col1 + qm31_const::<1, 0, 0, 0>()), blake_g_output_limb_0_col179,
+                    blake_g_output_limb_1_col180, blake_g_output_limb_0_col187,
+                    blake_g_output_limb_1_col188, blake_g_output_limb_0_col195,
+                    blake_g_output_limb_1_col196, blake_g_output_limb_0_col203,
+                    blake_g_output_limb_1_col204, blake_g_output_limb_2_col205,
+                    blake_g_output_limb_3_col206, blake_g_output_limb_2_col181,
+                    blake_g_output_limb_3_col182, blake_g_output_limb_2_col189,
+                    blake_g_output_limb_3_col190, blake_g_output_limb_2_col197,
+                    blake_g_output_limb_3_col198, blake_g_output_limb_4_col199,
+                    blake_g_output_limb_5_col200, blake_g_output_limb_4_col207,
+                    blake_g_output_limb_5_col208, blake_g_output_limb_4_col183,
+                    blake_g_output_limb_5_col184, blake_g_output_limb_4_col191,
+                    blake_g_output_limb_5_col192, blake_g_output_limb_6_col193,
+                    blake_g_output_limb_7_col194, blake_g_output_limb_6_col201,
+                    blake_g_output_limb_7_col202, blake_g_output_limb_6_col209,
+                    blake_g_output_limb_7_col210, blake_g_output_limb_6_col185,
+                    blake_g_output_limb_7_col186, input_limb_34_col34,
+                ]
+                    .span(),
             );
+        numerator_58 = enabler_col211;
 
         lookup_constraints(
             ref sum,
-            domain_vanishing_eval_inv,
             random_coeff,
             claimed_sum,
-            enabler,
+            numerator_0,
+            numerator_1,
+            numerator_2,
+            numerator_3,
+            numerator_4,
+            numerator_5,
+            numerator_6,
+            numerator_7,
+            numerator_8,
+            numerator_9,
+            numerator_10,
+            numerator_11,
+            numerator_12,
+            numerator_13,
+            numerator_14,
+            numerator_15,
+            numerator_16,
+            numerator_17,
+            numerator_18,
+            numerator_19,
+            numerator_20,
+            numerator_21,
+            numerator_22,
+            numerator_23,
+            numerator_24,
+            numerator_25,
+            numerator_26,
+            numerator_27,
+            numerator_28,
+            numerator_29,
+            numerator_30,
+            numerator_31,
+            numerator_32,
+            numerator_33,
+            numerator_34,
+            numerator_35,
+            numerator_36,
+            numerator_37,
+            numerator_38,
+            numerator_39,
+            numerator_40,
+            numerator_41,
+            numerator_42,
+            numerator_43,
+            numerator_44,
+            numerator_45,
+            numerator_46,
+            numerator_47,
+            numerator_48,
+            numerator_49,
+            numerator_50,
+            numerator_51,
+            numerator_52,
+            numerator_53,
+            numerator_54,
+            numerator_55,
+            numerator_56,
+            numerator_57,
+            numerator_58,
             column_size,
             ref interaction_trace_mask_values,
             blake_round_sigma_sum_0,
@@ -1438,10 +1574,67 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
 
 fn lookup_constraints(
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
     claimed_sum: QM31,
-    enabler: QM31,
+    numerator_0: QM31,
+    numerator_1: QM31,
+    numerator_2: QM31,
+    numerator_3: QM31,
+    numerator_4: QM31,
+    numerator_5: QM31,
+    numerator_6: QM31,
+    numerator_7: QM31,
+    numerator_8: QM31,
+    numerator_9: QM31,
+    numerator_10: QM31,
+    numerator_11: QM31,
+    numerator_12: QM31,
+    numerator_13: QM31,
+    numerator_14: QM31,
+    numerator_15: QM31,
+    numerator_16: QM31,
+    numerator_17: QM31,
+    numerator_18: QM31,
+    numerator_19: QM31,
+    numerator_20: QM31,
+    numerator_21: QM31,
+    numerator_22: QM31,
+    numerator_23: QM31,
+    numerator_24: QM31,
+    numerator_25: QM31,
+    numerator_26: QM31,
+    numerator_27: QM31,
+    numerator_28: QM31,
+    numerator_29: QM31,
+    numerator_30: QM31,
+    numerator_31: QM31,
+    numerator_32: QM31,
+    numerator_33: QM31,
+    numerator_34: QM31,
+    numerator_35: QM31,
+    numerator_36: QM31,
+    numerator_37: QM31,
+    numerator_38: QM31,
+    numerator_39: QM31,
+    numerator_40: QM31,
+    numerator_41: QM31,
+    numerator_42: QM31,
+    numerator_43: QM31,
+    numerator_44: QM31,
+    numerator_45: QM31,
+    numerator_46: QM31,
+    numerator_47: QM31,
+    numerator_48: QM31,
+    numerator_49: QM31,
+    numerator_50: QM31,
+    numerator_51: QM31,
+    numerator_52: QM31,
+    numerator_53: QM31,
+    numerator_54: QM31,
+    numerator_55: QM31,
+    numerator_56: QM31,
+    numerator_57: QM31,
+    numerator_58: QM31,
     column_size: M31,
     ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
     blake_round_sigma_sum_0: QM31,
@@ -1763,9 +1956,8 @@ fn lookup_constraints(
     ))
         * blake_round_sigma_sum_0
         * range_check_7_2_5_sum_1)
-        - blake_round_sigma_sum_0
-        - range_check_7_2_5_sum_1)
-        * domain_vanishing_eval_inv;
+        - (blake_round_sigma_sum_0 * numerator_1)
+        - (range_check_7_2_5_sum_1 * numerator_0));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1774,9 +1966,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col0, trace_2_col1, trace_2_col2, trace_2_col3]))
         * memory_address_to_id_sum_2
         * memory_id_to_big_sum_3)
-        - memory_address_to_id_sum_2
-        - memory_id_to_big_sum_3)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_2 * numerator_3)
+        - (memory_id_to_big_sum_3 * numerator_2));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1785,9 +1976,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col4, trace_2_col5, trace_2_col6, trace_2_col7]))
         * range_check_7_2_5_sum_4
         * memory_address_to_id_sum_5)
-        - range_check_7_2_5_sum_4
-        - memory_address_to_id_sum_5)
-        * domain_vanishing_eval_inv;
+        - (range_check_7_2_5_sum_4 * numerator_5)
+        - (memory_address_to_id_sum_5 * numerator_4));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1796,9 +1986,8 @@ fn lookup_constraints(
         - QM31Impl::from_partial_evals([trace_2_col8, trace_2_col9, trace_2_col10, trace_2_col11]))
         * memory_id_to_big_sum_6
         * range_check_7_2_5_sum_7)
-        - memory_id_to_big_sum_6
-        - range_check_7_2_5_sum_7)
-        * domain_vanishing_eval_inv;
+        - (memory_id_to_big_sum_6 * numerator_7)
+        - (range_check_7_2_5_sum_7 * numerator_6));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1809,9 +1998,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_8
         * memory_id_to_big_sum_9)
-        - memory_address_to_id_sum_8
-        - memory_id_to_big_sum_9)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_8 * numerator_9)
+        - (memory_id_to_big_sum_9 * numerator_8));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1822,9 +2010,8 @@ fn lookup_constraints(
         ))
         * range_check_7_2_5_sum_10
         * memory_address_to_id_sum_11)
-        - range_check_7_2_5_sum_10
-        - memory_address_to_id_sum_11)
-        * domain_vanishing_eval_inv;
+        - (range_check_7_2_5_sum_10 * numerator_11)
+        - (memory_address_to_id_sum_11 * numerator_10));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1835,9 +2022,8 @@ fn lookup_constraints(
         ))
         * memory_id_to_big_sum_12
         * range_check_7_2_5_sum_13)
-        - memory_id_to_big_sum_12
-        - range_check_7_2_5_sum_13)
-        * domain_vanishing_eval_inv;
+        - (memory_id_to_big_sum_12 * numerator_13)
+        - (range_check_7_2_5_sum_13 * numerator_12));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1848,9 +2034,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_14
         * memory_id_to_big_sum_15)
-        - memory_address_to_id_sum_14
-        - memory_id_to_big_sum_15)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_14 * numerator_15)
+        - (memory_id_to_big_sum_15 * numerator_14));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1861,9 +2046,8 @@ fn lookup_constraints(
         ))
         * range_check_7_2_5_sum_16
         * memory_address_to_id_sum_17)
-        - range_check_7_2_5_sum_16
-        - memory_address_to_id_sum_17)
-        * domain_vanishing_eval_inv;
+        - (range_check_7_2_5_sum_16 * numerator_17)
+        - (memory_address_to_id_sum_17 * numerator_16));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1874,9 +2058,8 @@ fn lookup_constraints(
         ))
         * memory_id_to_big_sum_18
         * range_check_7_2_5_sum_19)
-        - memory_id_to_big_sum_18
-        - range_check_7_2_5_sum_19)
-        * domain_vanishing_eval_inv;
+        - (memory_id_to_big_sum_18 * numerator_19)
+        - (range_check_7_2_5_sum_19 * numerator_18));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1887,9 +2070,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_20
         * memory_id_to_big_sum_21)
-        - memory_address_to_id_sum_20
-        - memory_id_to_big_sum_21)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_20 * numerator_21)
+        - (memory_id_to_big_sum_21 * numerator_20));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1900,9 +2082,8 @@ fn lookup_constraints(
         ))
         * range_check_7_2_5_sum_22
         * memory_address_to_id_sum_23)
-        - range_check_7_2_5_sum_22
-        - memory_address_to_id_sum_23)
-        * domain_vanishing_eval_inv;
+        - (range_check_7_2_5_sum_22 * numerator_23)
+        - (memory_address_to_id_sum_23 * numerator_22));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1913,9 +2094,8 @@ fn lookup_constraints(
         ))
         * memory_id_to_big_sum_24
         * range_check_7_2_5_sum_25)
-        - memory_id_to_big_sum_24
-        - range_check_7_2_5_sum_25)
-        * domain_vanishing_eval_inv;
+        - (memory_id_to_big_sum_24 * numerator_25)
+        - (range_check_7_2_5_sum_25 * numerator_24));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1926,9 +2106,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_26
         * memory_id_to_big_sum_27)
-        - memory_address_to_id_sum_26
-        - memory_id_to_big_sum_27)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_26 * numerator_27)
+        - (memory_id_to_big_sum_27 * numerator_26));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1939,9 +2118,8 @@ fn lookup_constraints(
         ))
         * range_check_7_2_5_sum_28
         * memory_address_to_id_sum_29)
-        - range_check_7_2_5_sum_28
-        - memory_address_to_id_sum_29)
-        * domain_vanishing_eval_inv;
+        - (range_check_7_2_5_sum_28 * numerator_29)
+        - (memory_address_to_id_sum_29 * numerator_28));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1952,9 +2130,8 @@ fn lookup_constraints(
         ))
         * memory_id_to_big_sum_30
         * range_check_7_2_5_sum_31)
-        - memory_id_to_big_sum_30
-        - range_check_7_2_5_sum_31)
-        * domain_vanishing_eval_inv;
+        - (memory_id_to_big_sum_30 * numerator_31)
+        - (range_check_7_2_5_sum_31 * numerator_30));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1965,9 +2142,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_32
         * memory_id_to_big_sum_33)
-        - memory_address_to_id_sum_32
-        - memory_id_to_big_sum_33)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_32 * numerator_33)
+        - (memory_id_to_big_sum_33 * numerator_32));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1978,9 +2154,8 @@ fn lookup_constraints(
         ))
         * range_check_7_2_5_sum_34
         * memory_address_to_id_sum_35)
-        - range_check_7_2_5_sum_34
-        - memory_address_to_id_sum_35)
-        * domain_vanishing_eval_inv;
+        - (range_check_7_2_5_sum_34 * numerator_35)
+        - (memory_address_to_id_sum_35 * numerator_34));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -1991,9 +2166,8 @@ fn lookup_constraints(
         ))
         * memory_id_to_big_sum_36
         * range_check_7_2_5_sum_37)
-        - memory_id_to_big_sum_36
-        - range_check_7_2_5_sum_37)
-        * domain_vanishing_eval_inv;
+        - (memory_id_to_big_sum_36 * numerator_37)
+        - (range_check_7_2_5_sum_37 * numerator_36));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2004,9 +2178,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_38
         * memory_id_to_big_sum_39)
-        - memory_address_to_id_sum_38
-        - memory_id_to_big_sum_39)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_38 * numerator_39)
+        - (memory_id_to_big_sum_39 * numerator_38));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2017,9 +2190,8 @@ fn lookup_constraints(
         ))
         * range_check_7_2_5_sum_40
         * memory_address_to_id_sum_41)
-        - range_check_7_2_5_sum_40
-        - memory_address_to_id_sum_41)
-        * domain_vanishing_eval_inv;
+        - (range_check_7_2_5_sum_40 * numerator_41)
+        - (memory_address_to_id_sum_41 * numerator_40));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2030,9 +2202,8 @@ fn lookup_constraints(
         ))
         * memory_id_to_big_sum_42
         * range_check_7_2_5_sum_43)
-        - memory_id_to_big_sum_42
-        - range_check_7_2_5_sum_43)
-        * domain_vanishing_eval_inv;
+        - (memory_id_to_big_sum_42 * numerator_43)
+        - (range_check_7_2_5_sum_43 * numerator_42));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2043,9 +2214,8 @@ fn lookup_constraints(
         ))
         * memory_address_to_id_sum_44
         * memory_id_to_big_sum_45)
-        - memory_address_to_id_sum_44
-        - memory_id_to_big_sum_45)
-        * domain_vanishing_eval_inv;
+        - (memory_address_to_id_sum_44 * numerator_45)
+        - (memory_id_to_big_sum_45 * numerator_44));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2056,9 +2226,8 @@ fn lookup_constraints(
         ))
         * range_check_7_2_5_sum_46
         * memory_address_to_id_sum_47)
-        - range_check_7_2_5_sum_46
-        - memory_address_to_id_sum_47)
-        * domain_vanishing_eval_inv;
+        - (range_check_7_2_5_sum_46 * numerator_47)
+        - (memory_address_to_id_sum_47 * numerator_46));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2069,9 +2238,8 @@ fn lookup_constraints(
         ))
         * memory_id_to_big_sum_48
         * blake_g_sum_49)
-        - memory_id_to_big_sum_48
-        - blake_g_sum_49)
-        * domain_vanishing_eval_inv;
+        - (memory_id_to_big_sum_48 * numerator_49)
+        - (blake_g_sum_49 * numerator_48));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2082,9 +2250,8 @@ fn lookup_constraints(
         ))
         * blake_g_sum_50
         * blake_g_sum_51)
-        - blake_g_sum_50
-        - blake_g_sum_51)
-        * domain_vanishing_eval_inv;
+        - (blake_g_sum_50 * numerator_51)
+        - (blake_g_sum_51 * numerator_50));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2095,9 +2262,8 @@ fn lookup_constraints(
         ))
         * blake_g_sum_52
         * blake_g_sum_53)
-        - blake_g_sum_52
-        - blake_g_sum_53)
-        * domain_vanishing_eval_inv;
+        - (blake_g_sum_52 * numerator_53)
+        - (blake_g_sum_53 * numerator_52));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2108,9 +2274,8 @@ fn lookup_constraints(
         ))
         * blake_g_sum_54
         * blake_g_sum_55)
-        - blake_g_sum_54
-        - blake_g_sum_55)
-        * domain_vanishing_eval_inv;
+        - (blake_g_sum_54 * numerator_55)
+        - (blake_g_sum_55 * numerator_54));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2121,9 +2286,8 @@ fn lookup_constraints(
         ))
         * blake_g_sum_56
         * blake_round_sum_57)
-        - (blake_g_sum_56 * enabler)
-        - blake_round_sum_57)
-        * domain_vanishing_eval_inv;
+        - (blake_g_sum_56 * numerator_57)
+        - (blake_round_sum_57 * numerator_56));
     sum = sum * random_coeff + constraint_quotient;
 
     let constraint_quotient = (((QM31Impl::from_partial_evals(
@@ -2137,8 +2301,7 @@ fn lookup_constraints(
         )
         + (claimed_sum * (column_size.inverse().into())))
         * blake_round_sum_58)
-        + enabler)
-        * domain_vanishing_eval_inv;
+        + numerator_58);
     sum = sum * random_coeff + constraint_quotient;
 }
 #[cfg(and(test, feature: "qm31_opcode"))]
@@ -2146,17 +2309,16 @@ mod tests {
     use core::array::ArrayImpl;
     use core::num::traits::Zero;
     #[allow(unused_imports)]
-    use stwo_cairo_air::preprocessed_columns::{NUM_PREPROCESSED_COLUMNS, seq_column_idx};
+    use stwo_cairo_air::preprocessed_columns::*;
     #[allow(unused_imports)]
     use stwo_constraint_framework::{
-        LookupElements, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
+        LookupElementsTrait, PreprocessedMaskValues, PreprocessedMaskValuesTrait,
     };
-    use stwo_verifier_core::circle::CirclePoint;
     use stwo_verifier_core::fields::qm31::{QM31, QM31Impl, QM31Trait, qm31_const};
     use crate::cairo_component::*;
     use crate::components::sample_evaluations::*;
     #[allow(unused_imports)]
-    use crate::test_utils::{make_interaction_trace, make_lookup_elements, preprocessed_mask_add};
+    use crate::test_utils::{make_interaction_trace, preprocessed_mask_add};
     use crate::utils::*;
     use super::{Claim, Component, InteractionClaim};
 
@@ -2167,36 +2329,12 @@ mod tests {
             interaction_claim: InteractionClaim {
                 claimed_sum: qm31_const::<1398335417, 314974026, 1722107152, 821933968>(),
             },
-            blake_g_lookup_elements: make_lookup_elements(
-                qm31_const::<1303027045, 1098741784, 1663692553, 948339060>(),
-                qm31_const::<435770977, 566354259, 805606465, 2102625819>(),
-            ),
-            blake_round_lookup_elements: make_lookup_elements(
-                qm31_const::<512137121, 4656726, 184578687, 642917762>(),
-                qm31_const::<1958399945, 1971391524, 790352857, 78661490>(),
-            ),
-            blake_round_sigma_lookup_elements: make_lookup_elements(
-                qm31_const::<1575475957, 47612785, 1451790004, 55975591>(),
-                qm31_const::<1683908581, 578045618, 2096573802, 1109732223>(),
-            ),
-            memory_address_to_id_lookup_elements: make_lookup_elements(
-                qm31_const::<1842771211, 1960835386, 1582137647, 1333140033>(),
-                qm31_const::<1360491305, 950648792, 556642685, 2096522554>(),
-            ),
-            memory_id_to_big_lookup_elements: make_lookup_elements(
-                qm31_const::<844624398, 1166453613, 1247584074, 330174372>(),
-                qm31_const::<1844105245, 1400976933, 1126903288, 1155460729>(),
-            ),
-            range_check_7_2_5_lookup_elements: make_lookup_elements(
-                qm31_const::<425514336, 1473331321, 384012983, 274885242>(),
-                qm31_const::<660930654, 31738603, 1176905988, 765990201>(),
+            common_lookup_elements: LookupElementsTrait::from_z_alpha(
+                qm31_const::<445623802, 202571636, 1360224996, 131355117>(),
+                qm31_const::<476823935, 939223384, 62486082, 122423602>(),
             ),
         };
         let mut sum: QM31 = Zero::zero();
-        let point = CirclePoint {
-            x: qm31_const::<461666434, 38651694, 1083586041, 510305943>(),
-            y: qm31_const::<817798294, 862569777, 2091320744, 1178484122>(),
-        };
 
         let mut preprocessed_trace = PreprocessedMaskValues { values: Default::default() };
 
@@ -2412,7 +2550,7 @@ mod tests {
             [qm31_const::<955082178, 1744431827, 728949755, 502540188>()].span(),
             [qm31_const::<887972999, 1610214099, 661840891, 502540188>()].span(),
             [qm31_const::<15491601, 2012867234, 1936909257, 502540171>()].span(),
-            [qm31_const::<179325277, 825275894, 97341591, 1357105975>()].span(),
+            [qm31_const::<82600780, 2147084962, 2004018121, 502540171>()].span(),
         ]
             .span();
         let interaction_values = array![
@@ -2457,7 +2595,6 @@ mod tests {
                 ref trace_columns,
                 ref interaction_columns,
                 qm31_const::<474642921, 876336632, 1911695779, 974600512>(),
-                point,
             );
         preprocessed_trace.validate_usage();
         assert_eq!(sum, QM31Trait::from_fixed_array(BLAKE_ROUND_SAMPLE_EVAL_RESULT))

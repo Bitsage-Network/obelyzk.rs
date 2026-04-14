@@ -1,46 +1,14 @@
 use core::array::SpanTrait;
 use core::box::BoxTrait;
+use core::dict::{Felt252Dict, Felt252DictEntryTrait, Felt252DictTrait, SquashedFelt252DictTrait};
+use core::nullable::{FromNullableResult, NullableTrait, match_nullable};
 use core::num::traits::BitSize;
-use core::traits::DivRem;
+use core::traits::{DivRem, PanicDestruct};
 use crate::fields::SecureField;
 use crate::fields::m31::M31_SHIFT;
-use crate::fields::qm31::QM31Trait;
+use crate::fields::qm31::{QM31, QM31Trait, QM31_EXTENSION_DEGREE};
 use crate::{ColumnSpan, TreeSpan};
 
-/// Array-based map from log_size (u32) to query positions.
-/// Replaces Felt252Dict to avoid the squashed_felt252_dict_entries libfunc
-/// which requires Sierra 1.8.0 (not yet supported by stable Scarb).
-#[derive(Drop)]
-pub struct QueryPositionMap {
-    pub entries: Array<(u32, Span<usize>)>,
-}
-
-#[generate_trait]
-pub impl QueryPositionMapImpl of QueryPositionMapTrait {
-    fn new() -> QueryPositionMap {
-        QueryPositionMap { entries: array![] }
-    }
-
-    fn insert(ref self: QueryPositionMap, key: u32, value: Span<usize>) {
-        self.entries.append((key, value));
-    }
-
-    fn get(ref self: QueryPositionMap, key: u32) -> Span<usize> {
-        let entries = self.entries.span();
-        let mut i: usize = 0;
-        let result = loop {
-            if i >= entries.len() {
-                break array![].span();
-            }
-            let (k, v) = *entries[i];
-            if k == key {
-                break v;
-            }
-            i += 1;
-        };
-        result
-    }
-}
 
 /// Returns `2^n`, n in range [0, 32).
 /// Will panic (with index out of bounds) if n >= 32.
@@ -96,6 +64,26 @@ pub fn pow2_u64(n: u32) -> u64 {
     }
 }
 
+#[generate_trait]
+pub impl DictImpl<T, +Felt252DictValue<T>> of DictTrait<T> {
+    fn replace<+PanicDestruct<T>>(ref self: Felt252Dict<T>, key: felt252, new_value: T) -> T {
+        let (entry, value) = self.entry(key);
+        self = entry.finalize(new_value);
+        value
+    }
+
+    // TODO(andrew): Is there a better way to handle this?
+    fn clone_subset<+Copy<T>, +Drop<T>>(
+        ref self: Felt252Dict<T>, subset_keys: Span<u32>,
+    ) -> Felt252Dict<T> {
+        let mut res: Felt252Dict<T> = Default::default();
+        for key in subset_keys {
+            let key = (*key).into();
+            res.insert(key, self.get(key));
+        }
+        res
+    }
+}
 
 #[generate_trait]
 pub impl OptBoxImpl<T> of OptBoxTrait<T> {
@@ -201,6 +189,39 @@ pub fn bit_reverse_index(mut index: usize, mut n_bits: u32) -> usize {
     result
 }
 
+/// Assumes all values are reduced mod M31 and packs them into QM31 elements.
+pub fn pack_into_qm31s(mut values: Span<u32>) -> Span<QM31> {
+    let mut res = array![];
+
+    while let Some(chunk) = values.multi_pop_front::<QM31_EXTENSION_DEGREE>() {
+        append_chunk(ref res, chunk.unbox());
+    }
+
+    if !values.is_empty() {
+        let mut chunk = array![];
+        let chunk_size = values.len();
+        chunk.append_span(values);
+        for _ in chunk_size..QM31_EXTENSION_DEGREE {
+            chunk.append(0_u32);
+        }
+        let fixed_arr: [u32; QM31_EXTENSION_DEGREE] = (*chunk.span().try_into().unwrap()).unbox();
+        append_chunk(ref res, fixed_arr);
+    }
+
+    res.span()
+}
+
+fn append_chunk(ref array: Array<QM31>, chunk: [u32; QM31_EXTENSION_DEGREE]) {
+    let [v0, v1, v2, v3] = chunk;
+    let new_qm31 = QM31Trait::from_fixed_array(
+        [
+            v0.try_into().unwrap(), v1.try_into().unwrap(), v2.try_into().unwrap(),
+            v3.try_into().unwrap(),
+        ],
+    );
+    array.append(new_qm31);
+}
+
 /// A span in which each element relates (by index) to the log 2 of a degree bound.
 pub type LogDegreeBoundSpan<T> = Span<T>;
 
@@ -226,86 +247,29 @@ pub type ColumnsIndicesByLogDegreeBound = LogDegreeBoundSpan<Span<usize>>;
 pub fn group_columns_by_degree_bound(
     log_degree_bound_by_column: ColumnSpan<u32>,
 ) -> ColumnsIndicesByLogDegreeBound {
-    // Find the max degree bound to size the result array.
-    let mut max_deg: u32 = 0;
-    for deg in log_degree_bound_by_column {
-        if *deg > max_deg {
-            max_deg = *deg;
-        }
-    };
-
-    // Collect column indices per degree bound using a flat array of arrays.
-    // Index i holds the column indices with log_degree_bound == i.
-    let mut buckets: Array<Array<u32>> = array![];
-    let mut b: u32 = 0;
-    while b <= max_deg {
-        buckets.append(array![]);
-        b += 1;
-    };
-
-    // First pass: count columns per degree bound.
-    let mut counts: Array<u32> = array![];
-    let mut c: u32 = 0;
-    while c <= max_deg {
-        counts.append(0);
-        c += 1;
-    };
-
+    let mut column_by_degree_bound: Felt252Dict<Nullable<Array<u32>>> = Default::default();
+    let mut col_index = 0_usize;
     for column_log_degree_bound in log_degree_bound_by_column {
-        let deg: u32 = *column_log_degree_bound;
-        // Rebuild counts with incremented entry.
-        let mut new_counts: Array<u32> = array![];
-        let counts_span = counts.span();
-        let mut ci: u32 = 0;
-        while ci <= max_deg {
-            let val = *counts_span[ci];
-            if ci == deg {
-                new_counts.append(val + 1);
-            } else {
-                new_counts.append(val);
-            }
-            ci += 1;
+        let (column_by_degree_bound_entry, value) = column_by_degree_bound
+            .entry((*column_log_degree_bound).into());
+        let mut column_indices = match match_nullable(value) {
+            FromNullableResult::Null => array![],
+            FromNullableResult::NotNull(value) => value.unbox(),
         };
-        counts = new_counts;
-    };
-
-    // Allocate result arrays sized by counts.
-    let mut buckets: Array<Array<u32>> = array![];
-    let mut bi: u32 = 0;
-    while bi <= max_deg {
-        buckets.append(array![]);
-        bi += 1;
-    };
-
-    // Second pass: assign column indices to buckets.
-    let mut col_index: u32 = 0;
-    for column_log_degree_bound in log_degree_bound_by_column {
-        let deg: u32 = *column_log_degree_bound;
-        let mut new_buckets: Array<Array<u32>> = array![];
-        let mut i: u32 = 0;
-        while i <= max_deg {
-            let old_bucket = buckets.pop_front().unwrap();
-            let mut bucket: Array<u32> = array![];
-            let old_span = old_bucket.span();
-            let mut oi: usize = 0;
-            while oi < old_span.len() {
-                bucket.append(*old_span[oi]);
-                oi += 1;
-            };
-            if i == deg {
-                bucket.append(col_index);
-            }
-            new_buckets.append(bucket);
-            i += 1;
-        };
-        buckets = new_buckets;
+        column_indices.append(col_index);
+        column_by_degree_bound = column_by_degree_bound_entry
+            .finalize(NullableTrait::new(column_indices));
         col_index += 1;
-    };
+    }
 
-    let mut res: Array<Span<u32>> = array![];
-    for bucket in buckets {
-        res.append(bucket.span());
-    };
+    let mut res = array![];
+    for (column_degree_bound, _, column_indices) in column_by_degree_bound.squash().into_entries() {
+        /// Add empty spans for missing degree bounds.
+        while res.len().into() != column_degree_bound {
+            res.append(array![].span());
+        }
+        res.append(column_indices.deref().span());
+    }
     res.span()
 }
 

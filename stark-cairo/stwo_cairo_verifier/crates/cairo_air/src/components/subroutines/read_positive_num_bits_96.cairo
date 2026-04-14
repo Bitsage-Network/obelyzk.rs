@@ -19,24 +19,24 @@ pub fn read_positive_num_bits_96_evaluate(
     value_limb_8_col9: QM31,
     value_limb_9_col10: QM31,
     value_limb_10_col11: QM31,
-    memory_address_to_id_lookup_elements: @crate::MemoryAddressToIdElements,
-    range_check_6_lookup_elements: @crate::RangeCheck_6Elements,
-    memory_id_to_big_lookup_elements: @crate::MemoryIdToBigElements,
+    common_lookup_elements: @CommonLookupElements,
     ref memory_address_to_id_sum_0: QM31,
+    ref numerator_0: QM31,
     ref range_check_6_sum_1: QM31,
+    ref numerator_1: QM31,
     ref memory_id_to_big_sum_2: QM31,
+    ref numerator_2: QM31,
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
 ) -> [QM31; 0] {
     let read_positive_num_bits_96_input = input;
     read_id_evaluate(
         read_positive_num_bits_96_input,
         id_col0,
-        memory_address_to_id_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_0,
+        ref numerator_0,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     read_positive_known_id_num_bits_96_evaluate(
@@ -52,12 +52,12 @@ pub fn read_positive_num_bits_96_evaluate(
         value_limb_8_col9,
         value_limb_9_col10,
         value_limb_10_col11,
-        range_check_6_lookup_elements,
-        memory_id_to_big_lookup_elements,
+        common_lookup_elements,
         ref range_check_6_sum_1,
+        ref numerator_1,
         ref memory_id_to_big_sum_2,
+        ref numerator_2,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
 

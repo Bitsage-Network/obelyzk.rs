@@ -36,9 +36,8 @@ pub impl ClaimImpl of ClaimTrait<Claim> {
         let log_size = *self.log_size;
         let preprocessed_log_sizes = array![log_size].span();
         let trace_log_sizes = [log_size; N_TRACE_COLUMNS].span();
-        let interaction_log_sizes = [
-            log_size
-        ; N_INTERACTION_TRACE_QM31_COLUMNS * QM31_EXTENSION_DEGREE]
+        let interaction_log_sizes = [log_size;
+            N_INTERACTION_TRACE_QM31_COLUMNS * QM31_EXTENSION_DEGREE]
             .span();
         array![preprocessed_log_sizes, trace_log_sizes, interaction_log_sizes]
     }
@@ -66,7 +65,7 @@ pub impl InteractionClaimImpl of InteractionClaimTrait {
 pub struct Component {
     pub claim: Claim,
     pub interaction_claim: InteractionClaim,
-    pub lookup_elements: crate::MemoryAddressToIdElements,
+    pub common_lookup_elements: CommonLookupElements,
 }
 
 pub impl NewComponentImpl of NewComponent<Component> {
@@ -76,12 +75,12 @@ pub impl NewComponentImpl of NewComponent<Component> {
     fn new(
         claim: @Claim,
         interaction_claim: @InteractionClaim,
-        interaction_elements: @CairoInteractionElements,
+        common_lookup_elements: @CommonLookupElements,
     ) -> Component {
         Component {
             claim: *claim,
             interaction_claim: *interaction_claim,
-            lookup_elements: interaction_elements.memory_address_to_id.clone(),
+            common_lookup_elements: common_lookup_elements.clone(),
         }
     }
 }
@@ -94,28 +93,19 @@ pub impl CairoComponentImpl of CairoComponent<Component> {
         ref trace_mask_values: ColumnSpan<Span<QM31>>,
         ref interaction_trace_mask_values: ColumnSpan<Span<QM31>>,
         random_coeff: QM31,
-        point: CirclePoint<QM31>,
     ) {
         let log_size = *self.claim.log_size;
 
         let params = constraints::ConstraintParams {
             column_size: pow2(log_size).try_into().unwrap(),
-            lookup_elements: self.lookup_elements,
+            common_lookup_elements: self.common_lookup_elements,
             seq: preprocessed_mask_values
                 .get_and_mark_used(preprocessed_columns::seq_column_idx(log_size)),
             claimed_sum: *self.interaction_claim.claimed_sum,
         };
 
-        let trace_domain = CanonicCosetImpl::new(log_size);
-        let vanish_eval = trace_domain.eval_vanishing(point);
-
         constraints::evaluate_constraints_at_point(
-            ref sum,
-            ref trace_mask_values,
-            ref interaction_trace_mask_values,
-            params,
-            random_coeff,
-            vanish_eval.inverse(),
+            ref sum, ref trace_mask_values, ref interaction_trace_mask_values, params, random_coeff,
         );
     }
 }

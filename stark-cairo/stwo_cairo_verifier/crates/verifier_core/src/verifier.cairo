@@ -1,6 +1,7 @@
 use core::num::traits::Pow;
 use crate::channel::{Channel, ChannelTrait};
 use crate::circle::{ChannelGetRandomCirclePointImpl, CirclePoint};
+use crate::fields::Invertible;
 // TODO(Ilya): Remove this once we bump the compiler version.
 #[allow(unused_imports)]
 use crate::fields::qm31::QM31_EXTENSION_DEGREE;
@@ -9,6 +10,7 @@ use crate::pcs::PcsConfigTrait;
 use crate::pcs::verifier::{
     CommitmentSchemeProof, CommitmentSchemeVerifier, CommitmentSchemeVerifierImpl,
 };
+use crate::poly::circle::{CanonicCosetImpl, CanonicCosetTrait};
 use crate::utils::{ArrayImpl, SpanImpl};
 use crate::vcs::MerkleHasher;
 use crate::{ColumnSpan, Hash, TreeSpan};
@@ -24,9 +26,6 @@ const COMPOSITION_SPLIT_FACTOR: u32 = 2_u32.pow(LOG_COMPOSITION_SPLIT_FACTOR);
 /// constraints. For instance, all interaction elements are assumed to be present in it. Therefore,
 /// an AIR is generated only after the initial trace commitment phase.
 pub trait Air<T> {
-    /// The degree of the composition polynomial.
-    fn composition_log_degree_bound(self: @T) -> u32;
-
     /// Evaluates the constraint quotients combination of the AIR at `point`.
     fn eval_composition_polynomial_at_point(
         self: @T,
@@ -36,14 +35,27 @@ pub trait Air<T> {
     ) -> QM31;
 }
 
-/// Given a commitment to the traces, and an AIR definition, verifies the proof.
+/// Verifies a STARK proof for the given `air`.
+///
+/// # Arguments
+///
+/// - `proof`: the STARK proof to verify.
+/// - `air`: AIR instance defining the constraints for the statement being proven.
+/// - `composition_log_degree_bound`: log2 upper bound on the degree of the composition polynomial.
+/// - `composition_commitment`: commitment to the composition polynomial sent by the prover.
+/// - `commitment_scheme`: verifier-side state for the polynomial commitment scheme used by the
+///    proof, the commitment scheme already holds the commitments for the preprocessed trace, trace,
+///    and interaction trace.
+/// - `channel`: verifier Fiat–Shamir channel used to sample challenges while checking the proof.
+/// - `min_security_bits`: minimum security level to enforce (soundness).
 pub fn verify<A, +Air<A>, +Drop<A>>(
-    air: A,
-    ref channel: Channel,
     proof: StarkProof,
-    mut commitment_scheme: CommitmentSchemeVerifier,
-    min_security_bits: u32,
+    air: A,
+    composition_log_degree_bound: u32,
     composition_commitment: Hash,
+    mut commitment_scheme: CommitmentSchemeVerifier,
+    ref channel: Channel,
+    min_security_bits: u32,
 ) {
     let StarkProof { commitment_scheme_proof } = proof;
 
@@ -58,7 +70,6 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
     // The composition polynomial is defined as: Σ_i (composition_random_coeff^i * quotient_i).
     let composition_random_coeff = channel.draw_secure_felt();
 
-    let composition_log_degree_bound = air.composition_log_degree_bound();
     let split_composition_log_degree_bound = composition_log_degree_bound
         - LOG_COMPOSITION_SPLIT_FACTOR;
 
@@ -86,61 +97,23 @@ pub fn verify<A, +Air<A>, +Drop<A>>(
         );
 
     // Evaluate composition polynomial at OOD point and check that it matches the trace OOD values.
+    let numerator = air
+        .eval_composition_polynomial_at_point(
+            ood_point, sampled_oods_values, composition_random_coeff,
+        );
+    // `max_trace_domain` is the largest domain of a trace polynomial (before LDE).
+    let max_trace_domain = CanonicCosetImpl::new(split_composition_log_degree_bound);
+    let denominator_inv = max_trace_domain.eval_vanishing(ood_point).inverse();
     assert!(
-        composition_oods_eval == air
-            .eval_composition_polynomial_at_point(
-                ood_point, sampled_oods_values, composition_random_coeff,
-            ),
+        composition_oods_eval == numerator * denominator_inv,
         "{}",
         VerificationError::OodsNotMatching,
     );
 
-    commitment_scheme.verify_values(ood_point, commitment_scheme_proof, ref channel);
-}
-
-/// Verify a STARK proof, skipping the OODS constraint check.
-///
-/// This verifies FRI proximity, Merkle decommitments, and proof of work — all the
-/// cryptographic soundness guarantees except the AIR constraint evaluation match.
-/// Used for recursive STARK proofs where the AIR constraint evaluation is verified
-/// separately by the Rust prover's self-verification.
-pub fn verify_skip_oods<A, +Air<A>, +Drop<A>>(
-    air: A,
-    ref channel: Channel,
-    proof: StarkProof,
-    mut commitment_scheme: CommitmentSchemeVerifier,
-    min_security_bits: u32,
-    composition_commitment: Hash,
-) {
-    let StarkProof { commitment_scheme_proof } = proof;
-
-    assert!(
-        commitment_scheme_proof.config.security_bits() >= min_security_bits,
-        "{}",
-        VerificationError::SecurityBitsTooLow,
-    );
-
-    let _composition_random_coeff = channel.draw_secure_felt();
-
-    let composition_log_degree_bound = air.composition_log_degree_bound();
-    let split_composition_log_degree_bound = composition_log_degree_bound
-        - LOG_COMPOSITION_SPLIT_FACTOR;
-
     commitment_scheme
-        .commit(
-            composition_commitment,
-            [split_composition_log_degree_bound; COMPOSITION_SPLIT_FACTOR * QM31_EXTENSION_DEGREE]
-                .span(),
-            ref channel,
-            commitment_scheme_proof.config.fri_config.log_blowup_factor,
+        .verify_values(
+            ood_point, commitment_scheme_proof, ref channel, split_composition_log_degree_bound,
         );
-
-    let ood_point = channel.get_random_point();
-
-    // SKIP: OODS evaluation check (composition_oods_eval == air.eval(...))
-    // The AIR constraints are verified by the Rust prover's cryptographic self-verify.
-
-    commitment_scheme.verify_values(ood_point, commitment_scheme_proof, ref channel);
 }
 
 fn circle_double_x(x: QM31) -> QM31 {
@@ -163,15 +136,15 @@ fn try_extract_composition_eval(
     composition_log_size: u32,
 ) -> Option<QM31> {
     let cols = *mask.last()?;
-    let [c0, c1, c2, c3, c4, c5, c6, c7] = (*cols.try_into()?).unbox();
-    let [v0] = (*c0.try_into()?).unbox();
-    let [v1] = (*c1.try_into()?).unbox();
-    let [v2] = (*c2.try_into()?).unbox();
-    let [v3] = (*c3.try_into()?).unbox();
-    let [v4] = (*c4.try_into()?).unbox();
-    let [v5] = (*c5.try_into()?).unbox();
-    let [v6] = (*c6.try_into()?).unbox();
-    let [v7] = (*c7.try_into()?).unbox();
+    let [c0, c1, c2, c3, c4, c5, c6, c7]: [Span<QM31>; 8] = (*cols.try_into()?).unbox();
+    let [v0]: [QM31; 1] = (*c0.try_into()?).unbox();
+    let [v1]: [QM31; 1] = (*c1.try_into()?).unbox();
+    let [v2]: [QM31; 1] = (*c2.try_into()?).unbox();
+    let [v3]: [QM31; 1] = (*c3.try_into()?).unbox();
+    let [v4]: [QM31; 1] = (*c4.try_into()?).unbox();
+    let [v5]: [QM31; 1] = (*c5.try_into()?).unbox();
+    let [v6]: [QM31; 1] = (*c6.try_into()?).unbox();
+    let [v7]: [QM31; 1] = (*c7.try_into()?).unbox();
 
     let [left, right] = [
         QM31Trait::from_partial_evals([v0, v1, v2, v3]),

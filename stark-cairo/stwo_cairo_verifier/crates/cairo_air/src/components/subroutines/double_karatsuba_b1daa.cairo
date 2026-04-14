@@ -5,7 +5,10 @@ use crate::prelude::*;
 
 
 pub fn double_karatsuba_b1daa_evaluate(
-    input: [QM31; 64], ref sum: QM31, domain_vanishing_eval_inv: QM31, random_coeff: QM31,
+    input: [QM31; 64],
+    common_lookup_elements: @CommonLookupElements,
+    ref sum: QM31,
+    random_coeff: QM31,
 ) -> [QM31; 63] {
     let [
         double_karatsuba_b1daa_input_limb_0,
@@ -129,8 +132,8 @@ pub fn double_karatsuba_b1daa_evaluate(
             double_karatsuba_b1daa_input_limb_44, double_karatsuba_b1daa_input_limb_45,
             double_karatsuba_b1daa_input_limb_46, double_karatsuba_b1daa_input_limb_47,
         ],
+        common_lookup_elements,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     let [
@@ -185,8 +188,8 @@ pub fn double_karatsuba_b1daa_evaluate(
             double_karatsuba_b1daa_input_limb_60, double_karatsuba_b1daa_input_limb_61,
             double_karatsuba_b1daa_input_limb_62, double_karatsuba_b1daa_input_limb_63,
         ],
+        common_lookup_elements,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
     let x_sum_tmp_b1daa_10_limb_0: QM31 = (double_karatsuba_b1daa_input_limb_0
@@ -300,8 +303,8 @@ pub fn double_karatsuba_b1daa_evaluate(
             y_sum_tmp_b1daa_11_limb_11, y_sum_tmp_b1daa_11_limb_12, y_sum_tmp_b1daa_11_limb_13,
             y_sum_tmp_b1daa_11_limb_14, y_sum_tmp_b1daa_11_limb_15,
         ],
+        common_lookup_elements,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
 

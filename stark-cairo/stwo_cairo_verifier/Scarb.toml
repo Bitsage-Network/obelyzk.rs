@@ -8,8 +8,7 @@ members = [
     "crates/verifier_core",
     "crates/verifier_utils",
     "crates/ml_air",
-    "crates/ml_verifier",
-]
+    "crates/ml_verifier",]
 
 [workspace.tool.cairo-lint]
 collapsible_if_else = false

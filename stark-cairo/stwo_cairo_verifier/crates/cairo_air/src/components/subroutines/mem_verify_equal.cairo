@@ -7,26 +7,30 @@ use crate::prelude::*;
 pub fn mem_verify_equal_evaluate(
     input: [QM31; 2],
     id_col0: QM31,
-    memory_address_to_id_lookup_elements: @crate::MemoryAddressToIdElements,
+    common_lookup_elements: @CommonLookupElements,
     ref memory_address_to_id_sum_0: QM31,
+    ref numerator_0: QM31,
     ref memory_address_to_id_sum_1: QM31,
+    ref numerator_1: QM31,
     ref sum: QM31,
-    domain_vanishing_eval_inv: QM31,
     random_coeff: QM31,
 ) -> [QM31; 0] {
     let [mem_verify_equal_input_address1, mem_verify_equal_input_address2] = input;
     read_id_evaluate(
         mem_verify_equal_input_address1,
         id_col0,
-        memory_address_to_id_lookup_elements,
+        common_lookup_elements,
         ref memory_address_to_id_sum_0,
+        ref numerator_0,
         ref sum,
-        domain_vanishing_eval_inv,
         random_coeff,
     );
 
-    memory_address_to_id_sum_1 = memory_address_to_id_lookup_elements
-        .combine_qm31([mem_verify_equal_input_address2, id_col0]);
+    memory_address_to_id_sum_1 = common_lookup_elements
+        .combine_qm31(
+            [qm31_const::<1444891767, 0, 0, 0>(), mem_verify_equal_input_address2, id_col0].span(),
+        );
+    numerator_1 = qm31_const::<1, 0, 0, 0>();
 
     []
 }
