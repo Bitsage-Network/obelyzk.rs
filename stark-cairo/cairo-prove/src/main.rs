@@ -124,13 +124,18 @@ fn handle_prove_ml(
     proof_format: ProofFormat,
     gpu: bool,
     poseidon: bool,
+    recursive_160: bool,
 ) -> Result<()> {
     info!(
         "Generating recursive proof for ML STARK proof: {:?}",
         ml_proof
     );
-    if poseidon {
-        info!("[Poseidon252] On-chain recursive path — proof will be ~19K felts.");
+    let use_poseidon = poseidon || recursive_160;
+    if recursive_160 {
+        info!("[160-bit] On-chain recursive path — Poseidon252 + blowup=32 + 28 queries.");
+        info!("[160-bit] Proof will be ~2800 felts (fits in 1 Starknet TX).");
+    } else if poseidon {
+        info!("[Poseidon252] On-chain recursive path.");
     }
     let start = Instant::now();
 
@@ -165,19 +170,39 @@ fn handle_prove_ml(
     let prove_start = Instant::now();
     let prover_input = prover_input_from_runner(&runner)?;
 
-    // Use recursive PCS config (fewer queries) for the Level 2 proof
-    let pcs = if poseidon {
-        recursive_pcs_config()
-    } else {
-        secure_pcs_config()
-    };
-
-    if poseidon {
+    if recursive_160 {
+        // 160-bit security: Poseidon252 + blowup=32 + 28 queries
         let cairo_proof = {
             #[cfg(feature = "cuda-runtime")]
             {
                 if gpu {
-                    info!("[GPU+Poseidon252] CUDA + native Poseidon channel.");
+                    cairo_prove::prove::prove_gpu_recursive_160(prover_input)?
+                } else {
+                    cairo_prove::prove::prove_recursive_160(prover_input)?
+                }
+            }
+            #[cfg(not(feature = "cuda-runtime"))]
+            {
+                let _ = gpu;
+                cairo_prove::prove::prove_recursive_160(prover_input)?
+            }
+        };
+        info!(
+            "160-bit recursive proof generated in {:.2?}.",
+            prove_start.elapsed()
+        );
+        serialize_proof_to_file::<Poseidon252MerkleHasher>(
+            &cairo_proof,
+            output.into(),
+            proof_format,
+        )
+        .map_err(|e| CairoProveError::ProofSerialization(format!("{:?}", e)))?;
+    } else if use_poseidon {
+        let pcs = recursive_pcs_config();
+        let cairo_proof = {
+            #[cfg(feature = "cuda-runtime")]
+            {
+                if gpu {
                     cairo_prove::prove::prove_gpu_poseidon(prover_input, pcs)?
                 } else {
                     prove_poseidon(prover_input, pcs)?
@@ -200,11 +225,11 @@ fn handle_prove_ml(
         )
         .map_err(|e| CairoProveError::ProofSerialization(format!("{:?}", e)))?;
     } else {
+        let pcs = secure_pcs_config();
         let cairo_proof = {
             #[cfg(feature = "cuda-runtime")]
             {
                 if gpu {
-                    info!("[GPU] Using GpuBackend for STARK proving.");
                     cairo_prove::prove::prove_gpu(prover_input, pcs)?
                 } else {
                     prove(prover_input, pcs)?
@@ -260,6 +285,7 @@ fn run() -> Result<()> {
             proof_format,
             gpu,
             poseidon,
+            recursive_160,
         } => {
             handle_prove_ml(
                 &verifier_executable,
@@ -268,6 +294,7 @@ fn run() -> Result<()> {
                 proof_format,
                 gpu,
                 poseidon,
+                recursive_160,
             )?;
         }
     }

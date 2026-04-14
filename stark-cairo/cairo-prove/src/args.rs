@@ -69,6 +69,10 @@ pub enum Commands {
         /// Use Poseidon252 Merkle channel for on-chain recursive verification.
         #[arg(long, default_value = "false")]
         poseidon: bool,
+        /// 160-bit security for on-chain verification (Poseidon252, blowup=32, 28 queries).
+        /// The recursive proof fits in ~2800 felts — under Starknet's 5000-felt TX limit.
+        #[arg(long, default_value = "false")]
+        recursive_160: bool,
     },
 }
 

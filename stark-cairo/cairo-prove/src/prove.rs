@@ -77,6 +77,21 @@ pub fn prove_gpu(input: ProverInput, pcs_config: PcsConfig) -> Result<CairoProof
     prove(input, pcs_config)
 }
 
+/// Prove with 160-bit security for on-chain recursive verification.
+/// Uses Poseidon252 channel + blowup=32 + 28 queries.
+/// The recursive proof fits in ~2800 felts (under Starknet's 5000-felt TX limit).
+pub fn prove_recursive_160(
+    input: ProverInput,
+) -> Result<CairoProof<Poseidon252MerkleHasher>> {
+    info!("[160-bit recursive] Poseidon252 channel, blowup=32, 28 queries.");
+    let pcs_config = PcsConfig {
+        pow_bits: 20,
+        fri_config: stwo_cairo_prover::stwo::core::fri::FriConfig::new(0, 5, 28, 1),
+        lifting_log_size: None,
+    };
+    prove_poseidon(input, pcs_config)
+}
+
 #[cfg(feature = "gpu")]
 pub fn prove_gpu_poseidon(
     input: ProverInput,
@@ -84,4 +99,12 @@ pub fn prove_gpu_poseidon(
 ) -> Result<CairoProof<Poseidon252MerkleHasher>> {
     info!("[GPU+Poseidon252] CUDA + native Poseidon channel for on-chain recursive path.");
     prove_poseidon(input, pcs_config)
+}
+
+#[cfg(feature = "gpu")]
+pub fn prove_gpu_recursive_160(
+    input: ProverInput,
+) -> Result<CairoProof<Poseidon252MerkleHasher>> {
+    info!("[GPU+160-bit] CUDA + Poseidon252, blowup=32, 28 queries.");
+    prove_recursive_160(input)
 }
