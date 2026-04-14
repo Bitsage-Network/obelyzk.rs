@@ -9,6 +9,8 @@ description = "STARK prover for Cairo programs using the Stwo proving system"
 [features]
 slow-tests = []
 relation-tracker = []
+gpu = ["stwo/gpu"]
+cuda-runtime = ["gpu", "stwo/cuda-runtime"]
 
 # Define Nightly features in order to allow selective tests
 # Use the following #[cfg(feature = "nightly")]

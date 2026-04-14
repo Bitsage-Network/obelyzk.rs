@@ -42,6 +42,9 @@ fn execute_and_prove(
 }
 
 fn secure_pcs_config() -> PcsConfig {
+    // 96 bits of security: pow(26) + blowup(1) * queries(70) = 96 bits.
+    // Blowup=1 minimizes prover memory/time (critical for STARK-in-STARK Level 2).
+    // This matches the upstream default configuration.
     PcsConfig {
         pow_bits: 26,
         fri_config: FriConfig {
