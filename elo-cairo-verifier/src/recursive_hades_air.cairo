@@ -16,7 +16,7 @@
 ///   - Sum = 0 proves all chain entries have valid Hades permutations
 
 use stwo_verifier_core::fields::qm31::{QM31, QM31Zero, QM31One};
-use stwo_verifier_core::fields::m31::M31;
+// use stwo_verifier_core::fields::m31::M31;
 
 /// Number of 9-bit limbs per felt252.
 pub const LIMBS_28: u32 = 28;

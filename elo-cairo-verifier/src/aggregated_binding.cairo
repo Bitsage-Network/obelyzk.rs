@@ -3,7 +3,7 @@
 /// Verifies M weight claims in one shot: mismatch sumcheck + single MLE opening.
 /// Produces ~17K felts calldata instead of ~2.4M (160 separate openings).
 
-use core::poseidon::poseidon_hash_span;
+// use core::poseidon::poseidon_hash_span;  // referenced in comment only
 use crate::field::{
     QM31, qm31_add, qm31_sub, qm31_mul, qm31_eq, qm31_zero, qm31_one,
     poly_eval_degree2, eq_eval, pack_qm31_to_felt, unpack_qm31_from_felt,

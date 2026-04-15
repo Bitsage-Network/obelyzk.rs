@@ -69,9 +69,7 @@ pub struct RecursiveAir {
 }
 
 impl RecursiveAirImpl of Air<RecursiveAir> {
-    fn composition_log_degree_bound(self: @RecursiveAir) -> u32 {
-        *self.log_n_rows + 1
-    }
+    // composition_log_degree_bound removed in v1.2.2 — passed to verify() directly.
 
     fn eval_composition_polynomial_at_point(
         self: @RecursiveAir,

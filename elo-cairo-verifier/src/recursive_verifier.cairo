@@ -139,7 +139,7 @@ pub trait IRecursiveVerifier<TContractState> {
 
 #[starknet::contract]
 pub mod RecursiveVerifierContract {
-    use super::{RecursiveModelInfo, RecursivePublicInputs};
+    use super::RecursiveModelInfo;
     use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::{get_caller_address, ContractAddress};
     use core::poseidon::poseidon_hash_span;
@@ -526,7 +526,7 @@ pub mod RecursiveVerifierContract {
             // This makes the STARK proof cryptographically bound to these
             // values.  Submitting different metadata causes channel
             // divergence → FRI verification failure.
-            let z = m31(0);
+            let _z = m31(0);
             let circuit_hash_qm31 = QM31Trait::from_fixed_array([
                 felt252_to_m31(ch0), felt252_to_m31(ch1),
                 felt252_to_m31(ch2), felt252_to_m31(ch3),
@@ -597,8 +597,12 @@ pub mod RecursiveVerifierContract {
             // - FRI: proximity proof verifies polynomial low-degree
             // - PoW: proof of work prevents grinding
             let stark_proof = stwo_verifier_core::verifier::StarkProof { commitment_scheme_proof: csp };
+            // v1.2.2 signature: verify(proof, air, composition_log_degree_bound,
+            //   composition_commitment, commitment_scheme, ref channel, min_security_bits)
+            let composition_log_degree_bound = proof_log_size + 1;
             stwo_verifier_core::verifier::verify(
-                air, ref channel, stark_proof, commitment_scheme, 0, composition_commitment,
+                stark_proof, air, composition_log_degree_bound,
+                composition_commitment, commitment_scheme, ref channel, 0,
             );
 
             // 6. Record verification + rich on-chain state
