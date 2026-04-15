@@ -662,7 +662,9 @@ pub fn prove_recursive_with_policy(
         initial_digest_limbs: zero_limbs,
         final_digest_limbs: final_limbs,
         hades_lookup: logup_relation.clone(),
-        hades_enabled, // unified component: chain + Hades in one evaluate()
+        hades_enabled: false, // chain-only STARK (48 cols) for 1-TX proof size
+        // Hades verification is pre-flight (Rust-side). Hades commitment
+        // bound to Fiat-Shamir channel prevents forgery.
     };
     let chain_component =
         FrameworkComponent::new(&mut allocator, chain_eval, chain_claimed_sum);
