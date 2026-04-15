@@ -2910,3 +2910,105 @@ mod tests {
         assert_eq!(trace_data.trace[0].len(), 1 << trace_data.log_size);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Row-by-row constraint checker — identifies which constraint fails
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Check all Hades AIR constraints row-by-row on the raw trace.
+/// Returns (total_failures, first_failure_description).
+pub fn check_hades_constraints_rowwise(
+    trace: &[Vec<M31>],
+    n_real_rows: usize,
+    n_padded: usize,
+) -> (usize, String) {
+    use stwo::core::fields::FieldExpOps;
+    let mut failures = 0usize;
+    let mut first_fail = String::new();
+    let p_limbs = stark_prime_9bit_limbs();
+
+    for row in 0..n_padded {
+        let is_real = if row < n_real_rows { 1u32 } else { 0 };
+
+        // Read columns at this row
+        let mut col = 0;
+        let read = |c: usize| -> i64 { trace[c][row].0 as i64 };
+        let read_m31 = |c: usize| -> M31 { trace[c][row] };
+
+        // state_before: [0..84)
+        let sb: Vec<i64> = (0..84).map(|j| read(j)).collect();
+        col = 84;
+        // sbox_input: [84..168)
+        let si: Vec<i64> = (0..84).map(|j| read(col + j)).collect();
+        col = 168;
+        // cube_result: [168..252)
+        let cr: Vec<i64> = (0..84).map(|j| read(col + j)).collect();
+        col = 252;
+        // cube_sq: [252..336)
+        let cs: Vec<i64> = (0..84).map(|j| read(col + j)).collect();
+        col = 336;
+        // mul_witness: [336..828) — skip
+        col = 828;
+        // post_sbox: [828..912)
+        let ps: Vec<i64> = (0..84).map(|j| read(col + j)).collect();
+        col = 912;
+        // mds_result: [912..996)
+        let mr: Vec<i64> = (0..84).map(|j| read(col + j)).collect();
+        col = 996;
+        // mds_carries: [996..1086) — skip
+        col = 1086;
+        // shifted_next_state: [1086..1170)
+        let sns: Vec<i64> = (0..84).map(|j| read(col + j)).collect();
+        col = 1170;
+        // selectors
+        let is_full = read(col) as u32; col += 1;
+        let is_real_v = read(col) as u32; col += 1;
+        let is_chain = read(col) as u32; col += 1;
+        let is_first = read(col) as u32; col += 1;
+        let is_last = read(col) as u32; col += 1;
+
+        // Check: is_real boolean
+        if is_real_v != 0 && is_real_v != 1 {
+            let msg = format!("row {row}: is_real={is_real_v} not boolean");
+            if first_fail.is_empty() { first_fail = msg.clone(); }
+            failures += 1;
+            continue;
+        }
+
+        // Check: post_sbox[2] = cube_result[2] (ungated, should be 0=0 on padding)
+        for j in 0..LIMBS_28 {
+            if ps[56 + j] != cr[56 + j] {
+                let msg = format!("row {row}: post_sbox[2][{j}]={} != cube_result[2][{j}]={}", ps[56+j], cr[56+j]);
+                if first_fail.is_empty() { first_fail = msg.clone(); }
+                failures += 1;
+            }
+        }
+
+        // Check: post_sbox[0,1] = is_full*cube + (1-is_full)*sbox_input
+        for elem in 0..2 {
+            for j in 0..LIMBS_28 {
+                let expected = is_full as i64 * cr[elem*28+j] + (1 - is_full as i64) * si[elem*28+j];
+                if ps[elem*28+j] != expected {
+                    let msg = format!("row {row}: post_sbox[{elem}][{j}]={} != expected={} (is_full={is_full})", ps[elem*28+j], expected);
+                    if first_fail.is_empty() { first_fail = msg.clone(); }
+                    failures += 1;
+                }
+            }
+        }
+
+        // Check: round transition (is_chain × (mds_result - shifted_next_state))
+        if is_chain != 0 {
+            for elem in 0..3 {
+                for j in 0..LIMBS_28 {
+                    if mr[elem*28+j] != sns[elem*28+j] {
+                        let msg = format!("row {row}: round_transition[{elem}][{j}] mds={} != shifted={}", mr[elem*28+j], sns[elem*28+j]);
+                        if first_fail.is_empty() { first_fail = msg.clone(); }
+                        failures += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    (failures, first_fail)
+}

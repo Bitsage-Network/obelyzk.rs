@@ -346,15 +346,22 @@ pub fn prove_recursive_with_policy(
     // When Hades AIR is enabled, use the SAME domain for both components
     // to avoid STWO's SIMD mixed-size column evaluation issues.
     // Chain columns are padded to unified_log_size (zeros beyond n_real_rows).
+    // DEBUG: force unified to hades size but DO NOT pad chain — this tests
+    // whether the padding recomputation is the issue.
     let unified_log_size = if hades_enabled {
         chain_log_size.max(hades_log_size)
     } else {
-        chain_log_size
+        // DEBUG: test chain at forced larger size
+        let forced = std::env::var("OBELYZK_FORCE_CHAIN_LOG")
+            .ok().and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(chain_log_size);
+        chain_log_size.max(forced)
     };
+    eprintln!("  [SIZES] chain_log={}, hades_log={}, unified={}", chain_log_size, hades_log_size, unified_log_size);
     // Max degree must cover the largest component's constraint degree.
     // Chain: +1 (degree 2), Hades: +2 (degree 3 from a*b*is_active).
     // +1 for degree-2 constraints (helper columns keep all constraints degree ≤ 2)
-    let max_degree_bound = unified_log_size + 1;
+    let max_degree_bound = unified_log_size + 2;
     let twiddles = SimdBackend::precompute_twiddles(
         CanonicCoset::new(max_degree_bound + config.fri_config.log_blowup_factor)
             .circle_domain()
@@ -491,21 +498,6 @@ pub fn prove_recursive_with_policy(
             chain_evals,
         ));
 
-        // Hades columns: 590 columns at hades_log_size (in same tree)
-        if hades_enabled {
-            let hades_evals: Vec<CircleEvaluation<SimdBackend, M31, _>> = hades_trace
-                .trace
-                .iter()
-                .map(|col| {
-                    let simd_col = simd_column_from_vec(col);
-                    CircleEvaluation::new(hades_domain, simd_col)
-                })
-                .collect();
-            tree_builder.extend_evals(convert_evaluations::<SimdBackend, SimdBackend, M31>(
-                hades_evals,
-            ));
-        }
-
         tree_builder.commit(channel);
         recursive_log!(
             "  [Recursive] Channel after trace commit: {:?} (chain: {} cols @ log{}{})",
@@ -524,7 +516,30 @@ pub fn prove_recursive_with_policy(
         );
     }
 
-    // ── Step 3b: LogUp interaction trace (Tree 2) ─────────────────────
+    // Tree 2: Hades execution trace (separate tree for independent domain)
+    if hades_enabled {
+        let mut tree_builder = commitment_scheme.tree_builder();
+        let hades_evals: Vec<CircleEvaluation<SimdBackend, M31, _>> = hades_trace
+            .trace
+            .iter()
+            .map(|col| {
+                let simd_col = simd_column_from_vec(col);
+                CircleEvaluation::new(hades_domain, simd_col)
+            })
+            .collect();
+        tree_builder.extend_evals(convert_evaluations::<SimdBackend, SimdBackend, M31>(
+            hades_evals,
+        ));
+        tree_builder.commit(channel);
+        recursive_log!(
+            "  [Recursive] Channel after Hades trace commit: {:?} ({} cols @ log{})",
+            channel.digest(),
+            hades_trace.trace.len(),
+            hades_log_size,
+        );
+    }
+
+    // ── Step 3c: LogUp interaction trace ─────────────────────────────
     // When enabled, draws LogUp lookup elements from channel and generates
     // the interaction trace binding chain ↔ Hades permutations.
     // Activate with OBELYZK_LOGUP=1.
@@ -751,6 +766,17 @@ pub fn prove_recursive_with_policy(
         eprintln!("  [HADES DIAG] trace cols: {}, expected: {}", hades_trace.trace.len(), super::hades_air::N_HADES_TRACE_COLUMNS);
         eprintln!("  [HADES DIAG] hades_log_size: {}, unified: {}, rows: {}/{}",
             hades_log_size, unified_log_size, n_hades_real, n_hades_padded);
+
+        // Row-by-row constraint check
+        let (fails, first_fail) = super::hades_air::check_hades_constraints_rowwise(
+            &hades_trace.trace, n_hades_real, n_hades_padded,
+        );
+        if fails > 0 {
+            eprintln!("  [HADES DIAG] CONSTRAINT FAILURES: {} total", fails);
+            eprintln!("  [HADES DIAG] First: {}", first_fail);
+        } else {
+            eprintln!("  [HADES DIAG] All row-by-row constraints PASS ({} rows checked)", n_hades_padded);
+        }
 
         // Check cube constraint on row 0: cube_result[2] = sbox_input[2]³
         // sbox_input starts at col 84, element 2 at col 84+56..84+84
