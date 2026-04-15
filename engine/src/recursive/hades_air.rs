@@ -1368,9 +1368,10 @@ impl FrameworkEval for HadesVerifierEval {
             );
         }
 
-        // ── post_sbox linking (degree 2, no is_real selector) ────────
+        // ── post_sbox linking (degree 2, NOT gated by is_real) ────────
         // post_sbox[e] = is_full_round * cube_result[e] + (1 - is_full_round) * sbox_input[e]
         // Degree 2: is_full_round × trace_col. On padding rows: all zero → 0=0.
+        // Adding is_real would make this degree 3 (exceeds bound).
         // Element 2: always cubed → post_sbox[2] = cube_result[2]
         for j in 0..LIMBS_28 {
             eval.add_constraint(post_sbox[2][j].clone() - cube_result[2][j].clone());
