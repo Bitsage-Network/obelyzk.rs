@@ -687,12 +687,71 @@ pub fn prove_recursive_with_policy(
     // interaction trace generation. For now, only the chain consumer is active.
     // The Hades provider will be activated when we generate its interaction
     // trace from the Hades execution trace's is_last_round rows.
+    // Compute round constant limbs for Hades AIR constraints.
+    let raw_rc = super::hades_air::hades_round_constants();
+    let rc_limbs: Vec<[[M31; super::hades_air::LIMBS_28]; 3]> = raw_rc
+        .iter()
+        .map(|round| {
+            [
+                super::hades_air::felt252_to_9bit_limbs(&round[0]),
+                super::hades_air::felt252_to_9bit_limbs(&round[1]),
+                super::hades_air::felt252_to_9bit_limbs(&round[2]),
+            ]
+        })
+        .collect();
+
     let hades_eval = super::hades_air::HadesVerifierEval {
         log_n_rows: unified_log_size,
-        round_constants_limbs: Vec::new(),
+        round_constants_limbs: rc_limbs,
         range_check: None,
-        hades_logup: None, // TODO: activate with Hades interaction trace
+        hades_logup: None,
     };
+
+    // Diagnostic: check Hades trace basic validity
+    if hades_enabled {
+        let n_hades_padded = 1usize << unified_log_size;
+        let n_hades_real = hades_trace.n_real_rows;
+        // Find is_real column by scanning for the boolean pattern
+        let mut is_real_col = 0;
+        for c in 0..hades_trace.trace.len() {
+            let mut is_bool = true;
+            for r in 0..n_hades_real.min(10) {
+                let v = hades_trace.trace[c][r].0;
+                if v != 0 && v != 1 { is_bool = false; break; }
+            }
+            // Check: all real rows are 1, all padding rows are 0
+            if is_bool {
+                let all_real_one = (0..n_hades_real.min(5)).all(|r| hades_trace.trace[c][r].0 == 1);
+                let all_pad_zero = if n_hades_padded > n_hades_real {
+                    (n_hades_real..n_hades_padded.min(n_hades_real+5)).all(|r| hades_trace.trace[c][r].0 == 0)
+                } else { true };
+                if all_real_one && all_pad_zero {
+                    is_real_col = c;
+                    break;
+                }
+            }
+        }
+        eprintln!("  [HADES DIAG] Found is_real at column {}", is_real_col);
+        let mut bad_rows = 0;
+        for row in 0..n_hades_padded.min(hades_trace.trace[0].len()) {
+            let is_real = hades_trace.trace[is_real_col][row].0;
+            let expected = if row < n_hades_real { 1 } else { 0 };
+            if is_real != expected {
+                if bad_rows < 3 {
+                    eprintln!("  [HADES DIAG] is_real mismatch at row {}: got {} expected {}", row, is_real, expected);
+                }
+                bad_rows += 1;
+            }
+        }
+        if bad_rows > 0 {
+            eprintln!("  [HADES DIAG] {} is_real mismatches out of {} rows", bad_rows, n_hades_padded);
+        } else {
+            eprintln!("  [HADES DIAG] is_real check OK ({} real, {} padded)", n_hades_real, n_hades_padded);
+        }
+        eprintln!("  [HADES DIAG] trace cols: {}, expected: {}", hades_trace.trace.len(), super::hades_air::N_HADES_TRACE_COLUMNS);
+        eprintln!("  [HADES DIAG] hades_log_size: {}, unified: {}, rows: {}/{}",
+            hades_log_size, unified_log_size, n_hades_real, n_hades_padded);
+    }
 
     // Verify chain constraints before proving (slim 48-column offsets)
     {
