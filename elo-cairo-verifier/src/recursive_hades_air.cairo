@@ -214,8 +214,271 @@ fn mds_row_at_point(
 }
 
 /// Convert a u32 to QM31 (embed in real component).
-fn qm31_from_u32(v: u32) -> QM31 {
+pub fn qm31_from_u32(v: u32) -> QM31 {
     let m = stwo_verifier_core::fields::m31::m31(v);
     let z = stwo_verifier_core::fields::m31::m31(0);
     stwo_verifier_core::fields::qm31::QM31Trait::from_fixed_array([m, z, z, z])
+}
+
+/// Evaluate all Hades constraints at the OOD point.
+///
+/// Reads 1225 columns from trace_vals starting at col_offset (= 48 for chain+hades).
+/// Returns an array of constraint quotients (422 total).
+///
+/// Column layout (1225 columns, matching Rust air.rs):
+///   state_before:    3 × 28 = 84
+///   sbox_input:      3 × 28 = 84
+///   cube_result:     3 × 28 = 84
+///   cube_sq:         3 × 28 = 84
+///   mul_witness:     3 × 2 × (54 + 28) = 492
+///   post_sbox:       3 × 28 = 84
+///   mds_result:      3 × 28 = 84
+///   mds_carries:     3 × 29 = 87
+///   mds_k:           3 × 1 = 3
+///   shifted_next:    3 × 28 = 84
+///   selectors:       5
+///   repack:          50
+///   TOTAL:           1225
+/// Returns the array of Hades constraint quotients (422 total).
+/// Called from recursive_air.cairo to append to the chain quotients
+/// before a single Horner accumulation.
+pub fn evaluate_hades_constraints_array(
+    trace_vals: stwo_verifier_core::ColumnSpan<Span<QM31>>,
+    col_offset: u32,
+) -> Array<QM31> {
+    use crate::recursive_air::extract_single_val;
+    let p_limbs = stark_prime_limbs();
+
+    let mut pos: u32 = col_offset;
+
+    // ── Read columns ────────────────────────────────────────────
+
+    // state_before: 3 × 28
+    let mut state_before: Array<Array<QM31>> = array![];
+    let mut elem: u32 = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut limbs: Array<QM31> = array![];
+        let mut j: u32 = 0;
+        loop {
+            if j >= 28 { break; }
+            limbs.append(extract_single_val(trace_vals, pos));
+            pos += 1; j += 1;
+        };
+        state_before.append(limbs);
+        elem += 1;
+    };
+
+    // sbox_input: 3 × 28
+    let mut sbox_input: Array<Array<QM31>> = array![];
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut limbs: Array<QM31> = array![];
+        let mut j: u32 = 0;
+        loop { if j >= 28 { break; } limbs.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+        sbox_input.append(limbs);
+        elem += 1;
+    };
+
+    // cube_result: 3 × 28
+    let mut cube_result: Array<Array<QM31>> = array![];
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut limbs: Array<QM31> = array![];
+        let mut j: u32 = 0;
+        loop { if j >= 28 { break; } limbs.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+        cube_result.append(limbs);
+        elem += 1;
+    };
+
+    // cube_sq: 3 × 28
+    let mut cube_sq: Array<Array<QM31>> = array![];
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut limbs: Array<QM31> = array![];
+        let mut j: u32 = 0;
+        loop { if j >= 28 { break; } limbs.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+        cube_sq.append(limbs);
+        elem += 1;
+    };
+
+    // mul_witness: 3 elements × 2 muls × (54 carries + 28 k_limbs)
+    let mut mul_carries: Array<Array<Array<QM31>>> = array![];  // [elem][mul_idx] → 54 carries
+    let mut mul_k: Array<Array<QM31>> = array![];               // [elem][mul_idx] → k (as 28 limbs, take first)
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut elem_carries: Array<Array<QM31>> = array![];
+        let mut elem_k: Array<QM31> = array![];
+        let mut mul_idx: u32 = 0;
+        loop {
+            if mul_idx >= 2 { break; }
+            // 54 carries
+            let mut carries: Array<QM31> = array![];
+            let mut j: u32 = 0;
+            loop { if j >= 54 { break; } carries.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+            elem_carries.append(carries);
+            // 28 k_limbs (only k_limbs[0] is used as the k value for verify_mul)
+            let k_val = extract_single_val(trace_vals, pos);
+            elem_k.append(k_val);
+            // Skip remaining 27 k limbs
+            pos += 28;
+            mul_idx += 1;
+        };
+        mul_carries.append(elem_carries);
+        mul_k.append(elem_k);
+        elem += 1;
+    };
+
+    // post_sbox: 3 × 28
+    let mut post_sbox: Array<Array<QM31>> = array![];
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut limbs: Array<QM31> = array![];
+        let mut j: u32 = 0;
+        loop { if j >= 28 { break; } limbs.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+        post_sbox.append(limbs);
+        elem += 1;
+    };
+
+    // mds_result: 3 × 28
+    let mut mds_result: Array<Array<QM31>> = array![];
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut limbs: Array<QM31> = array![];
+        let mut j: u32 = 0;
+        loop { if j >= 28 { break; } limbs.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+        mds_result.append(limbs);
+        elem += 1;
+    };
+
+    // mds_carries: 3 × 29
+    let mut mds_carries: Array<Array<QM31>> = array![];
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut carries: Array<QM31> = array![];
+        let mut j: u32 = 0;
+        loop { if j >= 29 { break; } carries.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+        mds_carries.append(carries);
+        elem += 1;
+    };
+
+    // mds_k: 3
+    let mut mds_k: Array<QM31> = array![];
+    elem = 0;
+    loop { if elem >= 3 { break; } mds_k.append(extract_single_val(trace_vals, pos)); pos += 1; elem += 1; };
+
+    // shifted_next_state: 3 × 28
+    let mut shifted_next: Array<Array<QM31>> = array![];
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let mut limbs: Array<QM31> = array![];
+        let mut j: u32 = 0;
+        loop { if j >= 28 { break; } limbs.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+        shifted_next.append(limbs);
+        elem += 1;
+    };
+
+    // Selectors
+    let is_full_round = extract_single_val(trace_vals, pos); pos += 1;
+    let is_real = extract_single_val(trace_vals, pos); pos += 1;
+    let is_chain_round = extract_single_val(trace_vals, pos); pos += 1;
+    // Skip boundary selectors + repack columns (consumed but not constrained here)
+    // _is_first_round, _is_last_round, repack (50 cols) — read to match Rust column count
+
+    // ── Evaluate constraints ────────────────────────────────────
+
+    let one: QM31 = QM31One::one();
+    let mut quotients: Array<QM31> = array![];
+
+    // Boolean selectors (2 constraints)
+    quotients.append(is_real * (is_real - one));
+    quotients.append(is_full_round * (is_full_round - one));
+
+    // S-box cube constraints: 3 elements × 56 constraints = 168
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        let q = cube_252_at_point(
+            sbox_input.at(elem).span(),
+            cube_sq.at(elem).span(),
+            cube_result.at(elem).span(),
+            *mul_k.at(elem * 2),         // k for x²
+            mul_carries.at(elem).at(0).span(),  // carries for x²
+            *mul_k.at(elem * 2 + 1),     // k for x³
+            mul_carries.at(elem).at(1).span(),  // carries for x³
+            p_limbs.span(),
+            is_real,
+        );
+        let mut i: u32 = 0;
+        loop { if i >= q.len() { break; } quotients.append(*q.at(i)); i += 1; };
+        elem += 1;
+    };
+
+    // Post-sbox linking: element 2 always cubed (28 constraints)
+    let mut j: u32 = 0;
+    loop {
+        if j >= 28 { break; }
+        quotients.append(*post_sbox.at(2).at(j) - *cube_result.at(2).at(j));
+        j += 1;
+    };
+
+    // Post-sbox interpolation: elements 0,1 (56 constraints)
+    elem = 0;
+    loop {
+        if elem >= 2 { break; }
+        j = 0;
+        loop {
+            if j >= 28 { break; }
+            let expected = is_full_round * *cube_result.at(elem).at(j)
+                + (one - is_full_round) * *sbox_input.at(elem).at(j);
+            quotients.append(*post_sbox.at(elem).at(j) - expected);
+            j += 1;
+        };
+        elem += 1;
+    };
+
+    // MDS constraints (84 constraints)
+    let mds_q = mds_at_point(
+        post_sbox.at(0).span(),
+        post_sbox.at(1).span(),
+        post_sbox.at(2).span(),
+        mds_result.at(0).span(),
+        mds_result.at(1).span(),
+        mds_result.at(2).span(),
+        mds_carries.at(0).span(),
+        mds_carries.at(1).span(),
+        mds_carries.at(2).span(),
+        *mds_k.at(0),
+        *mds_k.at(1),
+        *mds_k.at(2),
+        p_limbs.span(),
+        is_real,
+    );
+    let mut i: u32 = 0;
+    loop { if i >= mds_q.len() { break; } quotients.append(*mds_q.at(i)); i += 1; };
+
+    // Round transition: mds_result == shifted_next_state (84 constraints)
+    elem = 0;
+    loop {
+        if elem >= 3 { break; }
+        j = 0;
+        loop {
+            if j >= 28 { break; }
+            quotients.append(
+                is_chain_round * (*mds_result.at(elem).at(j) - *shifted_next.at(elem).at(j))
+            );
+            j += 1;
+        };
+        elem += 1;
+    };
+
+    quotients
 }

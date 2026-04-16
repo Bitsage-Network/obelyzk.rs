@@ -555,11 +555,17 @@ pub mod RecursiveVerifierContract {
                 i += 1;
             };
 
+            // Detect Hades mode: 4+ commitment trees means Hades + LogUp are active
+            // (preprocessed, trace+Hades, interaction, composition)
+            // Chain-only has 3 trees (preprocessed, trace, composition)
+            let hades_enabled = false; // TODO: detect from proof structure after CSP deser
+
             let air = RecursiveAir {
                 log_n_rows: proof_log_size,
                 n_real_rows: proof_n_real_rows,
                 initial_digest_limbs: initial_limbs,
                 final_digest_limbs: final_limbs,
+                hades_enabled,
             };
 
             // 5. Deserialize + verify

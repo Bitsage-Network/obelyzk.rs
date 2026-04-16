@@ -66,6 +66,8 @@ pub struct RecursiveAir {
     pub initial_digest_limbs: Array<QM31>,
     /// Expected final digest decomposed into 9 M31 limbs.
     pub final_digest_limbs: Array<QM31>,
+    /// When true, evaluates 1225 Hades columns after the 48 chain columns.
+    pub hades_enabled: bool,
 }
 
 impl RecursiveAirImpl of Air<RecursiveAir> {
@@ -77,8 +79,11 @@ impl RecursiveAirImpl of Air<RecursiveAir> {
         mask_values: TreeSpan<ColumnSpan<Span<QM31>>>,
         random_coeff: QM31,
     ) -> QM31 {
-        let [preprocessed_vals, trace_vals, _composition_vals]:
-            [ColumnSpan<Span<QM31>>; 3] = (*mask_values.try_into().unwrap()).unbox();
+        // Chain-only: 3 trees [preprocessed, trace, composition]
+        // Hades mode: 4 trees [preprocessed, trace+hades, interaction, composition]
+        let mask_span = *mask_values;
+        let preprocessed_vals: ColumnSpan<Span<QM31>> = *mask_span.at(0);
+        let trace_vals: ColumnSpan<Span<QM31>> = *mask_span.at(1);
 
         // Preprocessed selectors
         let is_first = extract_single_val(preprocessed_vals, 0);
@@ -209,7 +214,21 @@ impl RecursiveAirImpl of Air<RecursiveAir> {
             j += 1;
         };
 
-        // Accumulate using Horner's method
+        // If Hades enabled, append Hades constraint quotients to the same array.
+        // Hades columns start at offset 48 (after chain's 48 columns).
+        if *self.hades_enabled {
+            let hades_quotients = crate::recursive_hades_air::evaluate_hades_constraints_array(
+                trace_vals, TRACE_COLS,
+            );
+            let mut hi: u32 = 0;
+            loop {
+                if hi >= hades_quotients.len() { break; }
+                quotients.append(*hades_quotients.at(hi));
+                hi += 1;
+            };
+        }
+
+        // Accumulate ALL quotients (chain + Hades) using Horner's method
         let n_quotients = quotients.len();
         let mut acc: QM31 = QM31Zero::zero();
         let mut idx: u32 = 0;
@@ -220,15 +239,6 @@ impl RecursiveAirImpl of Air<RecursiveAir> {
         };
 
         acc
-        // let n_quotients = quotients.len();
-        // let mut acc: QM31 = QM31Zero::zero();
-        // let mut idx: u32 = 0;
-        // loop {
-        //     if idx >= n_quotients { break; }
-        //     acc = acc * random_coeff + *quotients.at(idx);
-        //     idx += 1;
-        // };
-        // acc
     }
 }
 
@@ -238,7 +248,7 @@ fn m31_to_qm31(v: M31) -> QM31 {
 }
 
 /// Extract a single QM31 value from the j-th column of a tree's mask values.
-fn extract_single_val(tree_vals: ColumnSpan<Span<QM31>>, col_idx: u32) -> QM31 {
+pub fn extract_single_val(tree_vals: ColumnSpan<Span<QM31>>, col_idx: u32) -> QM31 {
     let col = *tree_vals.at(col_idx);
     *col.at(0)
 }
