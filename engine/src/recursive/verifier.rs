@@ -50,7 +50,7 @@ pub fn verify_recursive(
             "test" => PcsConfig::default(),
             _ => PcsConfig {
                 pow_bits: 20,
-                fri_config: stwo::core::fri::FriConfig::new(0, 5, 28, 1),
+                fri_config: stwo::core::fri::FriConfig::new(0, 5, 20, 1),
                 lifting_log_size: None,
             },
         }
@@ -76,11 +76,8 @@ pub fn verify_recursive(
     // Set up channel and commitment scheme verifier
     let channel = &mut <Poseidon252MerkleChannel as MerkleChannel>::C::default();
 
-    // Mix PcsConfig into channel (must match prover's individual mix_u64 calls)
-    channel.mix_u64(pcs_config.pow_bits as u64);
-    channel.mix_u64(pcs_config.fri_config.log_blowup_factor as u64);
-    channel.mix_u64(pcs_config.fri_config.n_queries as u64);
-    channel.mix_u64(pcs_config.fri_config.log_last_layer_degree_bound as u64);
+    // Mix PcsConfig into channel (must match prover's config.mix_into() call)
+    pcs_config.mix_into(channel);
 
     // Mix public inputs into channel (must match prover's binding)
     channel.mix_felts(&[
@@ -195,6 +192,34 @@ mod tests {
     use crate::components::matmul::M31Matrix;
     use stwo::core::fields::cm31::CM31;
     use stwo::core::fields::qm31::QM31;
+
+    #[test]
+    fn test_poseidon_channel_config_mixing() {
+        use stwo::core::channel::Channel;
+        // Verify that config.mix_into() produces a DIFFERENT digest than manual mix_u64 calls.
+        // The Cairo contract uses mix_into(), so the prover must too.
+        let config = PcsConfig {
+            pow_bits: 20,
+            fri_config: stwo::core::fri::FriConfig::new(0, 5, 20, 1),
+            lifting_log_size: None,
+        };
+
+        let ch1 = &mut <Poseidon252MerkleChannel as MerkleChannel>::C::default();
+        config.mix_into(ch1);
+
+        let ch2 = &mut <Poseidon252MerkleChannel as MerkleChannel>::C::default();
+        ch2.mix_u64(20);
+        ch2.mix_u64(5);
+        ch2.mix_u64(28);
+        ch2.mix_u64(0);
+
+        eprintln!("config.mix_into digest: {:?}", ch1.digest());
+        eprintln!("manual mix_u64 digest:  {:?}", ch2.digest());
+        assert_ne!(
+            ch1.digest(), ch2.digest(),
+            "mix_into and manual mix_u64 MUST produce different digests"
+        );
+    }
 
     #[test]
     fn test_verify_recursive_roundtrip() {

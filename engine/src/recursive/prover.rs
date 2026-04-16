@@ -231,9 +231,10 @@ pub fn prove_recursive_with_policy(
             "test" => PcsConfig::default(), // 13 bits — unit tests only
             _ => PcsConfig {
                 pow_bits: 20,
-                // 160 bits: pow(20) + blowup(5)*queries(28) = 20+140 = 160
+                // 120 bits: pow(20) + blowup(5)*queries(20) = 20+100 = 120
+                // Reduced from 28 to 20 queries to fit Alchemy RPC 5000-felt limit
                 // log_last_layer_degree_bound=0 required by Cairo FRI verifier
-                fri_config: stwo::core::fri::FriConfig::new(0, 5, 28, 1),
+                fri_config: stwo::core::fri::FriConfig::new(0, 5, 20, 1),
                 lifting_log_size: None,
             },
         }
@@ -248,20 +249,13 @@ pub fn prove_recursive_with_policy(
     // Merkle commitments, matching what the Cairo verifier expects.
     let channel = &mut <Poseidon252MerkleChannel as MerkleChannel>::C::default();
     // Mix PcsConfig into channel BEFORE any tree commits.
-    // MUST use individual mix_u64 calls to match Cairo verifier's PcsConfig::mix_into
-    // (Cairo mixes 4 separate u64s; Rust's config.mix_into packs into a single QM31).
-    recursive_log!(
-        "  [Recursive] Channel after default: {:?}",
-        channel.digest()
-    );
-    channel.mix_u64(config.pow_bits as u64);
-    channel.mix_u64(config.fri_config.log_blowup_factor as u64);
-    channel.mix_u64(config.fri_config.n_queries as u64);
-    channel.mix_u64(config.fri_config.log_last_layer_degree_bound as u64);
-    recursive_log!(
-        "  [Recursive] Channel after PcsConfig: {:?}",
-        channel.digest()
-    );
+    // MUST use config.mix_into() to match Cairo verifier's PcsConfig::mix_into
+    // which packs fields into 2 QM31 values via mix_felts:
+    //   QM31(pow_bits, log_blowup, n_queries, log_last_layer)
+    //   QM31(fold_step, lifting_log_size.unwrap_or(0), 0, 0)
+    recursive_log!("  [Recursive] Channel after default: {:?}", channel.digest());
+    config.mix_into(channel);
+    recursive_log!("  [Recursive] Channel after PcsConfig: {:?}", channel.digest());
 
     // ── Bind public inputs to Fiat-Shamir channel ────────────────────
     // By mixing circuit_hash, io_commitment, weight_super_root, and
@@ -338,10 +332,7 @@ pub fn prove_recursive_with_policy(
         channel.mix_u64(u2);
         channel.mix_u64(u3);
     }
-    recursive_log!(
-        "  [Recursive] Channel after public inputs + Pass 1 digest: {:?}",
-        channel.digest()
-    );
+    recursive_log!("  [Recursive] Channel after public inputs: {:?}", channel.digest());
 
     // When Hades AIR is enabled, use the SAME domain for both components
     // to avoid STWO's SIMD mixed-size column evaluation issues.
@@ -397,10 +388,7 @@ pub fn prove_recursive_with_policy(
             simd_evals,
         ));
         tree_builder.commit(channel);
-        recursive_log!(
-            "  [Recursive] Channel after preprocessed commit: {:?}",
-            channel.digest()
-        );
+        recursive_log!("  [Recursive] Channel after preprocessed commit: {:?}", channel.digest());
     }
 
     // Tree 1: All execution traces (chain + Hades in same tree, mixed sizes)
@@ -514,6 +502,7 @@ pub fn prove_recursive_with_policy(
         }
 
         tree_builder.commit(channel);
+        recursive_log!("  [Recursive] Channel after trace commit: {:?}", channel.digest());
     }
 
     // ── Step 3c: LogUp interaction trace ─────────────────────────────
@@ -590,10 +579,7 @@ pub fn prove_recursive_with_policy(
         (None, SecureField::zero())
     };
 
-    recursive_log!(
-        "  [Recursive] Channel before prove(): {:?}",
-        channel.digest()
-    );
+    recursive_log!("  [Recursive] Channel before prove(): {:?}", channel.digest());
 
     // ── Step 4: Prove ────────────────────────────────────────────────
     eprintln!("  [Recursive] Step 4/5: Proving (STARK)...");
