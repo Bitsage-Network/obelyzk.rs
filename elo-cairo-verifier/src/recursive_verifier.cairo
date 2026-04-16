@@ -555,10 +555,24 @@ pub mod RecursiveVerifierContract {
                 i += 1;
             };
 
-            // Detect Hades mode: 4+ commitment trees means Hades + LogUp are active
-            // (preprocessed, trace+Hades, interaction, composition)
-            // Chain-only has 3 trees (preprocessed, trace, composition)
-            let hades_enabled = false; // TODO: detect from proof structure after CSP deser
+            // 5. Deserialize + verify
+            let csp: stwo_verifier_core::pcs::verifier::CommitmentSchemeProof =
+                Serde::deserialize(ref proof_span).expect('CSP_DESER');
+
+            let pcs_config = csp.config;
+            let log_blowup = pcs_config.fri_config.log_blowup_factor;
+
+            // Enforce minimum proof security level.
+            assert(pcs_config.pow_bits >= 10, 'pow_bits too low');
+            assert(log_blowup >= 1, 'log_blowup too low');
+            assert(pcs_config.fri_config.n_queries >= 3, 'n_queries too low');
+            let commitments_span = csp.commitments;
+            let n_commitments = commitments_span.len();
+
+            // Detect Hades mode from commitment count:
+            //   3 trees = chain-only (preprocessed, trace, composition)
+            //   4 trees = Hades+LogUp (preprocessed, trace+hades, interaction, composition)
+            let hades_enabled = n_commitments >= 4;
 
             let air = RecursiveAir {
                 log_n_rows: proof_log_size,
@@ -568,34 +582,22 @@ pub mod RecursiveVerifierContract {
                 hades_enabled,
             };
 
-            // 5. Deserialize + verify
-            let csp: stwo_verifier_core::pcs::verifier::CommitmentSchemeProof =
-                Serde::deserialize(ref proof_span).expect('CSP_DESER');
-
-            let pcs_config = csp.config;
-            let log_blowup = pcs_config.fri_config.log_blowup_factor;
-
-            // Enforce minimum proof security level.
-            // Without this, an attacker could submit a proof with 1-bit security.
-            // Minimum: pow_bits ≥ 10, log_blowup ≥ 1, n_queries ≥ 3 (≥ 13 bits total)
-            assert(pcs_config.pow_bits >= 10, 'pow_bits too low');
-            assert(log_blowup >= 1, 'log_blowup too low');
-            assert(pcs_config.fri_config.n_queries >= 3, 'n_queries too low');
-            let commitments_span = csp.commitments;
-
-            // 3 trees: preprocessed (0), trace (1), composition (2)
-            // No interaction tree (LogUp disabled for chain-only proof)
             let preprocessed_commitment: stwo_verifier_core::Hash = *commitments_span.at(0);
             let trace_commitment: stwo_verifier_core::Hash = *commitments_span.at(1);
-            let composition_commitment: stwo_verifier_core::Hash = *commitments_span.at(2);
+            // Composition is the LAST tree (index 2 for chain-only, index 3 for Hades)
+            let composition_commitment: stwo_verifier_core::Hash = *commitments_span.at(n_commitments - 1);
 
+            // Preprocessed sizes: 3 columns (chain-only) or 4 (with Hades preprocessed)
+            let n_preprocess: u32 = if hades_enabled { 4 } else { 3 };
             let mut preprocessed_sizes: Array<u32> = array![];
             i = 0;
-            loop { if i >= 3 { break; } preprocessed_sizes.append(proof_log_size); i += 1; };
+            loop { if i >= n_preprocess { break; } preprocessed_sizes.append(proof_log_size); i += 1; };
+
+            // Trace sizes: 48 (chain-only) or 1273 (48 chain + 1225 Hades)
+            let n_trace: u32 = if hades_enabled { 1273 } else { 48 };
             let mut trace_sizes: Array<u32> = array![];
             i = 0;
-            // Slim trace: 48 columns (9+9+9+9 data + 8 carry + 1 k + 3 selectors)
-            loop { if i >= 48 { break; } trace_sizes.append(proof_log_size); i += 1; };
+            loop { if i >= n_trace { break; } trace_sizes.append(proof_log_size); i += 1; };
 
             let mut channel = Default::default();
             pcs_config.mix_into(ref channel);
@@ -673,6 +675,21 @@ pub mod RecursiveVerifierContract {
             let mut commitment_scheme = stwo_verifier_core::pcs::verifier::CommitmentSchemeVerifierImpl::new();
             commitment_scheme.commit(preprocessed_commitment, preprocessed_sizes.span(), ref channel, log_blowup);
             commitment_scheme.commit(trace_commitment, trace_sizes.span(), ref channel, log_blowup);
+
+            // If Hades+LogUp enabled, draw LogUp random elements and commit interaction tree
+            if hades_enabled {
+                // LogUp relation draw: the Rust prover calls HadesPermRelation::draw(channel)
+                // which draws 1 secure felt from the channel. We must replicate this.
+                let _logup_alpha = channel.draw_secure_felt();
+
+                // Commit interaction tree (tree index 2)
+                let interaction_commitment: stwo_verifier_core::Hash = *commitments_span.at(2);
+                let mut interaction_sizes: Array<u32> = array![];
+                i = 0;
+                // LogUp interaction trace: 4 columns (QM31 decomposed cumulative sums)
+                loop { if i >= 4 { break; } interaction_sizes.append(proof_log_size); i += 1; };
+                commitment_scheme.commit(interaction_commitment, interaction_sizes.span(), ref channel, log_blowup);
+            }
 
             // 7. FULL cryptographic STARK verification — ALL checks:
             // - OODS: AIR constraint evaluation matches composition polynomial
