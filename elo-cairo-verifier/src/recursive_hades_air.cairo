@@ -58,22 +58,23 @@ pub fn stark_prime_limbs() -> Array<u32> {
 ///
 /// Parameters are QM31 evaluations at the OOD point.
 pub fn verify_mul_252_at_point(
-    a: Span<QM31>,        // 28 limbs
-    b: Span<QM31>,        // 28 limbs
-    c: Span<QM31>,        // 28 limbs
-    k: QM31,
-    carries: Span<QM31>,  // 27 carries
-    p_limbs: Span<u32>,   // 28 limbs of Stark prime
+    a: Span<QM31>,          // 28 limbs
+    b: Span<QM31>,          // 28 limbs
+    c: Span<QM31>,          // 28 limbs
+    k_limbs: Span<QM31>,    // 28 k limbs (full reduction coefficient)
+    carries: Span<QM31>,    // 54 carries (55 limbs → 54 inter-limb carries)
+    p_limbs: Span<u32>,     // 28 limbs of Stark prime
     is_active: QM31,
 ) -> Array<QM31> {
-    // Returns array of constraint quotients (28 total)
+    // Returns 55 constraint quotients
     let base: QM31 = qm31_from_u32(BASE_512);
     let zero: QM31 = QM31Zero::zero();
     let mut quotients: Array<QM31> = array![];
 
+    // Check all 55 limb positions: conv[j] - c[j] - kp[j] + carry_in = carry_out * 512
     let mut j: u32 = 0;
     loop {
-        if j >= 28 { break; }
+        if j >= 55 { break; }
 
         // Convolution: Σ a[i] * b[j-i]
         let mut conv: QM31 = QM31Zero::zero();
@@ -81,17 +82,30 @@ pub fn verify_mul_252_at_point(
         loop {
             if i > j { break; }
             if i < 28 && (j - i) < 28 {
-                conv = conv + *a.at(i) * *b.at(j - i);
+                conv = conv + *a[i] * *b[j - i];
             }
             i += 1;
         };
 
-        let p_j: QM31 = qm31_from_u32(*p_limbs.at(j));
-        let carry_in: QM31 = if j == 0 { zero } else { *carries.at(j - 1) };
-        let carry_out: QM31 = if j < 27 { *carries.at(j) } else { zero };
+        let c_j: QM31 = if j < 28 { *c[j] } else { zero };
 
-        let rhs = *c.at(j) + k * p_j + carry_out * base - carry_in;
-        quotients.append(is_active * (conv - rhs));
+        // kp convolution: Σ k_limbs[l] * p[j-l]
+        let mut kp_j: QM31 = QM31Zero::zero();
+        let mut l: u32 = 0;
+        loop {
+            if l > j { break; }
+            if l < 28 && (j - l) < 28 {
+                kp_j = kp_j + *k_limbs[l] * qm31_from_u32(*p_limbs[j - l]);
+            }
+            l += 1;
+        };
+
+        let carry_in: QM31 = if j == 0 { zero } else { *carries[j - 1] };
+        let carry_out: QM31 = if j < 54 { *carries[j] } else { zero };
+
+        let lhs = conv - c_j - kp_j + carry_in;
+        let rhs = carry_out * base;
+        quotients.append(is_active * (lhs - rhs));
 
         j += 1;
     };
@@ -104,32 +118,26 @@ pub fn cube_252_at_point(
     x: Span<QM31>,
     x_sq: Span<QM31>,
     x_cubed: Span<QM31>,
-    k_sq: QM31,
-    carries_sq: Span<QM31>,
-    k_cube: QM31,
-    carries_cube: Span<QM31>,
+    k_sq_limbs: Span<QM31>,     // 28 limbs
+    carries_sq: Span<QM31>,     // 54 carries
+    k_cube_limbs: Span<QM31>,   // 28 limbs
+    carries_cube: Span<QM31>,   // 54 carries
     p_limbs: Span<u32>,
     is_active: QM31,
 ) -> Array<QM31> {
     let mut quotients: Array<QM31> = array![];
 
-    // x * x = x_sq
-    let q1 = verify_mul_252_at_point(x, x, x_sq, k_sq, carries_sq, p_limbs, is_active);
+    // x * x = x_sq (55 constraints)
+    let q1 = verify_mul_252_at_point(x, x, x_sq, k_sq_limbs, carries_sq, p_limbs, is_active);
+    let q1s = q1.span();
     let mut i: u32 = 0;
-    loop {
-        if i >= q1.len() { break; }
-        quotients.append(*q1.at(i));
-        i += 1;
-    };
+    loop { if i >= q1s.len() { break; } quotients.append(*q1s[i]); i += 1; };
 
-    // x_sq * x = x_cubed
-    let q2 = verify_mul_252_at_point(x_sq, x, x_cubed, k_cube, carries_cube, p_limbs, is_active);
+    // x_sq * x = x_cubed (55 constraints)
+    let q2 = verify_mul_252_at_point(x_sq, x, x_cubed, k_cube_limbs, carries_cube, p_limbs, is_active);
+    let q2s = q2.span();
     i = 0;
-    loop {
-        if i >= q2.len() { break; }
-        quotients.append(*q2.at(i));
-        i += 1;
-    };
+    loop { if i >= q2s.len() { break; } quotients.append(*q2s[i]); i += 1; };
 
     quotients
 }
@@ -197,17 +205,21 @@ fn mds_row_at_point(
     ref quotients: Array<QM31>,
 ) {
     let zero: QM31 = QM31Zero::zero();
+    // 30 limb positions (28 data + 2 overflow for k*P spill)
     let mut j: u32 = 0;
     loop {
-        if j >= 28 { break; }
-        let p_j: QM31 = qm31_from_u32(*p_limbs.at(j));
+        if j >= 30 { break; }
+        let p_j: QM31 = if j < 28 { qm31_from_u32(*p_limbs.at(j)) } else { zero };
         let carry_in: QM31 = if j == 0 { zero } else { *carries.at(j - 1) };
-        let carry_out: QM31 = if j < 27 { *carries.at(j) } else { zero };
+        let carry_out: QM31 = if j < 29 { *carries.at(j) } else { zero };
 
-        let lhs = *coeffs.at(0) * *a.at(j)
-            + *coeffs.at(1) * *b.at(j)
-            + *coeffs.at(2) * *c.at(j);
-        let rhs = *out.at(j) + k * p_j + carry_out * base - carry_in;
+        let a_j: QM31 = if j < 28 { *a.at(j) } else { zero };
+        let b_j: QM31 = if j < 28 { *b.at(j) } else { zero };
+        let c_j: QM31 = if j < 28 { *c.at(j) } else { zero };
+        let out_j: QM31 = if j < 28 { *out.at(j) } else { zero };
+
+        let lhs = *coeffs.at(0) * a_j + *coeffs.at(1) * b_j + *coeffs.at(2) * c_j;
+        let rhs = out_j + k * p_j + carry_out * base - carry_in;
         quotients.append(is_active * (lhs - rhs));
         j += 1;
     };
@@ -306,12 +318,12 @@ pub fn evaluate_hades_constraints_array(
 
     // mul_witness: 3 elements × 2 muls × (54 carries + 28 k_limbs)
     let mut mul_carries: Array<Array<Array<QM31>>> = array![];  // [elem][mul_idx] → 54 carries
-    let mut mul_k: Array<Array<QM31>> = array![];               // [elem][mul_idx] → k (as 28 limbs, take first)
+    let mut mul_k_limbs: Array<Array<Array<QM31>>> = array![];  // [elem][mul_idx] → 28 k limbs
     elem = 0;
     loop {
         if elem >= 3 { break; }
         let mut elem_carries: Array<Array<QM31>> = array![];
-        let mut elem_k: Array<QM31> = array![];
+        let mut elem_k: Array<Array<QM31>> = array![];
         let mut mul_idx: u32 = 0;
         loop {
             if mul_idx >= 2 { break; }
@@ -320,15 +332,15 @@ pub fn evaluate_hades_constraints_array(
             let mut j: u32 = 0;
             loop { if j >= 54 { break; } carries.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
             elem_carries.append(carries);
-            // 28 k_limbs (only k_limbs[0] is used as the k value for verify_mul)
-            let k_val = extract_single_val(trace_vals, pos);
-            elem_k.append(k_val);
-            // Skip remaining 27 k limbs
-            pos += 28;
+            // 28 k_limbs (full reduction coefficient)
+            let mut k_vals: Array<QM31> = array![];
+            j = 0;
+            loop { if j >= 28 { break; } k_vals.append(extract_single_val(trace_vals, pos)); pos += 1; j += 1; };
+            elem_k.append(k_vals);
             mul_idx += 1;
         };
         mul_carries.append(elem_carries);
-        mul_k.append(elem_k);
+        mul_k_limbs.append(elem_k);
         elem += 1;
     };
 
@@ -405,7 +417,7 @@ pub fn evaluate_hades_constraints_array(
     let sbox_s = @sbox_input;
     let csq_s = @cube_sq;
     let cres_s = @cube_result;
-    let mk_s = @mul_k;
+    let mkl_s = @mul_k_limbs;
     let mc_s = @mul_carries;
     elem = 0;
     loop {
@@ -413,14 +425,14 @@ pub fn evaluate_hades_constraints_array(
         let si_span: Span<QM31> = sbox_s.at(elem).span();
         let sq_span: Span<QM31> = csq_s.at(elem).span();
         let cr_span: Span<QM31> = cres_s.at(elem).span();
-        let k_sq_val: QM31 = *mk_s.at(elem).at(0);
-        let k_cu_val: QM31 = *mk_s.at(elem).at(1);
-        let carries_sq: Span<QM31> = mc_s.at(elem).at(0).span();
-        let carries_cu: Span<QM31> = mc_s.at(elem).at(1).span();
+        let k_sq_span: Span<QM31> = mkl_s.at(elem).at(0).span();  // 28 k limbs for x²
+        let k_cu_span: Span<QM31> = mkl_s.at(elem).at(1).span();  // 28 k limbs for x³
+        let carries_sq: Span<QM31> = mc_s.at(elem).at(0).span();   // 54 carries
+        let carries_cu: Span<QM31> = mc_s.at(elem).at(1).span();   // 54 carries
         let q = cube_252_at_point(
             si_span, sq_span, cr_span,
-            k_sq_val, carries_sq,
-            k_cu_val, carries_cu,
+            k_sq_span, carries_sq,
+            k_cu_span, carries_cu,
             p_limbs.span(), is_real,
         );
         let q_span = q.span();

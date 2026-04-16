@@ -590,8 +590,8 @@ pub mod RecursiveVerifierContract {
             // Composition is the LAST tree (index 2 for chain-only, index 3 for Hades)
             let composition_commitment: stwo_verifier_core::Hash = *commitments_span.at(n_commitments - 1);
 
-            // Preprocessed sizes: 3 columns (chain-only) or 4 (with Hades preprocessed)
-            let n_preprocess: u32 = if hades_enabled { 4 } else { 3 };
+            // Preprocessed sizes: always 3 columns (is_first, is_last, is_chain)
+            let n_preprocess: u32 = 3;
             let mut preprocessed_sizes: Array<u32> = array![];
             i = 0;
             loop { if i >= n_preprocess { break; } preprocessed_sizes.append(proof_log_size); i += 1; };
