@@ -678,9 +678,9 @@ pub mod RecursiveVerifierContract {
 
             // If Hades+LogUp enabled, draw LogUp random elements and commit interaction tree
             if hades_enabled {
-                // LogUp relation draw: the Rust prover calls HadesPermRelation::draw(channel)
-                // which draws 1 secure felt from the channel. We must replicate this.
-                let _logup_alpha = channel.draw_secure_felt();
+                // LogUp relation draw: the Rust prover calls LookupElements::draw(channel)
+                // which calls channel.draw_secure_felts(2) → draws z and alpha.
+                let _logup_elements = channel.draw_secure_felts(2);
 
                 // Commit interaction tree (tree index 2)
                 let interaction_commitment: stwo_verifier_core::Hash = *commitments_span.at(2);
