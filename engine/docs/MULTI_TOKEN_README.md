@@ -42,18 +42,19 @@ If any step is reordered, skipped, or has a tampered KV commitment, the
 on-chain verification reverts at the continuity check (or earlier, at the
 STARK's Fiat-Shamir verification — the kv commitments are channel-bound).
 
-## Scope notes (read before reproducing)
+## Scope notes
 
-- **Path B / synthetic kv binding (current)**: each step's `kv_cache_commitment`
-  is `Poseidon(prev_kv, hash_of_input_token)`. This is a real cryptographic
-  chain over input continuity, but it is *not* a chain over the actual decode-
-  step KV cache state. The full forward-pass prover is used at every step
-  (no KV-cache amortization).
-- **Path A / real decode KV-cache binding (future work)**: the decode-step
-  recursive prover hits a pre-existing RMS² sumcheck mismatch in the recursive
-  witness's GKR verifier replay. Once that's fixed, swap in
-  `prove_model_pure_gkr_decode_step_incremental` and the `kv_cache_commitment`
-  becomes the real Merkle-rooted KV cache state. Architecture is unchanged.
+**Path A / real decode-step KV-cache binding** (current): each step's
+`kv_cache_commitment` is the actual incremental KV-cache Merkle commitment
+from `prove_model_pure_gkr_decode_step_incremental`. The recursive witness
+correctly replays the decode prover's channel-mixed kv commitments
+(witness.rs:446 — fix landed May 3). On-chain validated Session 7
+(`0x58cca48a5ae40cf1...`).
+
+**Path B (deprecated)**: earlier Sessions 3+4 used a synthetic
+`Poseidon(prev_kv, hash_of_input_token)` chain because of the now-fixed
+witness seeding bug. Those sessions remain on-chain as part of the demo
+trail, but new runs use Path A.
 
 ## Required env
 

@@ -7743,86 +7743,28 @@ fn run_decode_mode(
     // When cli.recursive is false, the legacy minimal JSON output is preserved
     // (no manifest, no recursive proofs) — this keeps single-pass + non-recursive
     // decode flows untouched.
-    // SCOPE NOTE (path B): the strict-policy decode-step recursive proving path
-    // hits a pre-existing RMS² sumcheck divergence (recursive witness's GKR
-    // verifier replay rejects the decode prover's RMS² polynomials at layer 9,
-    // round 1). Until that's debugged, when `cli.recursive` is set we use the
-    // proven-working REGULAR (non-decode) prover and synthesize input-hash
-    // continuity commitments to demonstrate the on-chain session contract end
-    // to end. The recursive STARK still binds the synthesized kv commitments
-    // via Fiat-Shamir, so the chain is cryptographically unforgeable —
-    // tampering with any step's prev/curr kv invalidates the proof.
-    //
-    // For non-recursive `--decode`, the legacy incremental decode prover is
-    // preserved (it produces real KV-cache state propagation).
-    let mut chain_prev_kv: starknet_ff::FieldElement = initial_kv_commitment_for_manifest;
+    // Path A (real decode-step KV binding) — using the incremental decode
+    // prover that maintains an actual KV cache and binds new_kv +
+    // prev_kv_commitment into the GKR Fiat-Shamir channel. The recursive
+    // witness (witness.rs) mirrors this seeding, so the recursive STARK
+    // verifies cleanly.
     for step in 0..cli.decode_steps {
         let token_input = generate_random_input(1, decode_model.input_shape.1);
         let t_step = Instant::now();
 
-        let (proof, new_kv_commit) = if cli.recursive {
-            // Path B: regular prover; synthesize continuity commitments.
-            let proof = obelyzk::aggregation::prove_model_pure_gkr_auto_with_cache(
-                &decode_model.graph,
-                &token_input,
-                &decode_model.weights,
-                weight_cache,
-                Some(resolved_policy),
-            )
-            .unwrap_or_else(|e| {
-                eprintln!("Step {} regular prove failed: {e}", step);
-                process::exit(1);
-            });
-
-            // Synthetic kv-cache continuity hash: chain step inputs cryptographically.
-            //   step 0:   prev_kv = initial_kv_commitment_for_manifest (session anchor)
-            //   step i+1: prev_kv = step i's curr_kv
-            //   curr_kv  = Poseidon(prev_kv, hash_of_input_token)
-            // The recursive prover reads these from gkr_proof.{prev,_}kv_cache_commitment
-            // (we mutate both fields below) and binds them to Fiat-Shamir.
-            let token_hash = {
-                let mut h = obelyzk::crypto::poseidon_channel::PoseidonChannel::new();
-                h.mix_u64(step as u64);
-                for v in token_input.data.iter() {
-                    h.mix_u64(v.0 as u64);
-                }
-                h.digest()
-            };
-            let new_kv = {
-                let mut h = obelyzk::crypto::poseidon_channel::PoseidonChannel::new();
-                h.mix_felt(chain_prev_kv);
-                h.mix_felt(token_hash);
-                h.digest()
-            };
-
-            // Mutate the GKR proof's kv-cache commitment fields. The recursive
-            // prover's witness::generate_witness_with_policy reads these,
-            // populates RecursivePublicInputs, and mixes them into the
-            // recursive STARK's Fiat-Shamir channel. Tampering after this
-            // point invalidates the recursive proof.
-            let mut proof = proof;
-            if let Some(g) = proof.gkr_proof.as_mut() {
-                g.prev_kv_cache_commitment = Some(chain_prev_kv);
-                g.kv_cache_commitment = Some(new_kv);
-            }
-            chain_prev_kv = new_kv;
-            (proof, new_kv)
-        } else {
-            // Legacy: real decode prover (no recursive composition).
-            prove_model_pure_gkr_decode_step_incremental(
-                &decode_model.graph,
-                &token_input,
-                &decode_model.weights,
-                &mut kv_cache,
-                &mut kv_commitment,
-                weight_cache,
-                Some(resolved_policy),
-            )
-            .unwrap_or_else(|e| {
-                eprintln!("Decode step {} failed: {e}", step);
-                process::exit(1);
-            })
-        };
+        let (proof, new_kv_commit) = prove_model_pure_gkr_decode_step_incremental(
+            &decode_model.graph,
+            &token_input,
+            &decode_model.weights,
+            &mut kv_cache,
+            &mut kv_commitment,
+            weight_cache,
+            Some(resolved_policy),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Decode step {} failed: {e}", step);
+            process::exit(1);
+        });
 
         let prove_elapsed = t_step.elapsed();
         eprintln!(
