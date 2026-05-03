@@ -9,6 +9,23 @@ verifier deployed at:
 - **Network**: Starknet Sepolia
 - **Branch**: `feat/multi-token-hades-trustless` on `Bitsage-Network/obelyzk.rs`
 
+## Live demo on-chain (May 3 2026)
+
+**Session 4 — Llama-3.2-1B (16 layers), 3 decode steps, 100-bit FRI strict policy**:
+
+| Step | Tx |
+|---|---|
+| Register model | [`0x425c73c1...`](https://sepolia.starkscan.co/tx/0x425c73c1fd23bd88262ec75a09e79fb1a8f40bcba918b4a10251d41a568dff1) |
+| Start session | [`0x6ff88242...`](https://sepolia.starkscan.co/tx/0x6ff88242f36fa50d821b5bc755e50ab02a50f915c9edda0bed321d2ac79dfef) |
+| Step 0 | [`0x5eb85b82...`](https://sepolia.starkscan.co/tx/0x5eb85b826d44ad3b12d83e281c78471362c1953688bb9e522592d726069fa34) |
+| Step 1 | [`0x6a88a2e4...`](https://sepolia.starkscan.co/tx/0x6a88a2e4f33253dde26ae8436c996f4634ab4ee2aa59ee915d6b9083b930552) |
+| Step 2 | [`0x303ea3d2...`](https://sepolia.starkscan.co/tx/0x303ea3d27ba5ed41dea39701983bb70f48f5e32b5f9b4e8594f18c82b9c0575) |
+| Finalize | [`0x4cb0fe57...`](https://sepolia.starkscan.co/tx/0x4cb0fe5726edc43e816d0a95fe1058870f6d03ba3589d023ba16b0447497c28) |
+
+Each step proof: ~4,690 felts in single TX. Total prove time on M1 CPU: 3h 18min.
+Total Sepolia STRK fees: ~6 STRK. Hades Phase A aggregate hash registered:
+`0x61d98230ea7dd05038b45b8a41406c3b8d62583dbba23f204c948221bcde02`.
+
 ## What this demonstrates
 
 Each forward pass generates one recursive STARK (~3-5K felts) submitted in a
